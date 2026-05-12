@@ -111,6 +111,25 @@ class DataFrameTableModel(QAbstractTableModel):
         self.endResetModel()
         return len(valid_rows)
 
+    def delete_columns(self, columns: list[int]) -> list[str]:
+        """Delete column positions from the current dataset and return removed names."""
+        if self._dataset is None:
+            return []
+
+        frame = self._dataset.frame
+        valid_columns = sorted({column for column in columns if 0 <= column < len(frame.columns)})
+        if not valid_columns:
+            return []
+
+        deleted_names = [str(frame.columns[column]) for column in valid_columns]
+
+        self.beginResetModel()
+        frame.drop(columns=frame.columns[valid_columns], inplace=True)
+        for column_name in deleted_names:
+            self._dataset.formulas.pop(column_name, None)
+        self.endResetModel()
+        return deleted_names
+
     def add_empty_column(self, column_name: str) -> str:
         """Add an empty column to the current dataset and return its final unique name."""
         if self._dataset is None:

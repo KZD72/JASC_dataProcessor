@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -35,11 +36,35 @@ class PlotSeries:
 
 
 @dataclass(frozen=True, slots=True)
+class PlotLocator:
+    """Marker request for an interpolated Y value on a plotted series."""
+
+    series_index: int
+    x_value: float
+    marker: str = "o"
+    size: float = 70.0
+    color: str = "tab:red"
+
+
+@dataclass(frozen=True, slots=True)
+class LocatedPoint:
+    """Interpolated point calculated from a plot locator."""
+
+    locator_index: int
+    series_index: int
+    series_label: str
+    x_value: float
+    y_value: float
+    y_axis: str
+
+
+@dataclass(frozen=True, slots=True)
 class PlotResult:
     """Summary of a completed plot render."""
 
     plotted_count: int
     skipped_messages: list[str]
+    located_points: list[LocatedPoint]
 
 
 class PlotCanvas(QWidget):
@@ -74,9 +99,7 @@ class PlotCanvas(QWidget):
         y_limits: tuple[float | None, float | None] = (None, None),
         right_y_limits: tuple[float | None, float | None] = (None, None),
         grid_enabled: bool = True,
-        vertical_guides: list[float] | None = None,
-        y_guides: list[float] | None = None,
-        right_y_guides: list[float] | None = None,
+        locators: list[PlotLocator] | None = None,
         figure_width: float = 7.0,
         figure_height: float = 4.8,
     ) -> PlotResult:
@@ -86,12 +109,15 @@ class PlotCanvas(QWidget):
         self.axes.clear()
 
         skipped_messages: list[str] = []
+        located_points: list[LocatedPoint] = []
         plotted_count = 0
-        uses_right_axis = any(series.y_axis == "right" for series in series_list) or bool(right_y_guides)
+        uses_right_axis = any(series.y_axis == "right" for series in series_list)
         if uses_right_axis:
             self.right_axes = self.axes.twinx()
 
-        for series in series_list:
+        plotted_series_values: dict[int, tuple[pd.Series, pd.Series, PlotSeries]] = {}
+
+        for series_index, series in enumerate(series_list):
             series_y_scale = right_y_scale if series.y_axis == "right" else y_scale
             try:
                 x_values, y_values = self._series_values(
@@ -118,6 +144,7 @@ class PlotCanvas(QWidget):
 
             target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
             target_axes.plot(x_values, y_values, **plot_kwargs)
+            plotted_series_values[series_index] = (x_values, y_values, series)
             plotted_count += 1
 
         self.axes.set_title(title)
@@ -139,11 +166,11 @@ class PlotCanvas(QWidget):
                 self._apply_limits(self.right_axes, "y", right_y_limits, right_y_scale, "Right Y")
             )
 
-        self._draw_guides(
-            vertical_guides=vertical_guides or [],
-            y_guides=y_guides or [],
-            right_y_guides=right_y_guides or [],
+        locator_messages, located_points = self._draw_locators(
+            locators=locators or [],
+            plotted_series_values=plotted_series_values,
         )
+        skipped_messages.extend(locator_messages)
 
         if plotted_count:
             self._draw_legend()
@@ -151,7 +178,11 @@ class PlotCanvas(QWidget):
             self._draw_empty_state(clear_axes=False)
 
         self.canvas.draw_idle()
-        return PlotResult(plotted_count=plotted_count, skipped_messages=skipped_messages)
+        return PlotResult(
+            plotted_count=plotted_count,
+            skipped_messages=skipped_messages,
+            located_points=located_points,
+        )
 
     def clear_plot(self) -> None:
         """Clear the plot surface."""
@@ -250,30 +281,70 @@ class PlotCanvas(QWidget):
             axes.set_ylim(bottom=lower, top=upper)
         return []
 
-    def _draw_guides(
+    def _draw_locators(
         self,
-        vertical_guides: list[float],
-        y_guides: list[float],
-        right_y_guides: list[float],
-    ) -> None:
-        for value in vertical_guides:
-            self.axes.axvline(value, color="0.45", linestyle="--", linewidth=1.0, alpha=0.75)
+        locators: list[PlotLocator],
+        plotted_series_values: dict[int, tuple[pd.Series, pd.Series, PlotSeries]],
+    ) -> tuple[list[str], list[LocatedPoint]]:
+        messages: list[str] = []
+        located_points: list[LocatedPoint] = []
 
-        for value in y_guides:
-            self.axes.axhline(value, color="0.45", linestyle="--", linewidth=1.0, alpha=0.75)
+        for locator_index, locator in enumerate(locators):
+            series_values = plotted_series_values.get(locator.series_index)
+            if series_values is None:
+                messages.append(f"Locator skipped: series {locator.series_index + 1} is not plotted.")
+                continue
 
-        if right_y_guides and self.right_axes is None:
-            self.right_axes = self.axes.twinx()
+            x_values, y_values, series = series_values
+            try:
+                y_value = self._interpolate_y(x_values, y_values, locator.x_value)
+            except ValueError as exc:
+                messages.append(f"{series.label}: {exc}")
+                continue
 
-        if self.right_axes is not None:
-            for value in right_y_guides:
-                self.right_axes.axhline(
-                    value,
-                    color="tab:red",
-                    linestyle="--",
-                    linewidth=1.0,
-                    alpha=0.65,
+            target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
+            target_axes.scatter(
+                [locator.x_value],
+                [y_value],
+                marker=locator.marker,
+                s=locator.size,
+                color=locator.color,
+                edgecolors="black",
+                linewidths=0.7,
+                zorder=5,
+                label=f"{series.label} @ x={locator.x_value:g}",
+            )
+            located_points.append(
+                LocatedPoint(
+                    locator_index=locator_index,
+                    series_index=locator.series_index,
+                    series_label=series.label,
+                    x_value=locator.x_value,
+                    y_value=y_value,
+                    y_axis=series.y_axis,
                 )
+            )
+
+        return messages, located_points
+
+    def _interpolate_y(self, x_values: pd.Series, y_values: pd.Series, x_value: float) -> float:
+        points = pd.DataFrame({"x": x_values.to_numpy(), "y": y_values.to_numpy()}).dropna()
+        if len(points) < 2:
+            raise ValueError("locator needs at least two numeric points for interpolation")
+
+        points = points.groupby("x", as_index=False)["y"].mean().sort_values("x")
+        unique_x = points["x"].to_numpy(dtype=float)
+        unique_y = points["y"].to_numpy(dtype=float)
+
+        if len(unique_x) < 2:
+            raise ValueError("locator needs at least two distinct X values")
+
+        x_min = float(unique_x[0])
+        x_max = float(unique_x[-1])
+        if x_value < x_min or x_value > x_max:
+            raise ValueError(f"locator x={x_value:g} is outside the data range [{x_min:g}, {x_max:g}]")
+
+        return float(np.interp(x_value, unique_x, unique_y))
 
     def _draw_legend(self) -> None:
         handles, labels = self.axes.get_legend_handles_labels()

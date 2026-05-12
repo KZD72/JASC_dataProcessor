@@ -7,7 +7,7 @@
 ## 1. Project State
 - **Current Version**: 0.1.0
 - **Last Updated**: 2026-05-12
-- **Current Phase**: Phase 2 (Plotting & Visualization)
+- **Current Phase**: Phase 3 (Basic Math & Signal Processing)
 
 ## 2. Completed Tasks
 - [x] Initial project definition, tech stack selection, and requirements gathering.
@@ -42,10 +42,33 @@
 - [x] Added linear/log scale controls for X, left Y, and right Y axes.
 - [x] Added secondary right Y axis support with per-series axis assignment.
 - [x] Added optional min/max plot ranges for X, left Y, and right Y axes.
-- [x] Added plot guide/reference lines for X, left Y, and right Y axes using comma-separated numeric values.
 - [x] Added a plot grid toggle.
+- [x] Reorganized the plot lateral panel into tabs (Series, Axes, Locator) to improve navigation and layout.
+- [x] Replaced the Guides tab with a Locator tab for interpolating Y at a user-provided X on a queued series.
+- [x] Added locator marker customization for shape, size, and color.
+- [x] Locator markers are drawn on the correct left/right Y axis and the computed Y values are shown in the locator list.
+- [x] Reworked the main GUI layout so workspace datasheets and data-ingestion actions live together in the left sidebar.
+- [x] Moved Manual Entry out of the main work tabs and into a sidebar Data Input tab next to Import.
+- [x] Removed the top-toolbar Import action so the primary visible import path is next to the workspace list.
+- [x] Kept the central work area focused on Data Editor and Plot tabs.
+- [x] Added `math_engine/calculus.py` for Phase 3 derivative, integration, FFT, and inverse FFT operations.
+- [x] Added derivative methods: NumPy gradient, forward difference, backward difference, central difference, and Savitzky-Golay.
+- [x] Added integration methods: cumulative trapezoid, cumulative Simpson, left rectangle, right rectangle, and midpoint rectangle.
+- [x] Added an integration initial value/constant so integrated derivative data can be offset back to the original signal level.
+- [x] Added FFT result sheet generation with selectable window methods: rectangular, Hann, Hamming, Blackman, Bartlett, and flat top.
+- [x] Added inverse FFT result sheet generation from real and optional imaginary spectrum columns.
+- [x] Added Analysis menu actions and Data Editor buttons for Derivative, Integral, FFT, and iFFT.
+- [x] Added Phase 3 operation dialogs for column/method/window/result-name selection.
+- [x] Added a Data Editor button and Edit menu action to delete selected columns.
+- [x] Added `models/fit_functions.py` with a reusable analytical fit-model registry for Phase 4.
+- [x] Added `math_engine/curve_fitting.py` to connect registered models to `scipy.optimize.curve_fit`.
+- [x] Added curve-fitting method selection for Levenberg-Marquardt, Trust Region Reflective, and Dogbox.
+- [x] Added a Curve Fit dialog with X/Y column selection, model selection, initial-parameter entry, fit-point count, and result-sheet naming.
+- [x] Added a full fit report dialog with fitted parameters, standard errors, covariance matrix, R^2, adjusted R^2, RMSE, MAE, and residual statistics.
+- [x] Curve fitting now creates a new workspace result sheet and immediately plots raw data against the fitted curve.
+- [x] Fixed cross-dataset plot-series labels so labels no longer fall through when X and Y come from different sheets.
 - [x] Ran smoke checks:
-  - `python -m py_compile main.py ui/main_window.py ui/plot_canvas.py ui/dialogs.py ui/data_table.py ui/dataframe_model.py core/workspace.py core/file_io.py core/operations.py`
+  - `python -m py_compile main.py ui/main_window.py ui/plot_canvas.py ui/dialogs.py ui/data_table.py ui/dataframe_model.py core/workspace.py core/file_io.py core/operations.py math_engine/__init__.py math_engine/calculus.py`
   - Core CSV import/workspace smoke test.
   - Qt offscreen `MainWindow` instantiation smoke test.
   - Qt offscreen manual-entry clipboard paste smoke test.
@@ -57,19 +80,33 @@
   - Expanded NumPy/SciPy formula namespace smoke test.
   - Matplotlib plot canvas smoke test.
   - Main-window plot tab/series smoke test.
-  - Advanced plot canvas smoke test for log scales, right axis, ranges, and guide lines.
+  - Advanced plot canvas smoke test for log scales, right axis, and ranges.
   - Main-window advanced plot workflow smoke test.
+  - Plot locator canvas interpolation smoke test.
+  - Main-window plot locator workflow smoke test.
+  - Sidebar data-input layout relocation smoke test.
+  - Phase 3 math engine smoke test.
+  - Phase 3 dialog smoke test.
+  - Phase 3 main-window action smoke test.
+  - Phase 3 handler smoke test for derivative and FFT.
+  - Integral initial value recovery smoke test.
+  - Integral handler initial value smoke test.
+  - Phase 4 curve-fitting engine smoke test.
+  - Phase 4 fit dialog/report smoke test.
+  - Phase 4 main-window fit handler smoke test.
+  - DataFrame model selected-column deletion smoke test.
+  - Main-window selected-column deletion smoke test.
 
 ## 3. Active Bugs / Known Issues
 - [ ] No application bugs found in smoke testing.
 - [ ] `git` is not available in the current shell, so worktree status could not be checked.
 
 ## 4. Next Steps for Current/New Session (To-Do)
-1. Run `python main.py` in a normal desktop session and manually test plotting one series, multiple series, columns from different datasets, log scales, right-axis series, ranges, and guide lines.
-2. Add richer plot controls such as scatter-only mode, legend toggle/location, and per-series labels.
-3. Add workspace management actions such as rename/remove dataset.
-4. Consider adding copy/paste support to the main workspace data editor, matching the manual-entry table.
-5. Once Phase 2 plotting is manually verified, begin Phase 3 data analysis operations such as derivative, integral, FFT, and iFFT.
+1. Run `python main.py` in a normal desktop session and manually test derivative, integral, FFT, iFFT, selected-column deletion, and curve fitting on real datasets.
+2. Add Phase 4 refinements: parameter bounds, fixed/free parameter controls, weighted fits, and optional confidence-band plotting.
+3. Add optional "plot result immediately" shortcuts for Phase 3 outputs.
+4. Add richer plot controls such as scatter-only mode, legend toggle/location, and per-series labels.
+5. Add workspace management actions such as rename/remove dataset.
 
 ## 5. Architectural Context Notes
 - File parsing lives in `core/file_io.py`; Qt file selection and dialogs live in the UI layer.
@@ -88,4 +125,13 @@
 - Cross-dataset plots currently align X/Y data by row order and truncate to the shorter column length before dropping non-numeric/blank points.
 - Right-axis plotting is controlled per queued series; moving an already queued series currently means removing it and adding it again with the desired axis.
 - Plot ranges are optional blank min/max fields; blank entries leave that side auto-scaled.
-- Plot guide lines are comma-separated numeric values and are drawn as dashed reference lines.
+- Plot locators perform piecewise linear interpolation on the plotted numeric data after X/Y log-scale filtering and mark the computed point on the correct axis.
+- Locator X values outside the plotted series X domain are skipped with a status warning rather than extrapolated.
+- Main central tabs are now reserved for work surfaces (`Data Editor`, `Plot`); data creation/import lives in the left workspace sidebar.
+- Phase 3 derivative/integral operations save results as new columns in the selected dataset.
+- Cumulative integration starts from the user-selected initial value. Use the original first Y value as the initial value when integrating a derivative to reconstruct the original curve.
+- Phase 3 FFT/iFFT operations save results as new workspace datasets because their output shape/columns differ from the source sheet.
+- Curve fitting is implemented as the first Phase 4 pass, with model/method selection, fitted-curve datasets, immediate overlay plotting, and full text reports.
+- Phase 4 curve fitting saves fitted curve points as a new workspace dataset with `fit_x` and `fit_y` columns.
+- Running a fit replaces the current plot queue with the source data and fitted curve so the overlay is visible immediately.
+- Fit initial-parameter text accepts comma, semicolon, or whitespace-separated numbers; leaving it blank uses automatic guesses based on the selected data.

@@ -12,11 +12,16 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
+    QSpinBox,
     QVBoxLayout,
 )
 
 from core.file_io import ImportOptions
+from math_engine.curve_fitting import FIT_METHODS
+from math_engine.calculus import DERIVATIVE_METHODS, INTEGRATION_METHODS, WINDOW_METHODS
+from models.fit_functions import available_fit_models, get_fit_model
 
 
 class ImportOptionsDialog(QDialog):
@@ -185,3 +190,310 @@ class ColumnExpressionDialog(QDialog):
         if force or current_formula == self._last_loaded_formula:
             self._expression_edit.clear()
         self._last_loaded_formula = ""
+
+
+class ColumnMathDialog(QDialog):
+    """Collect settings for derivative or integral column operations."""
+
+    def __init__(
+        self,
+        operation_name: str,
+        column_names: list[str],
+        methods: dict[str, str],
+        default_target: str,
+        include_initial_value: bool = False,
+        parent: object | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(operation_name)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        self._x_column_combo = QComboBox()
+        self._x_column_combo.addItems(column_names)
+
+        self._y_column_combo = QComboBox()
+        self._y_column_combo.addItems(column_names)
+        if len(column_names) > 1:
+            self._y_column_combo.setCurrentIndex(1)
+
+        self._method_combo = QComboBox()
+        for method_key, method_label in methods.items():
+            self._method_combo.addItem(method_label, method_key)
+
+        self._target_edit = QLineEdit(default_target)
+        self._initial_value_edit = QLineEdit("0")
+        self._include_initial_value = include_initial_value
+
+        form = QFormLayout()
+        form.addRow("X column", self._x_column_combo)
+        form.addRow("Y column", self._y_column_combo)
+        form.addRow("Method", self._method_combo)
+        if self._include_initial_value:
+            form.addRow("Initial value", self._initial_value_edit)
+        form.addRow("Target column", self._target_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def x_column(self) -> str:
+        """Return selected X column."""
+        return self._x_column_combo.currentText()
+
+    def y_column(self) -> str:
+        """Return selected Y column."""
+        return self._y_column_combo.currentText()
+
+    def method(self) -> str:
+        """Return selected method key."""
+        return str(self._method_combo.currentData())
+
+    def target_column(self) -> str:
+        """Return target column name."""
+        return self._target_edit.text().strip()
+
+    def initial_value_text(self) -> str:
+        """Return the raw initial value text for operations that need it."""
+        return self._initial_value_edit.text().strip()
+
+
+class FFTDialog(QDialog):
+    """Collect settings for FFT operations."""
+
+    def __init__(self, column_names: list[str], default_dataset_name: str, parent: object | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("FFT")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        self._signal_column_combo = QComboBox()
+        self._signal_column_combo.addItems(column_names)
+        if len(column_names) > 1:
+            self._signal_column_combo.setCurrentIndex(1)
+
+        self._x_column_combo = QComboBox()
+        self._x_column_combo.addItem("Sample index", None)
+        for column_name in column_names:
+            self._x_column_combo.addItem(column_name, column_name)
+
+        self._window_combo = QComboBox()
+        for window_key, window_label in WINDOW_METHODS.items():
+            self._window_combo.addItem(window_label, window_key)
+
+        self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_FFT")
+
+        form = QFormLayout()
+        form.addRow("Signal column", self._signal_column_combo)
+        form.addRow("X/time column", self._x_column_combo)
+        form.addRow("Window", self._window_combo)
+        form.addRow("Result sheet", self._target_dataset_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def signal_column(self) -> str:
+        """Return selected signal column."""
+        return self._signal_column_combo.currentText()
+
+    def x_column(self) -> str | None:
+        """Return selected X/time column, or None for sample index spacing."""
+        value = self._x_column_combo.currentData()
+        return str(value) if value else None
+
+    def window_method(self) -> str:
+        """Return selected FFT window method."""
+        return str(self._window_combo.currentData())
+
+    def target_dataset_name(self) -> str:
+        """Return requested result dataset name."""
+        return self._target_dataset_edit.text().strip()
+
+
+class IFFTDialog(QDialog):
+    """Collect settings for inverse FFT operations."""
+
+    def __init__(self, column_names: list[str], default_dataset_name: str, parent: object | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Inverse FFT")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        self._real_column_combo = QComboBox()
+        self._real_column_combo.addItems(column_names)
+
+        self._imaginary_column_combo = QComboBox()
+        self._imaginary_column_combo.addItem("None / zero", None)
+        for column_name in column_names:
+            self._imaginary_column_combo.addItem(column_name, column_name)
+        if "imaginary" in column_names:
+            self._imaginary_column_combo.setCurrentText("imaginary")
+
+        if "real" in column_names:
+            self._real_column_combo.setCurrentText("real")
+
+        self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_iFFT")
+
+        form = QFormLayout()
+        form.addRow("Real column", self._real_column_combo)
+        form.addRow("Imaginary column", self._imaginary_column_combo)
+        form.addRow("Result sheet", self._target_dataset_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def real_column(self) -> str:
+        """Return selected real spectrum column."""
+        return self._real_column_combo.currentText()
+
+    def imaginary_column(self) -> str | None:
+        """Return selected imaginary spectrum column, or None for zero imaginary values."""
+        value = self._imaginary_column_combo.currentData()
+        return str(value) if value else None
+
+    def target_dataset_name(self) -> str:
+        """Return requested result dataset name."""
+        return self._target_dataset_edit.text().strip()
+
+
+class FitDialog(QDialog):
+    """Collect settings for curve fitting."""
+
+    def __init__(self, column_names: list[str], default_dataset_name: str, parent: object | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Curve Fit")
+        self.setModal(True)
+        self.setMinimumWidth(560)
+
+        self._x_column_combo = QComboBox()
+        self._x_column_combo.addItems(column_names)
+
+        self._y_column_combo = QComboBox()
+        self._y_column_combo.addItems(column_names)
+        if len(column_names) > 1:
+            self._y_column_combo.setCurrentIndex(1)
+
+        self._model_combo = QComboBox()
+        for model in available_fit_models():
+            self._model_combo.addItem(model.name, model.key)
+
+        self._method_combo = QComboBox()
+        for method_key, method_label in FIT_METHODS.items():
+            self._method_combo.addItem(method_label, method_key)
+        self._method_combo.setCurrentText(FIT_METHODS["trf"])
+
+        self._initial_params_edit = QLineEdit()
+        self._parameter_hint = QLabel()
+        self._parameter_hint.setWordWrap(True)
+        self._parameter_hint.setTextFormat(Qt.RichText)
+
+        self._fit_points_spin = QSpinBox()
+        self._fit_points_spin.setRange(10, 10000)
+        self._fit_points_spin.setSingleStep(50)
+        self._fit_points_spin.setValue(400)
+
+        self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_fit")
+
+        form = QFormLayout()
+        form.addRow("X column", self._x_column_combo)
+        form.addRow("Y column", self._y_column_combo)
+        form.addRow("Model", self._model_combo)
+        form.addRow("Method", self._method_combo)
+        form.addRow("Initial parameters", self._initial_params_edit)
+        form.addRow("", self._parameter_hint)
+        form.addRow("Fit points", self._fit_points_spin)
+        form.addRow("Result sheet", self._target_dataset_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+        self._model_combo.currentIndexChanged.connect(self._update_parameter_hint)
+        self._update_parameter_hint()
+
+    def x_column(self) -> str:
+        """Return selected X column."""
+        return self._x_column_combo.currentText()
+
+    def y_column(self) -> str:
+        """Return selected Y column."""
+        return self._y_column_combo.currentText()
+
+    def model_key(self) -> str:
+        """Return selected fit model key."""
+        return str(self._model_combo.currentData())
+
+    def method(self) -> str:
+        """Return selected optimizer method key."""
+        return str(self._method_combo.currentData())
+
+    def initial_parameters_text(self) -> str:
+        """Return raw initial-parameter text."""
+        return self._initial_params_edit.text().strip()
+
+    def fit_points(self) -> int:
+        """Return number of points to generate for the fitted curve."""
+        return self._fit_points_spin.value()
+
+    def target_dataset_name(self) -> str:
+        """Return requested result dataset name."""
+        return self._target_dataset_edit.text().strip()
+
+    def _update_parameter_hint(self) -> None:
+        model = get_fit_model(self.model_key())
+        parameter_names = ", ".join(model.parameter_names)
+        defaults = ", ".join(f"{value:g}" for value in model.default_initial)
+        self._parameter_hint.setText(
+            f"<b>Equation:</b> <code>{escape(model.equation)}</code><br>"
+            f"<b>Parameter order:</b> <code>{escape(parameter_names)}</code><br>"
+            f"Leave blank for automatic guesses. Static defaults: <code>{escape(defaults)}</code>."
+        )
+
+
+class FitReportDialog(QDialog):
+    """Display a curve-fitting report."""
+
+    def __init__(self, report_text: str, parent: object | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Fit Report")
+        self.setModal(True)
+        self.resize(640, 520)
+
+        report_edit = QPlainTextEdit()
+        report_edit.setReadOnly(True)
+        report_edit.setPlainText(report_text)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(self.accept)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(report_edit)
+        layout.addWidget(buttons)
+
+
+def derivative_methods() -> dict[str, str]:
+    """Return derivative method labels for dialog construction."""
+    return DERIVATIVE_METHODS
+
+
+def integration_methods() -> dict[str, str]:
+    """Return integration method labels for dialog construction."""
+    return INTEGRATION_METHODS

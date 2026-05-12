@@ -11,7 +11,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QHBoxLayout,
+    QGridLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
@@ -59,15 +59,15 @@ class DataTableWidget(QWidget):
         save_button = QPushButton("Save Sheet")
         save_button.clicked.connect(self._submit_dataset)
 
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel("Sheet name"))
-        controls.addWidget(self._sheet_name)
-        controls.addStretch(1)
-        controls.addWidget(add_row_button)
-        controls.addWidget(add_column_button)
-        controls.addWidget(remove_row_button)
-        controls.addWidget(remove_column_button)
-        controls.addWidget(save_button)
+        controls = QGridLayout()
+        controls.addWidget(QLabel("Sheet name"), 0, 0)
+        controls.addWidget(self._sheet_name, 0, 1, 1, 3)
+        controls.addWidget(save_button, 0, 4)
+        controls.addWidget(add_row_button, 1, 0)
+        controls.addWidget(add_column_button, 1, 1)
+        controls.addWidget(remove_row_button, 1, 2)
+        controls.addWidget(remove_column_button, 1, 3)
+        controls.setColumnStretch(1, 1)
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
