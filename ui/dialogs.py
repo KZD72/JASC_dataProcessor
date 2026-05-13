@@ -41,6 +41,7 @@ class ImportOptionsDialog(QDialog):
     )
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the delimiter and header-selection controls."""
         super().__init__(parent)
         self.setWindowTitle("Import Options")
         self.setModal(True)
@@ -83,6 +84,7 @@ class ColumnExpressionDialog(QDialog):
         column_formulas: dict[str, str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
+        """Create controls for target column, formula text, and row scope."""
         super().__init__(parent)
         self.setWindowTitle("Apply Formula")
         self.setModal(True)
@@ -152,6 +154,7 @@ class ColumnExpressionDialog(QDialog):
         return self._selected_rows_checkbox.isChecked()
 
     def _build_cheatsheet(self, column_names: list[str]) -> str:
+        """Return HTML help text for the expression editor."""
         shown_columns = column_names[:8]
         column_examples = ", ".join(f'col("{escape(name)}")' for name in shown_columns)
         if len(column_names) > len(shown_columns):
@@ -178,6 +181,7 @@ class ColumnExpressionDialog(QDialog):
         )
 
     def _load_formula_for_target(self, target_column: str, force: bool = False) -> None:
+        """Load any stored formula associated with the selected target column."""
         clean_target = target_column.strip()
         stored_formula = self._column_formulas.get(clean_target, "")
         current_formula = self._expression_edit.toPlainText().strip()
@@ -210,6 +214,7 @@ class ColumnMathDialog(QDialog):
         include_initial_value: bool = False,
         parent: QWidget | None = None,
     ) -> None:
+        """Create controls for derivative/integral settings."""
         super().__init__(parent)
         self.setWindowTitle(operation_name)
         self.setModal(True)
@@ -279,6 +284,7 @@ class FFTDialog(QDialog):
     """Collect settings for FFT operations."""
 
     def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
+        """Create controls for FFT input, spacing, and output naming."""
         super().__init__(parent)
         self.setWindowTitle("FFT")
         self.setModal(True)
@@ -343,6 +349,7 @@ class IFFTDialog(QDialog):
     """Collect settings for inverse FFT operations."""
 
     def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
+        """Create controls for inverse FFT input and output naming."""
         super().__init__(parent)
         self.setWindowTitle("Inverse FFT")
         self.setModal(True)
@@ -401,6 +408,7 @@ class FitDialog(QDialog):
     """Collect settings for curve fitting."""
 
     def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
+        """Create controls for model selection, optimizer settings, and outputs."""
         super().__init__(parent)
         self.setWindowTitle("Curve Fit")
         self.setModal(True)
@@ -585,6 +593,7 @@ class FitDialog(QDialog):
         return self._residual_dataset_edit.text().strip()
 
     def _update_parameter_hint(self) -> None:
+        """Refresh model equation help and rebuild the parameter table."""
         model = get_fit_model(self.model_key())
         parameter_names = ", ".join(model.parameter_names)
         defaults = ", ".join(f"{value:g}" for value in model.default_initial)
@@ -597,6 +606,7 @@ class FitDialog(QDialog):
         self._populate_parameter_table()
 
     def _populate_parameter_table(self) -> None:
+        """Populate editable parameter rows for the selected model."""
         model = get_fit_model(self.model_key())
         self._parameter_table.setRowCount(len(model.parameter_names))
         for row, (name, initial_value) in enumerate(zip(model.parameter_names, model.default_initial)):
@@ -612,10 +622,12 @@ class FitDialog(QDialog):
             self._parameter_table.setItem(row, 4, fixed_item)
 
     def _parameter_name(self, row: int) -> str:
+        """Return the displayed model parameter name for a table row."""
         item = self._parameter_table.item(row, 0)
         return item.text() if item is not None else f"parameter {row + 1}"
 
     def _table_float(self, row: int, column: int, label: str) -> float:
+        """Parse a required floating-point value from the parameter table."""
         item = self._parameter_table.item(row, column)
         text = item.text().strip() if item is not None else ""
         if not text:
@@ -626,6 +638,7 @@ class FitDialog(QDialog):
             raise ValueError(f"{label.capitalize()} must be numeric.") from exc
 
     def _optional_table_float(self, row: int, column: int, label: str) -> float | None:
+        """Parse an optional floating-point value from the parameter table."""
         item = self._parameter_table.item(row, column)
         text = item.text().strip() if item is not None else ""
         if not text:
@@ -640,6 +653,7 @@ class FitReportDialog(QDialog):
     """Display a curve-fitting report."""
 
     def __init__(self, report_text: str, parent: QWidget | None = None) -> None:
+        """Create a read-only report viewer dialog."""
         super().__init__(parent)
         self.setWindowTitle("Fit Report")
         self.setModal(True)

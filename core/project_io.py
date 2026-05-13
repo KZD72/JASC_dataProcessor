@@ -85,8 +85,6 @@ def load_project(path: str | Path) -> Workspace:
                 frame,
                 source_path=source_path,
             )
-            # Restore the original name exactly (add_dataset may uniquify).
-            dataset.name = entry["name"]
 
             formulas = entry.get("formulas")
             if isinstance(formulas, dict):

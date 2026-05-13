@@ -31,6 +31,7 @@ class Workspace:
     """Container for all datasets and saved plots currently open in the application."""
 
     def __init__(self) -> None:
+        """Initialize empty dataset and saved-plot registries."""
         self._datasets: dict[str, Dataset] = {}
         self._plots: dict[str, SavedPlot] = {}
 
@@ -125,6 +126,7 @@ class Workspace:
         self._plots.clear()
 
     def _make_unique_name(self, base_name: str) -> str:
+        """Return a dataset name that does not collide with existing datasets."""
         if base_name not in self._datasets:
             return base_name
 
@@ -134,6 +136,7 @@ class Workspace:
         return f"{base_name} ({counter})"
 
     def _make_unique_plot_name(self, base_name: str) -> str:
+        """Return a saved-plot name that does not collide with existing plots."""
         if base_name not in self._plots:
             return base_name
 
@@ -143,6 +146,7 @@ class Workspace:
         return f"{base_name} ({counter})"
 
     def _rename_dataset_references_in_plots(self, old_name: str, new_name: str) -> None:
+        """Update saved plot series when a referenced dataset is renamed."""
         for saved_plot in self._plots.values():
             series_list = saved_plot.state.get("series")
             if not isinstance(series_list, list):

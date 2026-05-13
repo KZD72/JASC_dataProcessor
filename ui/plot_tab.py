@@ -54,6 +54,7 @@ class PlotTab(QWidget):
     options_visibility_changed = Signal(bool)
 
     def __init__(self, workspace: Workspace, parent: QWidget | None = None) -> None:
+        """Create a plot editor bound to a workspace."""
         super().__init__(parent)
         self._workspace = workspace
         self._plot_series: list[PlotSeries] = []
@@ -306,6 +307,7 @@ class PlotTab(QWidget):
     # -- UI construction ----------------------------------------------------
 
     def _build_ui(self) -> None:
+        """Build plot controls, option tabs, header actions, and canvas."""
         self._x_dataset_combo = QComboBox()
         self._x_column_combo = QComboBox()
         self._y_dataset_combo = QComboBox()
@@ -555,6 +557,7 @@ class PlotTab(QWidget):
 
     @staticmethod
     def _range_row(min_edit: QLineEdit, max_edit: QLineEdit) -> QWidget:
+        """Return a compact min/max row for axis range controls."""
         min_edit.setPlaceholderText("min")
         max_edit.setPlaceholderText("max")
         min_edit.setMaximumWidth(90)
@@ -568,6 +571,7 @@ class PlotTab(QWidget):
         return row
 
     def _update_column_combo(self, ds_combo: QComboBox, col_combo: QComboBox) -> None:
+        """Refresh a column combo from the dataset currently selected beside it."""
         name = ds_combo.currentText()
         cols: list[str] = []
         if name:
@@ -581,6 +585,7 @@ class PlotTab(QWidget):
 
     @staticmethod
     def _set_combo_items(combo: QComboBox, items: list[str], preferred: str | None = None) -> None:
+        """Replace combo items while preserving a preferred/current value."""
         cur = preferred or combo.currentText()
         combo.blockSignals(True)
         combo.clear()
@@ -590,6 +595,7 @@ class PlotTab(QWidget):
         combo.blockSignals(False)
 
     def _set_controls_enabled(self, has_data: bool) -> None:
+        """Enable or disable plot controls based on data and selection state."""
         can_add = has_data and self._x_column_combo.count() > 0 and self._y_column_combo.count() > 0
         self._add_series_button.setEnabled(can_add)
         self._update_series_button.setEnabled(can_add and self._selected_series_row() is not None)
@@ -601,6 +607,7 @@ class PlotTab(QWidget):
         self._clear_locators_button.setEnabled(bool(self._plot_locators))
 
     def _toggle_plot_options(self) -> None:
+        """Toggle the plot options panel from the Plot tab header."""
         self.set_plot_options_visible(self._plot_options_scroll.isHidden())
 
     def set_plot_options_visible(self, visible: bool) -> None:
@@ -622,11 +629,13 @@ class PlotTab(QWidget):
         self.set_plot_options_visible(True)
 
     def _refresh_series_list(self) -> None:
+        """Rebuild the queued-series list from current series state."""
         self._series_list.clear()
         for series in self._plot_series:
             self._series_list.addItem(self._series_text(series))
 
     def _select_first_series_for_editing(self) -> None:
+        """Select and load the first queued series into edit controls."""
         if not self._plot_series:
             return
 
@@ -635,14 +644,17 @@ class PlotTab(QWidget):
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
 
     def _plot_series_from_state(self, state: dict[str, object]) -> PlotSeries:
+        """Deserialize one saved series dictionary into a PlotSeries."""
         clean_state = {key: value for key, value in state.items() if key in _PLOT_SERIES_FIELDS}
         return PlotSeries(**clean_state)
 
     def _plot_locator_from_state(self, state: dict[str, object]) -> PlotLocator:
+        """Deserialize one saved locator dictionary into a PlotLocator."""
         clean_state = {key: value for key, value in state.items() if key in _PLOT_LOCATOR_FIELDS}
         return PlotLocator(**clean_state)
 
     def _apply_plot_settings(self, state: object) -> None:
+        """Apply saved axis, legend, range, and figure settings."""
         if not isinstance(state, dict):
             state = {}
 
@@ -667,11 +679,13 @@ class PlotTab(QWidget):
 
     @staticmethod
     def _setting_text(state: dict[str, object], key: str) -> str:
+        """Return a text setting, treating None as blank."""
         value = state.get(key, "")
         return "" if value is None else str(value)
 
     @staticmethod
     def _setting_float(state: dict[str, object], key: str, fallback: float) -> float:
+        """Return a numeric setting with a fallback for malformed state."""
         try:
             return float(state.get(key, fallback))
         except (TypeError, ValueError):
@@ -679,6 +693,7 @@ class PlotTab(QWidget):
 
     @staticmethod
     def _set_combo_text(combo: QComboBox, value: str) -> None:
+        """Set combo selection by display text when present."""
         index = combo.findText(value)
         if index >= 0:
             combo.setCurrentIndex(index)
@@ -686,6 +701,7 @@ class PlotTab(QWidget):
     # -- series management --------------------------------------------------
 
     def _add_series(self) -> None:
+        """Append a series from the current controls and render the plot."""
         if self._x_column_combo.count() == 0 or self._y_column_combo.count() == 0:
             QMessageBox.information(self, "Add Series", "Import or create a dataset before adding a series.")
             return
@@ -697,6 +713,7 @@ class PlotTab(QWidget):
         self._render_plot()
 
     def _series_from_controls(self) -> PlotSeries:
+        """Create a PlotSeries from current series control values."""
         line_style_data = self._line_style_combo.currentData()
         return PlotSeries(
             x_dataset=self._x_dataset_combo.currentText(),
@@ -713,6 +730,7 @@ class PlotTab(QWidget):
         )
 
     def _update_selected_series(self) -> None:
+        """Replace the selected queued series from current controls."""
         row = self._selected_series_row()
         if row is None:
             QMessageBox.information(self, "Update Series", "Select a queued series before updating it.")
@@ -726,16 +744,19 @@ class PlotTab(QWidget):
         self._render_plot()
 
     def _selected_series_row(self) -> int | None:
+        """Return the selected queued-series row, if any."""
         rows = sorted({index.row() for index in self._series_list.selectedIndexes()})
         return rows[0] if rows else None
 
     def _handle_series_selection_changed(self) -> None:
+        """Load selected queued series details into the edit controls."""
         row = self._selected_series_row()
         if row is not None and 0 <= row < len(self._plot_series):
             self._load_series_controls(self._plot_series[row])
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
 
     def _load_series_controls(self, series: PlotSeries) -> None:
+        """Populate series edit controls from a PlotSeries."""
         self._x_dataset_combo.setCurrentText(series.x_dataset)
         self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
         self._x_column_combo.setCurrentText(series.x_column)
@@ -752,11 +773,13 @@ class PlotTab(QWidget):
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: str) -> None:
+        """Set combo selection by item data when present."""
         index = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
 
     def _remove_selected_series(self) -> None:
+        """Remove selected series and reindex locators that remain."""
         rows = sorted({i.row() for i in self._series_list.selectedIndexes()}, reverse=True)
         for r in rows:
             self._plot_series.pop(r)
@@ -767,6 +790,7 @@ class PlotTab(QWidget):
         self._render_plot(silent_if_empty=True)
 
     def _clear_series(self) -> None:
+        """Clear all queued series, locators, and rendered plot content."""
         self._plot_series.clear()
         self._series_list.clear()
         self._plot_locators.clear()
@@ -781,6 +805,7 @@ class PlotTab(QWidget):
     # -- locator management -------------------------------------------------
 
     def _add_locator(self) -> None:
+        """Add an interpolation locator for the selected queued series."""
         if not self._plot_series:
             QMessageBox.information(self, "Add Locator", "Add a plotted series before locating data.")
             return
@@ -804,6 +829,7 @@ class PlotTab(QWidget):
         self._render_plot()
 
     def _remove_selected_locator(self) -> None:
+        """Remove selected locators from the current plot definition."""
         rows = sorted({i.row() for i in self._locator_list.selectedIndexes()}, reverse=True)
         for r in rows:
             self._plot_locators.pop(r)
@@ -812,12 +838,14 @@ class PlotTab(QWidget):
         self._render_plot(silent_if_empty=True)
 
     def _clear_locators(self) -> None:
+        """Remove all locators from the current plot definition."""
         self._plot_locators.clear()
         self._locator_list.clear()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self._render_plot(silent_if_empty=True)
 
     def _refresh_locator_series_combo(self) -> None:
+        """Refresh the locator target-series combo from queued series."""
         cur = self._locator_series_combo.currentData()
         self._locator_series_combo.blockSignals(True)
         self._locator_series_combo.clear()
@@ -830,6 +858,7 @@ class PlotTab(QWidget):
         self._locator_series_combo.blockSignals(False)
 
     def _reindex_locators_after_removal(self, removed: list[int]) -> None:
+        """Drop or shift locators after series rows have been removed."""
         removed_set = set(removed)
         new: list[PlotLocator] = []
         for loc in self._plot_locators:
@@ -845,6 +874,7 @@ class PlotTab(QWidget):
         self._refresh_locator_list()
 
     def _refresh_locator_list(self, located: list[LocatedPoint] | None = None) -> None:
+        """Refresh locator list text, including computed values when available."""
         by_idx = {lp.locator_index: lp for lp in located or []}
         self._locator_list.clear()
         for i, loc in enumerate(self._plot_locators):
@@ -853,6 +883,7 @@ class PlotTab(QWidget):
     # -- rendering ----------------------------------------------------------
 
     def _render_plot(self, silent_if_empty: bool = False) -> None:
+        """Render queued series and locators to the Matplotlib canvas."""
         if not self._plot_series:
             self._plot_canvas.clear_plot()
             self._set_controls_enabled(bool(self._workspace.dataset_names()))
@@ -906,6 +937,7 @@ class PlotTab(QWidget):
 
     @staticmethod
     def _series_text(series: PlotSeries) -> str:
+        """Return readable queued-series text for the list widget."""
         bits = [
             _LINE_LABELS.get(series.line_style, series.line_style or "None"),
             _MARKER_LABELS.get(series.marker, series.marker or "None"),
@@ -915,6 +947,7 @@ class PlotTab(QWidget):
         return f"{series.label} ({', '.join(bits)})"
 
     def _locator_text(self, loc: PlotLocator, pt: LocatedPoint | None = None) -> str:
+        """Return locator list text before or after interpolation."""
         label = self._plot_series[loc.series_index].label
         if pt is not None:
             return f"{label}: x={pt.x_value:g}, y={pt.y_value:g} ({pt.y_axis})"
@@ -923,6 +956,7 @@ class PlotTab(QWidget):
     # -- input parsing ------------------------------------------------------
 
     def _plot_inputs(self) -> tuple[dict[str, object], list[str]]:
+        """Collect validated plot options for PlotCanvas."""
         errors: list[str] = []
         xl, xe = self._parse_range(self._x_min_edit, self._x_max_edit, "X range")
         yl, ye = self._parse_range(self._y_min_edit, self._y_max_edit, "Left Y range")
@@ -945,6 +979,7 @@ class PlotTab(QWidget):
     def _parse_range(
         self, min_edit: QLineEdit, max_edit: QLineEdit, label: str,
     ) -> tuple[tuple[float | None, float | None], list[str]]:
+        """Parse and validate one optional min/max range pair."""
         lo, lo_err = self._parse_optional_float(min_edit.text(), f"{label} minimum")
         hi, hi_err = self._parse_optional_float(max_edit.text(), f"{label} maximum")
         errors = lo_err + hi_err
@@ -954,6 +989,7 @@ class PlotTab(QWidget):
 
     @staticmethod
     def _parse_optional_float(text: str, label: str) -> tuple[float | None, list[str]]:
+        """Parse optional float text and return validation errors."""
         stripped = text.strip()
         if not stripped:
             return None, []

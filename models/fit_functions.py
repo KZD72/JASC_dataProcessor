@@ -25,22 +25,27 @@ class FitModel:
 
 
 def linear(x: np.ndarray, a: float, b: float) -> np.ndarray:
+    """Return a linear model, a*x + b."""
     return a * x + b
 
 
 def quadratic(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+    """Return a quadratic polynomial model."""
     return a * x**2 + b * x + c
 
 
 def cubic(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
+    """Return a cubic polynomial model."""
     return a * x**3 + b * x**2 + c * x + d
 
 
 def exponential_growth(x: np.ndarray, a: float, k: float, c: float) -> np.ndarray:
+    """Return a single exponential growth model."""
     return a * np.exp(k * x) + c
 
 
 def exponential_decay(x: np.ndarray, a: float, tau: float, c: float) -> np.ndarray:
+    """Return a single exponential decay model."""
     return a * np.exp(-x / _safe_width(tau)) + c
 
 
@@ -52,6 +57,7 @@ def double_exponential_decay(
     tau2: float,
     c: float,
 ) -> np.ndarray:
+    """Return a double exponential decay model."""
     return a1 * np.exp(-x / _safe_width(tau1)) + a2 * np.exp(-x / _safe_width(tau2)) + c
 
 
@@ -62,6 +68,7 @@ def gaussian(
     sigma: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a Gaussian peak with offset."""
     width = _safe_width(sigma)
     return amplitude * np.exp(-0.5 * ((x - center) / width) ** 2) + offset
 
@@ -73,6 +80,7 @@ def lorentzian(
     gamma: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a Lorentzian peak with offset."""
     width = _safe_width(gamma)
     return amplitude * (width**2 / ((x - center) ** 2 + width**2)) + offset
 
@@ -85,6 +93,7 @@ def pseudo_voigt(
     eta: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a pseudo-Voigt blend of Lorentzian and Gaussian peaks."""
     mix = float(np.clip(eta, 0.0, 1.0))
     return mix * lorentzian(x, amplitude, center, sigma, 0.0) + (1.0 - mix) * gaussian(
         x,
@@ -102,6 +111,7 @@ def sine(
     phase: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a sinusoidal model with offset."""
     return amplitude * np.sin(2.0 * np.pi * frequency * x + phase) + offset
 
 
@@ -113,6 +123,7 @@ def damped_sine(
     tau: float,
     offset: float,
 ) -> np.ndarray:
+    """Return an exponentially damped sine model."""
     return amplitude * np.exp(-x / _safe_width(tau)) * np.sin(2.0 * np.pi * frequency * x + phase) + offset
 
 
@@ -123,6 +134,7 @@ def logistic(
     midpoint: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a logistic sigmoid model."""
     return offset + amplitude / (1.0 + np.exp(-rate * (x - midpoint)))
 
 
@@ -133,6 +145,7 @@ def gompertz(
     rate: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a Gompertz growth model."""
     return offset + amplitude * np.exp(-scale * np.exp(-rate * x))
 
 
@@ -143,10 +156,12 @@ def erf_step(
     width: float,
     offset: float,
 ) -> np.ndarray:
+    """Return an error-function step model."""
     return offset + 0.5 * amplitude * (1.0 + special.erf((x - center) / _safe_width(width)))
 
 
 def power_law(x: np.ndarray, a: float, exponent: float, c: float) -> np.ndarray:
+    """Return a power-law model with offset."""
     safe_x = np.clip(x, np.finfo(float).tiny, None)
     return a * np.power(safe_x, exponent) + c
 
@@ -158,6 +173,7 @@ def log_normal(
     sigma: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a log-normal peak model."""
     safe_x = np.clip(x, np.finfo(float).tiny, None)
     width = _safe_width(sigma)
     return amplitude * np.exp(-0.5 * ((np.log(safe_x) - mu) / width) ** 2) + offset
@@ -170,6 +186,7 @@ def weibull(
     scale: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a Weibull saturation model."""
     safe_x = np.clip(x, 0.0, None)
     safe_scale = abs(_safe_width(scale))
     safe_shape = abs(_safe_width(shape))
@@ -184,6 +201,7 @@ def heidler(
     n: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a Heidler impulse model."""
     safe_x = np.clip(x, 0.0, None)
     rise = (safe_x / abs(_safe_width(tau1))) ** abs(_safe_width(n))
     return offset + amplitude * (rise / (1.0 + rise)) * np.exp(-safe_x / abs(_safe_width(tau2)))
@@ -196,6 +214,7 @@ def bessel_j(
     scale: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a scaled Bessel function of the first kind."""
     return amplitude * special.jv(order, scale * x) + offset
 
 
@@ -206,6 +225,7 @@ def bessel_y(
     scale: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a scaled Bessel function of the second kind."""
     return amplitude * special.yv(order, scale * x) + offset
 
 
@@ -216,6 +236,7 @@ def stretched_exponential(
     beta: float,
     offset: float,
 ) -> np.ndarray:
+    """Return a stretched exponential decay model."""
     safe_x = np.clip(x, 0.0, None)
     return amplitude * np.exp(-((safe_x / abs(_safe_width(tau))) ** beta)) + offset
 
@@ -228,6 +249,7 @@ def asymmetric_gaussian(
     sigma_r: float,
     offset: float,
 ) -> np.ndarray:
+    """Return an asymmetric Gaussian peak with separate left/right widths."""
     sigma = np.where(x < center, abs(_safe_width(sigma_l)), abs(_safe_width(sigma_r)))
     return amplitude * np.exp(-0.5 * ((x - center) / sigma) ** 2) + offset
 
@@ -488,6 +510,7 @@ def default_initial_parameters(
 
 
 def _safe_width(value: float) -> float:
+    """Return a nonzero width value for numerically stable model evaluation."""
     if abs(value) < np.finfo(float).eps:
         return np.finfo(float).eps
     return value

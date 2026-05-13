@@ -288,6 +288,7 @@ def _fit_input_frame(
     y_column: str,
     weight_column: str | None,
 ) -> pd.DataFrame:
+    """Return aligned numeric fit inputs and optional weights."""
     if x_column not in frame.columns:
         raise MathOperationError(f"Column '{x_column}' does not exist.")
     if y_column not in frame.columns:
@@ -316,6 +317,7 @@ def _normalize_bounds(
     parameter_count: int,
     fallback: float,
 ) -> tuple[float, ...]:
+    """Return a full bound tuple, replacing blanks with an infinite fallback."""
     if bounds is None:
         return tuple([fallback] * parameter_count)
     if len(bounds) != parameter_count:
@@ -330,6 +332,7 @@ def _validate_parameter_settings(
     fixed: tuple[bool, ...],
     parameter_names: tuple[str, ...],
 ) -> None:
+    """Validate initial guesses, bounds, and fixed/free parameter settings."""
     for index, (initial, lower_value, upper_value) in enumerate(zip(p0, lower, upper)):
         if lower_value > upper_value:
             raise MathOperationError(f"Lower bound exceeds upper bound for {parameter_names[index]}.")
@@ -345,6 +348,7 @@ def _validate_parameter_settings(
 
 
 def _sigma_values(aligned: pd.DataFrame, weight_column: str | None, weight_mode: str) -> np.ndarray | None:
+    """Return sigma values for curve_fit from sigma or weight mode."""
     if not weight_column:
         return None
 
@@ -364,7 +368,9 @@ def _free_parameter_function(
     initial_parameters: tuple[float, ...],
     free_indices: tuple[int, ...],
 ) -> object:
+    """Wrap a model so curve_fit optimizes only free parameters."""
     def wrapped(x_values: np.ndarray, *free_parameters: float) -> np.ndarray:
+        """Evaluate the model after merging free parameters into fixed values."""
         parameters = np.asarray(initial_parameters, dtype=float)
         parameters[list(free_indices)] = free_parameters
         return function(x_values, *parameters)
@@ -380,6 +386,7 @@ def _confidence_band(
     confidence_level: float,
     degrees_of_freedom: int,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Estimate pointwise confidence bands from covariance and a Jacobian."""
     fit_y = np.asarray(function(x_values, *parameters), dtype=float)
     if covariance.shape != (len(parameters), len(parameters)) or not np.isfinite(covariance).any():
         nan_band = np.full_like(fit_y, np.nan, dtype=float)
@@ -396,6 +403,7 @@ def _confidence_band(
 
 
 def _numerical_jacobian(function: object, x_values: np.ndarray, parameters: np.ndarray) -> np.ndarray:
+    """Return a finite-difference Jacobian for confidence band propagation."""
     base_parameters = np.asarray(parameters, dtype=float)
     jacobian = np.empty((len(x_values), len(base_parameters)), dtype=float)
     for parameter_index, parameter_value in enumerate(base_parameters):
@@ -431,6 +439,7 @@ def _build_report(
     residuals: np.ndarray,
     warnings: list[str],
 ) -> FitReport:
+    """Build fit metrics and package them into a FitReport."""
     parameter_count = len(parameters)
     point_count = len(y_values)
 
@@ -485,6 +494,7 @@ def _build_report(
 
 
 def _format_number(value: float) -> str:
+    """Format report numbers while handling infinities and NaNs."""
     if value == np.inf:
         return "inf"
     if value == -np.inf:

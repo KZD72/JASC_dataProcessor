@@ -79,6 +79,7 @@ class PlotCanvas(QWidget):
     """A QWidget wrapping a Matplotlib FigureCanvas and navigation toolbar."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the Matplotlib figure, toolbar, and empty plot placeholder."""
         super().__init__(parent)
 
         self.figure = Figure(figsize=(7.0, 4.8), constrained_layout=True)
@@ -215,6 +216,7 @@ class PlotCanvas(QWidget):
         x_scale: str,
         y_scale: str,
     ) -> tuple[pd.Series, pd.Series]:
+        """Return aligned numeric X/Y values for a plot series."""
         x_frame = workspace.get_dataset(series.x_dataset).frame
         y_frame = workspace.get_dataset(series.y_dataset).frame
 
@@ -255,6 +257,7 @@ class PlotCanvas(QWidget):
         x_scale: str,
         y_scale: str,
     ) -> None:
+        """Draw an optional lower/upper confidence band for a series."""
         if not series.lower_column or not series.upper_column:
             return
 
@@ -299,6 +302,7 @@ class PlotCanvas(QWidget):
         )
 
     def _draw_empty_state(self, clear_axes: bool = True) -> None:
+        """Show the placeholder plot when no series can be rendered."""
         self._remove_right_axes()
         if clear_axes:
             self.axes.clear()
@@ -318,6 +322,7 @@ class PlotCanvas(QWidget):
         )
 
     def _remove_right_axes(self) -> None:
+        """Remove the secondary Y axis if it exists."""
         if self.right_axes is None:
             return
 
@@ -332,6 +337,7 @@ class PlotCanvas(QWidget):
         scale: str,
         label: str,
     ) -> list[str]:
+        """Apply axis limits and return messages for invalid requests."""
         lower, upper = limits
         if lower is None and upper is None:
             return []
@@ -356,6 +362,7 @@ class PlotCanvas(QWidget):
         locators: list[PlotLocator],
         plotted_series_values: dict[int, tuple[pd.Series, pd.Series, PlotSeries]],
     ) -> tuple[list[str], list[LocatedPoint]]:
+        """Draw locator markers and return interpolation summaries."""
         messages: list[str] = []
         located_points: list[LocatedPoint] = []
 
@@ -398,6 +405,7 @@ class PlotCanvas(QWidget):
         return messages, located_points
 
     def _interpolate_y(self, x_values: pd.Series, y_values: pd.Series, x_value: float) -> float:
+        """Interpolate a Y value for a requested X coordinate."""
         points = pd.DataFrame({"x": x_values.to_numpy(), "y": y_values.to_numpy()}).dropna()
         if len(points) < 2:
             raise ValueError("locator needs at least two numeric points for interpolation")
@@ -417,6 +425,7 @@ class PlotCanvas(QWidget):
         return float(np.interp(x_value, unique_x, unique_y))
 
     def _draw_legend(self, legend_enabled: bool, legend_position: str) -> None:
+        """Draw a combined legend for left and right axes when requested."""
         if not legend_enabled:
             return
 

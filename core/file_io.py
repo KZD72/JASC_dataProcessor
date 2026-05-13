@@ -71,6 +71,7 @@ def export_tabular_file(
 
 
 def _build_read_csv_kwargs(options: ImportOptions) -> dict[str, object]:
+    """Translate import dialog options into pandas read_csv keyword arguments."""
     header = 0 if options.has_header else None
 
     if options.delimiter == " ":

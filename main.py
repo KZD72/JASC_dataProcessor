@@ -11,6 +11,7 @@ from ui.main_window import MainWindow
 
 
 def setup_logging() -> None:
+    """Configure process-wide console logging for the desktop app."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

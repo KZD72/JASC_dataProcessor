@@ -152,10 +152,13 @@
 - [x] Added checkable View menu actions for sidebar, Workspace Datasheets, Saved Plots, and Plot Options visibility, with Reset View restoring all panels.
 - [x] Removed saved-plot action buttons from the sidebar so Saved Plots is primarily navigation and plot management lives with the Plot tab.
 - [x] Removed the redundant sidebar Import tab now that import is available from the File menu and main toolbar; the sidebar data-entry area is dedicated to Manual Entry.
+- [x] Performed a codebase-wide documentation pass and added missing docstrings for Python classes, public methods, private helpers, Qt slots, model functions, and dialog accessors.
+- [x] Fixed `ui/dataframe_model.py` by importing `QObject`, which is used by the table model constructor annotation.
+- [x] Hardened `.jasc` project loading so dataset names remain consistent with the workspace's unique-name registry even if a project file contains duplicate or conflicting dataset names.
 
 
 ## 3. Active Bugs / Known Issues
-- [ ] No runtime application bugs found in the previous smoke testing, but this session could not rerun Python checks because no usable Python launcher is available in the current shell.
+- [ ] Current documentation/review session could not rerun Python compile or smoke checks because `python.exe` fails to start and `py` is not installed in the current shell.
 - [ ] `git` is not available in the current shell, so worktree status could not be checked.
 - [ ] Required analytical-model list mentions arbitrary n-th degree polynomial fitting, but the current fit registry only has linear, quadratic, and cubic polynomial models.
 - [ ] There is no automated test suite or PyInstaller/spec packaging file in the repository yet.

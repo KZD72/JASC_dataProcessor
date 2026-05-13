@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt
 
 from core.operations import ExpressionResult, apply_column_expression
 from core.workspace import Dataset
@@ -17,6 +17,7 @@ class DataFrameTableModel(QAbstractTableModel):
     """Editable table model that writes changes directly into a workspace dataset."""
 
     def __init__(self, parent: QObject | None = None) -> None:
+        """Create an empty model until a workspace dataset is attached."""
         super().__init__(parent)
         self._dataset: Dataset | None = None
 
@@ -32,16 +33,19 @@ class DataFrameTableModel(QAbstractTableModel):
         self.endResetModel()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        """Return the number of visible DataFrame rows for Qt views."""
         if parent.isValid() or self._dataset is None:
             return 0
         return len(self._dataset.frame)
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        """Return the number of visible DataFrame columns for Qt views."""
         if parent.isValid() or self._dataset is None:
             return 0
         return len(self._dataset.frame.columns)
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> str | None:
+        """Return display/edit text for one DataFrame cell."""
         if not index.isValid() or self._dataset is None:
             return None
 
@@ -54,6 +58,7 @@ class DataFrameTableModel(QAbstractTableModel):
         return str(value)
 
     def setData(self, index: QModelIndex, value: Any, role: int = Qt.EditRole) -> bool:
+        """Write a user edit back into the backing DataFrame."""
         if not index.isValid() or self._dataset is None or role != Qt.EditRole:
             return False
 
@@ -74,6 +79,7 @@ class DataFrameTableModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.DisplayRole,
     ) -> str | None:
+        """Return row/column labels and formula tooltips for Qt headers."""
         if self._dataset is None:
             return None
 
@@ -92,6 +98,7 @@ class DataFrameTableModel(QAbstractTableModel):
         return str(section + 1)
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        """Return Qt item flags making valid cells selectable and editable."""
         if not index.isValid():
             return Qt.NoItemFlags
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable
@@ -181,6 +188,7 @@ class DataFrameTableModel(QAbstractTableModel):
             self.endResetModel()
 
     def _normalize_value(self, column: pd.Series, value: Any) -> object:
+        """Coerce edited text to a numeric value when the column supports it."""
         text = str(value).strip()
         if text == "":
             return pd.NA
@@ -193,6 +201,7 @@ class DataFrameTableModel(QAbstractTableModel):
         return text
 
     def _value_fits_column(self, column: pd.Series, value: object) -> bool:
+        """Return whether a value can be stored without widening column dtype."""
         if not is_numeric_dtype(column):
             return True
 
@@ -202,6 +211,7 @@ class DataFrameTableModel(QAbstractTableModel):
         return isinstance(value, Number)
 
     def _make_unique_column_name(self, base_name: str) -> str:
+        """Return a column name that does not collide with existing columns."""
         if self._dataset is None:
             return base_name
 

@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
     """Primary application shell for data ingestion, editing, and plotting workflows."""
 
     def __init__(self) -> None:
+        """Create the main window, shared workspace, and primary UI regions."""
         super().__init__()
         self._workspace = Workspace()
 
@@ -121,6 +122,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
     def _build_sidebar(self) -> QWidget:
+        """Build the left navigation and manual data-entry sidebar."""
         sidebar = QWidget()
         sidebar.setMinimumWidth(320)
 
@@ -163,6 +165,7 @@ class MainWindow(QMainWindow):
         return sidebar
 
     def _build_dataset_editor(self) -> QWidget:
+        """Build the central dataset table editor and local action header."""
         editor = QWidget()
 
         self._editor_add_row_button = QPushButton("Add Row")
@@ -196,6 +199,7 @@ class MainWindow(QMainWindow):
         return editor
 
     def _create_actions(self) -> None:
+        """Create menus, toolbar actions, and long-lived action references."""
         file_menu = self.menuBar().addMenu("&File")
 
         open_project_action = file_menu.addAction("&Open Project...")
@@ -349,6 +353,7 @@ class MainWindow(QMainWindow):
         self._update_dataset_summary()
 
     def _apply_visual_style(self) -> None:
+        """Apply the application-wide Qt stylesheet."""
         self.setStyleSheet("""
             QMainWindow {
                 background: #f4f7fa;
@@ -463,6 +468,7 @@ class MainWindow(QMainWindow):
         """)
 
     def _import_data_file(self) -> None:
+        """Open a delimited file and add it to the workspace."""
         file_name, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "Import Data File",
@@ -491,6 +497,7 @@ class MainWindow(QMainWindow):
         )
 
     def _add_manual_dataset(self, name: str, frame: object) -> None:
+        """Add a manually-entered DataFrame to the workspace."""
         if not isinstance(frame, pd.DataFrame):
             QMessageBox.critical(self, "Manual Entry Error", "Manual entry did not produce a DataFrame.")
             return
@@ -507,6 +514,7 @@ class MainWindow(QMainWindow):
         )
 
     def _parse_optional_float(self, text: str, label: str) -> tuple[float | None, list[str]]:
+        """Parse optional numeric dialog text and return validation errors."""
         stripped = text.strip()
         if not stripped:
             return None, []
@@ -517,6 +525,7 @@ class MainWindow(QMainWindow):
             return None, [f"{label} must be numeric."]
 
     def _parse_float_sequence(self, text: str, label: str) -> tuple[list[float] | None, list[str]]:
+        """Parse comma/space/semicolon-separated floats from dialog text."""
         stripped = text.strip()
         if not stripped:
             return None, []
@@ -535,6 +544,7 @@ class MainWindow(QMainWindow):
         return values, []
 
     def _export_current_dataset(self) -> None:
+        """Export the selected dataset to CSV or tab-delimited text."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Export Dataset", "Select a dataset before exporting.")
@@ -563,6 +573,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported {dataset.name} to {path}")
 
     def _add_empty_column(self) -> None:
+        """Prompt for and append an empty column to the selected dataset."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Add Column", "Select a dataset before adding a column.")
@@ -589,6 +600,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Added column '{final_name}' to {dataset.name}")
 
     def _add_empty_row(self) -> None:
+        """Append an empty row to the selected dataset."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Add Row", "Select a dataset before adding a row.")
@@ -599,6 +611,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Added empty row to {dataset.name}")
 
     def _apply_column_formula(self) -> None:
+        """Apply a safe expression to all or selected rows in a column."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Apply Formula", "Select a dataset before applying a formula.")
@@ -639,6 +652,7 @@ class MainWindow(QMainWindow):
         )
 
     def _run_derivative(self) -> None:
+        """Run the derivative workflow for the selected dataset."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Derivative", "Select a dataset before calculating a derivative.")
@@ -681,6 +695,7 @@ class MainWindow(QMainWindow):
         )
 
     def _run_integral(self) -> None:
+        """Run the cumulative integration workflow for the selected dataset."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Integral", "Select a dataset before calculating an integral.")
@@ -733,6 +748,7 @@ class MainWindow(QMainWindow):
         )
 
     def _run_fft(self) -> None:
+        """Run the FFT workflow and create a frequency-domain dataset."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "FFT", "Select a dataset before running FFT.")
@@ -779,6 +795,7 @@ class MainWindow(QMainWindow):
         )
 
     def _run_ifft(self) -> None:
+        """Run the inverse FFT workflow and create a reconstructed dataset."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Inverse FFT", "Select a dataset before running inverse FFT.")
@@ -824,6 +841,7 @@ class MainWindow(QMainWindow):
         )
 
     def _run_curve_fit(self) -> None:
+        """Run the curve-fitting workflow and plot/save fit outputs."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Curve Fit", "Select a dataset before fitting a curve.")
@@ -898,6 +916,7 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_dataset_after_analysis(self, dataset: Dataset, selected_column: str) -> None:
+        """Refresh editor and plot controls after an in-place analysis column edit."""
         self._dataset_model.set_dataset(dataset)
         self._dataset_table.resizeColumnsToContents()
         self._plot_tab_widget.refresh_controls(dataset.name)
@@ -905,6 +924,7 @@ class MainWindow(QMainWindow):
         self._select_column(selected_column)
 
     def _delete_selected_rows(self) -> None:
+        """Delete rows represented by the current table selection."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Delete Rows", "Select a dataset before deleting rows.")
@@ -930,6 +950,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Deleted {deleted_count} row(s) from {dataset.name}")
 
     def _delete_selected_columns(self) -> None:
+        """Delete columns represented by the current table selection."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Delete Columns", "Select a dataset before deleting columns.")
@@ -964,6 +985,7 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_dataset_list(self, selected_name: str | None = None) -> None:
+        """Refresh dataset navigation and keep a valid selection."""
         dataset_names = self._workspace.dataset_names()
         target_name = selected_name if selected_name in dataset_names else None
         if target_name is None and dataset_names:
@@ -987,6 +1009,7 @@ class MainWindow(QMainWindow):
         self._plot_tab_widget.refresh_controls(target_name)
 
     def _show_dataset_editor(self, dataset_name: str) -> None:
+        """Load a dataset into the central editor by workspace name."""
         if not dataset_name:
             self._dataset_model.set_dataset(None)
             self._update_dataset_summary()
@@ -999,9 +1022,11 @@ class MainWindow(QMainWindow):
         self._tabs.setCurrentIndex(0)
 
     def _edit_dataset_cell(self, index: QModelIndex) -> None:
+        """Start editing the double-clicked table cell."""
         self._dataset_table.edit(index)
 
     def _current_dataset(self) -> Dataset | None:
+        """Return the dataset currently selected in the sidebar."""
         current_item = self._dataset_list.currentItem()
         if current_item is None:
             return None
@@ -1012,6 +1037,7 @@ class MainWindow(QMainWindow):
             return None
 
     def _selected_dataset_rows(self) -> list[int]:
+        """Return sorted row indexes touched by the table selection."""
         selection_model = self._dataset_table.selectionModel()
         if selection_model is None:
             return []
@@ -1019,6 +1045,7 @@ class MainWindow(QMainWindow):
         return sorted({index.row() for index in selection_model.selectedIndexes()})
 
     def _update_dataset_summary(self) -> None:
+        """Update dataset summary text and action enabled states."""
         dataset = self._dataset_model.dataset
         has_dataset = dataset is not None
         has_project_content = self._has_project_content()
@@ -1058,17 +1085,21 @@ class MainWindow(QMainWindow):
         self._update_plot_action_state()
 
     def _set_sidebar_visible(self, visible: bool) -> None:
+        """Show or hide the full left sidebar."""
         self._sidebar.setVisible(visible)
         if hasattr(self, "_show_sidebar_action"):
             self._sync_checkable_action(self._show_sidebar_action, visible)
 
     def _toggle_workspace_section(self) -> None:
+        """Toggle visibility of the workspace dataset section."""
         self._set_workspace_section_visible(self._dataset_list.isHidden())
 
     def _toggle_plots_section(self) -> None:
+        """Toggle visibility of the saved plots section."""
         self._set_plots_section_visible(self._plot_list.isHidden())
 
     def _set_workspace_section_visible(self, visible: bool) -> None:
+        """Show or hide workspace dataset navigation controls."""
         self._dataset_list.setVisible(visible)
         self._dataset_buttons_panel.setVisible(visible)
         self._workspace_toggle_button.setText("Hide" if visible else "Show")
@@ -1076,25 +1107,30 @@ class MainWindow(QMainWindow):
             self._sync_checkable_action(self._show_workspace_action, visible)
 
     def _set_plots_section_visible(self, visible: bool) -> None:
+        """Show or hide saved plot navigation controls."""
         self._plot_list.setVisible(visible)
         self._plots_toggle_button.setText("Hide" if visible else "Show")
         if hasattr(self, "_show_plots_action"):
             self._sync_checkable_action(self._show_plots_action, visible)
 
     def _set_plot_options_visible_from_action(self, visible: bool) -> None:
+        """Apply the View menu plot-options visibility state."""
         self._plot_tab_widget.set_plot_options_visible(visible)
 
     def _sync_plot_options_action(self, visible: bool) -> None:
+        """Synchronize the View menu with plot-tab option visibility."""
         if hasattr(self, "_show_plot_options_action"):
             self._sync_checkable_action(self._show_plot_options_action, visible)
 
     @staticmethod
     def _sync_checkable_action(action: QAction, checked: bool) -> None:
+        """Set a checkable action without emitting its toggled signal."""
         action.blockSignals(True)
         action.setChecked(checked)
         action.blockSignals(False)
 
     def _reset_view_to_default(self) -> None:
+        """Restore default sidebar and plot-option visibility/layout."""
         self._set_sidebar_visible(True)
         self._set_workspace_section_visible(True)
         self._set_plots_section_visible(True)
@@ -1103,6 +1139,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Reset view to default")
 
     def _path_with_export_suffix(self, path: Path, selected_filter: str) -> Path:
+        """Append an export extension when the user omitted one."""
         if path.suffix:
             return path
 
@@ -1111,12 +1148,14 @@ class MainWindow(QMainWindow):
         return path.with_suffix(".csv")
 
     def _default_formula_target(self, dataset: Dataset) -> str:
+        """Return the default formula target from current column selection."""
         selected_columns = self._selected_dataset_columns()
         if len(selected_columns) == 1:
             return str(dataset.frame.columns[selected_columns[0]])
         return "Result"
 
     def _selected_dataset_columns(self) -> list[int]:
+        """Return sorted column indexes touched by the table selection."""
         selection_model = self._dataset_table.selectionModel()
         if selection_model is None:
             return []
@@ -1124,6 +1163,7 @@ class MainWindow(QMainWindow):
         return sorted({index.column() for index in selection_model.selectedIndexes()})
 
     def _select_column(self, column_name: str) -> None:
+        """Select a named column in the data editor if it exists."""
         dataset = self._current_dataset()
         if dataset is None or column_name not in dataset.frame.columns:
             return
@@ -1138,9 +1178,11 @@ class MainWindow(QMainWindow):
         self._dataset_table.selectColumn(column_index)
 
     def _has_project_content(self) -> bool:
+        """Return whether the current workspace has datasets or saved plots."""
         return bool(self._workspace.dataset_names() or self._workspace.plot_names())
 
     def _open_project(self) -> None:
+        """Open a `.jasc` project, replacing the current workspace."""
         if self._has_project_content():
             reply = QMessageBox.question(
                 self, "Open Project",
@@ -1164,6 +1206,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Open Failed", str(exc))
 
     def _save_project(self) -> None:
+        """Save the current workspace to a `.jasc` project file."""
         if not self._has_project_content():
             QMessageBox.information(self, "Save Project", "The workspace is empty.")
             return
@@ -1183,6 +1226,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save Failed", str(exc))
 
     def _close_project(self) -> None:
+        """Clear the current project without closing the application."""
         if not self._has_project_content():
             self.statusBar().showMessage("No project is open")
             return
@@ -1205,6 +1249,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Closed project")
 
     def _show_dataset_context_menu(self, pos) -> None:
+        """Show dataset rename/delete actions for a sidebar item."""
         item = self._dataset_list.itemAt(pos)
         if not item:
             return
@@ -1221,6 +1266,7 @@ class MainWindow(QMainWindow):
             self._delete_dataset(dataset_name)
 
     def _refresh_plot_list(self, selected_name: str | None = None) -> None:
+        """Refresh saved plot navigation and optionally reselect one plot."""
         plot_names = self._workspace.plot_names()
         target_name = selected_name if selected_name in plot_names else None
 
@@ -1236,15 +1282,18 @@ class MainWindow(QMainWindow):
         self._update_plot_action_state()
 
     def _current_plot_name(self) -> str | None:
+        """Return the selected saved plot name, if any."""
         current_item = self._plot_list.currentItem()
         return current_item.text() if current_item is not None else None
 
     def _handle_saved_plot_selection(self, plot_name: str) -> None:
+        """Load a selected saved plot into the editable Plot tab."""
         self._update_plot_action_state()
         if plot_name:
             self._load_plot_by_name(plot_name, show_message=False)
 
     def _save_current_plot(self) -> None:
+        """Save or overwrite the current plot definition in the workspace."""
         if not self._plot_tab_widget.has_plot_series():
             QMessageBox.information(self, "Save Plot", "Create a plot before saving it.")
             return
@@ -1285,6 +1334,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved plot '{saved_plot.name}'")
 
     def _load_selected_plot(self) -> None:
+        """Load the currently selected saved plot with user feedback."""
         plot_name = self._current_plot_name()
         if plot_name is None:
             QMessageBox.information(self, "Load Plot", "Select a saved plot before loading it.")
@@ -1293,6 +1343,7 @@ class MainWindow(QMainWindow):
         self._load_plot_by_name(plot_name, show_message=True)
 
     def _load_plot_by_name(self, plot_name: str, show_message: bool) -> None:
+        """Load a saved plot by name into the Plot tab."""
         if plot_name not in self._workspace.plot_names():
             self._update_plot_action_state()
             return
@@ -1311,6 +1362,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Selected saved plot '{plot_name}' for editing")
 
     def _delete_selected_plot(self) -> None:
+        """Remove the currently selected saved plot from the workspace."""
         plot_name = self._current_plot_name()
         if plot_name is None:
             QMessageBox.information(self, "Remove Plot", "Select a saved plot before removing it.")
@@ -1336,6 +1388,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Removed plot '{plot_name}'")
 
     def _show_plot_context_menu(self, pos) -> None:
+        """Show saved-plot load/remove actions for a sidebar item."""
         item = self._plot_list.itemAt(pos)
         if not item:
             return
@@ -1352,6 +1405,7 @@ class MainWindow(QMainWindow):
             self._delete_selected_plot()
 
     def _update_plot_action_state(self) -> None:
+        """Update plot menu and header action enabled states."""
         has_saved_plot = self._current_plot_name() is not None
         has_current_plot = self._plot_tab_widget.has_plot_series()
 
@@ -1368,6 +1422,7 @@ class MainWindow(QMainWindow):
         self._plot_tab_widget.set_active_plot_name(self._current_plot_name())
 
     def _rename_dataset(self, old_name: str) -> None:
+        """Prompt for and apply a dataset rename."""
         new_name, ok = QInputDialog.getText(self, "Rename Dataset", "New name:", text=old_name)
         if ok and new_name and new_name != old_name:
             try:
@@ -1380,6 +1435,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Rename Failed", str(exc))
 
     def _rename_current_dataset(self) -> None:
+        """Rename the currently selected dataset."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Rename Dataset", "Select a dataset before renaming it.")
@@ -1387,6 +1443,7 @@ class MainWindow(QMainWindow):
         self._rename_dataset(dataset.name)
 
     def _delete_dataset(self, name: str) -> None:
+        """Delete a named dataset after confirmation."""
         reply = QMessageBox.question(
             self, "Delete Dataset",
             f"Are you sure you want to delete '{name}'? This cannot be undone.",
@@ -1402,6 +1459,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Delete Failed", str(exc))
 
     def _delete_current_dataset(self) -> None:
+        """Delete the currently selected dataset."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Remove Dataset", "Select a dataset before removing it.")
