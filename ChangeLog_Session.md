@@ -144,6 +144,14 @@
 - [x] Added "Add Row" capability to the Data Editor and integrated it into the toolbar and Data menu, with proper enablement state tied to dataset availability.
 - [x] Renamed "Export Sheet" to "Export Dataset" across the UI for consistency.
 - [x] Added support for an application window icon, loading from the `resources/logo.png` directory.
+- [x] Added Manual Entry "Fill Range" for generating arithmetic X-style columns with start value, step, start row, and row count.
+- [x] Replaced Manual Entry "Fill Formula" with "Table Size" because formula generation belongs in the Data Editor manipulation workflow after saving the manual sheet.
+- [x] Added Manual Entry "Table Size" for setting explicit row and column counts.
+- [x] Reworked Manual Entry controls into stacked rows with minimum button widths so button labels remain readable in the sidebar.
+- [x] Rebalanced the GUI into clearer zones: project/import plus analysis shortcuts in the main toolbar, dataset editing actions in the Data Editor header, and plot actions in the Plot tab header.
+- [x] Added checkable View menu actions for sidebar, Workspace Datasheets, Saved Plots, and Plot Options visibility, with Reset View restoring all panels.
+- [x] Removed saved-plot action buttons from the sidebar so Saved Plots is primarily navigation and plot management lives with the Plot tab.
+- [x] Removed the redundant sidebar Import tab now that import is available from the File menu and main toolbar; the sidebar data-entry area is dedicated to Manual Entry.
 
 
 ## 3. Active Bugs / Known Issues

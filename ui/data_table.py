@@ -11,12 +11,18 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QGridLayout,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QHeaderView,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QSpinBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -59,22 +65,37 @@ class DataTableWidget(QWidget):
         remove_column_button = QPushButton("Remove Column")
         remove_column_button.clicked.connect(self._remove_selected_columns)
 
+        fill_range_button = QPushButton("Fill Range")
+        fill_range_button.clicked.connect(self._fill_range)
+
+        table_size_button = QPushButton("Table Size")
+        table_size_button.clicked.connect(self._set_table_size)
+
         save_button = QPushButton("Save Sheet")
         save_button.clicked.connect(self._submit_dataset)
 
-        controls = QGridLayout()
-        controls.addWidget(QLabel("Sheet name"), 0, 0)
-        controls.addWidget(self._sheet_name, 0, 1, 1, 3)
-        controls.addWidget(save_button, 0, 4)
-
-        controls.addWidget(add_row_button, 1, 0, 1, 2)
-        controls.addWidget(remove_row_button, 1, 2, 1, 3)
-        controls.addWidget(add_column_button, 2, 0, 1, 2)
-        controls.addWidget(remove_column_button, 2, 2, 1, 3)
+        controls = QVBoxLayout()
+        sheet_row = QHBoxLayout()
+        sheet_row.addWidget(QLabel("Sheet name"))
+        sheet_row.addWidget(self._sheet_name, 1)
+        controls.addLayout(sheet_row)
+        controls.addWidget(save_button)
+        controls.addLayout(self._button_row(add_row_button, remove_row_button))
+        controls.addLayout(self._button_row(add_column_button, remove_column_button))
+        controls.addLayout(self._button_row(fill_range_button, table_size_button))
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
         layout.addWidget(self._table)
+
+    @staticmethod
+    def _button_row(left_button: QPushButton, right_button: QPushButton) -> QHBoxLayout:
+        left_button.setMinimumWidth(118)
+        right_button.setMinimumWidth(118)
+        row = QHBoxLayout()
+        row.addWidget(left_button)
+        row.addWidget(right_button)
+        return row
 
     def to_dataframe(self) -> pd.DataFrame:
         """Convert non-empty table rows into a DataFrame."""
@@ -149,6 +170,54 @@ class DataTableWidget(QWidget):
                 column_index,
                 QTableWidgetItem(new_name.strip()),
             )
+
+    def _fill_range(self) -> None:
+        dialog = RangeFillDialog(
+            column_names=self._column_names(),
+            default_column=self._current_column_name(),
+            default_start_row=self._default_fill_start_row(),
+            default_count=self._default_fill_count(),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        try:
+            target_column = self._find_or_create_column(dialog.target_column())
+            start_row = dialog.start_row() - 1
+            count = dialog.count()
+            self._ensure_table_size(start_row + count, target_column + 1)
+            start_value = dialog.start_value()
+            step = dialog.step()
+            for offset in range(count):
+                value = start_value + offset * step
+                self._table.setItem(
+                    start_row + offset,
+                    target_column,
+                    QTableWidgetItem(f"{value:g}"),
+                )
+            self._table.setCurrentCell(start_row, target_column)
+        except Exception as exc:
+            QMessageBox.critical(self, "Fill Range Failed", str(exc))
+
+    def _set_table_size(self) -> None:
+        dialog = TableSizeDialog(
+            current_rows=self._table.rowCount(),
+            current_columns=self._table.columnCount(),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self._table.setRowCount(dialog.row_count())
+        current_columns = self._table.columnCount()
+        self._table.setColumnCount(dialog.column_count())
+        for column_index in range(current_columns, self._table.columnCount()):
+            self._table.setHorizontalHeaderItem(
+                column_index,
+                QTableWidgetItem(f"Column {column_index + 1}"),
+            )
+        self._refresh_missing_headers()
 
     def _submit_dataset(self) -> None:
         frame = self.to_dataframe()
@@ -225,12 +294,56 @@ class DataTableWidget(QWidget):
         while self._table.columnCount() < minimum_columns:
             self._add_column()
 
+    def _default_fill_count(self) -> int:
+        selected_rows = {index.row() for index in self._table.selectedIndexes()}
+        if selected_rows:
+            return len(selected_rows)
+        return self._table.rowCount()
+
+    def _default_fill_start_row(self) -> int:
+        selected_rows = {index.row() for index in self._table.selectedIndexes()}
+        if selected_rows:
+            return min(selected_rows) + 1
+        current_row = self._table.currentRow()
+        return current_row + 1 if current_row >= 0 else 1
+
+    def _current_column_name(self) -> str:
+        current_column = self._table.currentColumn()
+        if current_column >= 0:
+            item = self._table.horizontalHeaderItem(current_column)
+            if item and item.text().strip():
+                return item.text().strip()
+        return self._column_names()[0] if self._table.columnCount() else "Column 1"
+
+    def _find_or_create_column(self, column_name: str) -> int:
+        clean_name = column_name.strip()
+        if not clean_name:
+            raise ValueError("Choose or enter a target column.")
+
+        for column_index in range(self._table.columnCount()):
+            item = self._table.horizontalHeaderItem(column_index)
+            if item and item.text().strip() == clean_name:
+                return column_index
+
+        column_index = self._table.columnCount()
+        self._table.insertColumn(column_index)
+        self._table.setHorizontalHeaderItem(column_index, QTableWidgetItem(clean_name))
+        return column_index
+
     def _refresh_default_headers(self) -> None:
         for column_index in range(self._table.columnCount()):
             self._table.setHorizontalHeaderItem(
                 column_index,
                 QTableWidgetItem(f"Column {column_index + 1}"),
             )
+
+    def _refresh_missing_headers(self) -> None:
+        for column_index in range(self._table.columnCount()):
+            if self._table.horizontalHeaderItem(column_index) is None:
+                self._table.setHorizontalHeaderItem(
+                    column_index,
+                    QTableWidgetItem(f"Column {column_index + 1}"),
+                )
 
     def _column_names(self) -> list[str]:
         names: list[str] = []
@@ -260,3 +373,108 @@ class DataTableWidget(QWidget):
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
         return frame
+
+
+class RangeFillDialog(QDialog):
+    """Dialog for filling a manual-entry column with an arithmetic sequence."""
+
+    def __init__(
+        self,
+        column_names: list[str],
+        default_column: str,
+        default_start_row: int,
+        default_count: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Fill Range")
+
+        self._target_column = QComboBox()
+        self._target_column.setEditable(True)
+        self._target_column.addItems(column_names)
+        self._target_column.setCurrentText(default_column or "x")
+
+        self._start_row = QSpinBox()
+        self._start_row.setRange(1, 1_000_000)
+        self._start_row.setValue(max(default_start_row, 1))
+
+        self._count = QSpinBox()
+        self._count.setRange(1, 1_000_000)
+        self._count.setValue(max(default_count, 1))
+
+        self._start_value = QDoubleSpinBox()
+        self._start_value.setRange(-1.0e12, 1.0e12)
+        self._start_value.setDecimals(10)
+        self._start_value.setValue(0.0)
+
+        self._step = QDoubleSpinBox()
+        self._step.setRange(-1.0e12, 1.0e12)
+        self._step.setDecimals(10)
+        self._step.setValue(1.0)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QFormLayout(self)
+        layout.addRow("Target column", self._target_column)
+        layout.addRow("Start row", self._start_row)
+        layout.addRow("Rows", self._count)
+        layout.addRow("Start value", self._start_value)
+        layout.addRow("Step", self._step)
+        layout.addRow(buttons)
+
+    def target_column(self) -> str:
+        return self._target_column.currentText().strip()
+
+    def start_row(self) -> int:
+        return self._start_row.value()
+
+    def count(self) -> int:
+        return self._count.value()
+
+    def start_value(self) -> float:
+        return self._start_value.value()
+
+    def step(self) -> float:
+        return self._step.value()
+
+
+class TableSizeDialog(QDialog):
+    """Dialog for resizing the manual-entry table."""
+
+    def __init__(
+        self,
+        current_rows: int,
+        current_columns: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Table Size")
+
+        self._rows = QSpinBox()
+        self._rows.setRange(1, 1_000_000)
+        self._rows.setValue(max(current_rows, 1))
+
+        self._columns = QSpinBox()
+        self._columns.setRange(1, 10_000)
+        self._columns.setValue(max(current_columns, 1))
+
+        hint = QLabel("Reducing the table size removes cells outside the new row or column limits.")
+        hint.setWordWrap(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QFormLayout(self)
+        layout.addRow("Rows", self._rows)
+        layout.addRow("Columns", self._columns)
+        layout.addRow(hint)
+        layout.addRow(buttons)
+
+    def row_count(self) -> int:
+        return self._rows.value()
+
+    def column_count(self) -> int:
+        return self._columns.value()

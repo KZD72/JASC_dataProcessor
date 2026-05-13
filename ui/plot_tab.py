@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
     QMessageBox,
@@ -47,6 +48,10 @@ class PlotTab(QWidget):
 
     status_message = Signal(str)
     plot_rendered = Signal()
+    save_plot_requested = Signal()
+    load_plot_requested = Signal()
+    remove_plot_requested = Signal()
+    options_visibility_changed = Signal(bool)
 
     def __init__(self, workspace: Workspace, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -87,6 +92,16 @@ class PlotTab(QWidget):
     def has_plot_series(self) -> bool:
         """Return whether the plot tab has a restorable plot definition."""
         return bool(self._plot_series)
+
+    def set_active_plot_name(self, name: str | None) -> None:
+        """Update the plot header with the active saved plot name."""
+        self._active_plot_label.setText(name or "Unsaved plot")
+
+    def set_plot_actions_enabled(self, can_save: bool, can_load: bool, can_remove: bool) -> None:
+        """Set enabled state for plot-level header actions."""
+        self._save_plot_button.setEnabled(can_save)
+        self._load_plot_button.setEnabled(can_load)
+        self._remove_plot_button.setEnabled(can_remove)
 
     def suggested_plot_name(self) -> str:
         """Return a practical default name for saving the current plot."""
@@ -504,10 +519,24 @@ class PlotTab(QWidget):
         splitter.setSizes([460, 760])
         self._plot_splitter = splitter
 
-        self._toggle_options_button = QPushButton("Hide Plot Options")
+        self._active_plot_label = QLabel("Unsaved plot")
+        self._active_plot_label.setObjectName("SectionLabel")
+
+        self._save_plot_button = QPushButton("Save Plot")
+        self._save_plot_button.clicked.connect(self.save_plot_requested.emit)
+        self._load_plot_button = QPushButton("Load Selected")
+        self._load_plot_button.clicked.connect(self.load_plot_requested.emit)
+        self._remove_plot_button = QPushButton("Remove Saved")
+        self._remove_plot_button.clicked.connect(self.remove_plot_requested.emit)
+
+        self._toggle_options_button = QPushButton("Hide Options")
         self._toggle_options_button.clicked.connect(self._toggle_plot_options)
         top_row = QHBoxLayout()
+        top_row.addWidget(self._active_plot_label)
         top_row.addStretch(1)
+        top_row.addWidget(self._save_plot_button)
+        top_row.addWidget(self._load_plot_button)
+        top_row.addWidget(self._remove_plot_button)
         top_row.addWidget(self._toggle_options_button)
 
         layout = QVBoxLayout(self)
@@ -572,19 +601,25 @@ class PlotTab(QWidget):
         self._clear_locators_button.setEnabled(bool(self._plot_locators))
 
     def _toggle_plot_options(self) -> None:
-        hidden = not self._plot_options_scroll.isHidden()
-        self._plot_options_scroll.setHidden(hidden)
-        self._toggle_options_button.setText("Show Plot Options" if hidden else "Hide Plot Options")
-        if hidden:
-            self._plot_splitter.setSizes([0, 1])
-        else:
+        self.set_plot_options_visible(self._plot_options_scroll.isHidden())
+
+    def set_plot_options_visible(self, visible: bool) -> None:
+        """Show or hide the plot options panel."""
+        self._plot_options_scroll.setVisible(visible)
+        self._toggle_options_button.setText("Hide Options" if visible else "Show Options")
+        if visible:
             self._plot_splitter.setSizes([460, 760])
+        else:
+            self._plot_splitter.setSizes([0, 1])
+        self.options_visibility_changed.emit(visible)
+
+    def plot_options_visible(self) -> bool:
+        """Return whether the plot options panel is currently visible."""
+        return self._plot_options_scroll.isVisible()
 
     def reset_view_to_default(self) -> None:
         """Restore plot-panel visibility and splitter sizing."""
-        self._plot_options_scroll.show()
-        self._toggle_options_button.setText("Hide Plot Options")
-        self._plot_splitter.setSizes([460, 760])
+        self.set_plot_options_visible(True)
 
     def _refresh_series_list(self) -> None:
         self._series_list.clear()

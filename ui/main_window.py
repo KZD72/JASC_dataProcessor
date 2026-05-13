@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 from PySide6.QtCore import QModelIndex, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -99,9 +99,14 @@ class MainWindow(QMainWindow):
         self._plot_tab_widget = PlotTab(self._workspace, parent=self)
         self._plot_tab_widget.status_message.connect(self.statusBar().showMessage)
         self._plot_tab_widget.plot_rendered.connect(self._update_plot_action_state)
+        self._plot_tab_widget.save_plot_requested.connect(self._save_current_plot)
+        self._plot_tab_widget.load_plot_requested.connect(self._load_selected_plot)
+        self._plot_tab_widget.remove_plot_requested.connect(self._delete_selected_plot)
+        self._plot_tab_widget.options_visibility_changed.connect(self._sync_plot_options_action)
         self._tabs.addTab(self._plot_tab_widget, "Plot")
 
         sidebar = self._build_sidebar()
+        self._sidebar = sidebar
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(sidebar)
         splitter.addWidget(self._tabs)
@@ -119,14 +124,12 @@ class MainWindow(QMainWindow):
         sidebar = QWidget()
         sidebar.setMinimumWidth(320)
 
-        self._data_input_tabs = QTabWidget()
-        self._data_input_tabs.addTab(self._build_import_panel(), "Import")
-        self._data_input_tabs.addTab(self._manual_table, "Manual Entry")
-
         datasheet_label = QLabel("Workspace Datasheets")
         datasheet_label.setObjectName("SectionLabel")
         plots_label = QLabel("Saved Plots")
         plots_label.setObjectName("SectionLabel")
+        manual_label = QLabel("Manual Entry")
+        manual_label.setObjectName("SectionLabel")
 
         layout = QVBoxLayout(sidebar)
         datasheet_header = QHBoxLayout()
@@ -155,42 +158,40 @@ class MainWindow(QMainWindow):
         plots_header.addWidget(self._plots_toggle_button)
         layout.addLayout(plots_header)
         layout.addWidget(self._plot_list, 1)
-        self._plot_buttons_panel = QWidget()
-        plot_buttons = QHBoxLayout(self._plot_buttons_panel)
-        plot_buttons.setContentsMargins(0, 0, 0, 0)
-        self._save_plot_button = QPushButton("Save Plot")
-        self._save_plot_button.clicked.connect(self._save_current_plot)
-        self._load_plot_button = QPushButton("Load")
-        self._load_plot_button.clicked.connect(self._load_selected_plot)
-        self._remove_plot_button = QPushButton("Remove")
-        self._remove_plot_button.clicked.connect(self._delete_selected_plot)
-        plot_buttons.addWidget(self._save_plot_button)
-        plot_buttons.addWidget(self._load_plot_button)
-        plot_buttons.addWidget(self._remove_plot_button)
-        layout.addWidget(self._plot_buttons_panel)
-        layout.addWidget(self._data_input_tabs, 3)
+        layout.addWidget(manual_label)
+        layout.addWidget(self._manual_table, 3)
         return sidebar
-
-    def _build_import_panel(self) -> QWidget:
-        panel = QWidget()
-
-        import_button = QPushButton("Import Data...")
-        import_button.clicked.connect(self._import_data_file)
-
-        hint = QLabel("Load CSV or TXT files into the workspace.")
-        hint.setWordWrap(True)
-
-        layout = QVBoxLayout(panel)
-        layout.addWidget(import_button)
-        layout.addWidget(hint)
-        layout.addStretch(1)
-        return panel
 
     def _build_dataset_editor(self) -> QWidget:
         editor = QWidget()
 
+        self._editor_add_row_button = QPushButton("Add Row")
+        self._editor_add_row_button.clicked.connect(self._add_empty_row)
+        self._editor_add_column_button = QPushButton("Add Column")
+        self._editor_add_column_button.clicked.connect(self._add_empty_column)
+        self._editor_delete_rows_button = QPushButton("Delete Rows")
+        self._editor_delete_rows_button.clicked.connect(self._delete_selected_rows)
+        self._editor_delete_columns_button = QPushButton("Delete Columns")
+        self._editor_delete_columns_button.clicked.connect(self._delete_selected_columns)
+        self._editor_rename_button = QPushButton("Rename")
+        self._editor_rename_button.clicked.connect(self._rename_current_dataset)
+        self._editor_remove_button = QPushButton("Remove")
+        self._editor_remove_button.clicked.connect(self._delete_current_dataset)
+        self._editor_export_button = QPushButton("Export")
+        self._editor_export_button.clicked.connect(self._export_current_dataset)
+
+        action_row = QHBoxLayout()
+        action_row.addWidget(self._dataset_summary, 1)
+        action_row.addWidget(self._editor_add_row_button)
+        action_row.addWidget(self._editor_add_column_button)
+        action_row.addWidget(self._editor_delete_rows_button)
+        action_row.addWidget(self._editor_delete_columns_button)
+        action_row.addWidget(self._editor_rename_button)
+        action_row.addWidget(self._editor_remove_button)
+        action_row.addWidget(self._editor_export_button)
+
         layout = QVBoxLayout(editor)
-        layout.addWidget(self._dataset_summary)
+        layout.addLayout(action_row)
         layout.addWidget(self._dataset_table)
         return editor
 
@@ -230,6 +231,27 @@ class MainWindow(QMainWindow):
         delete_columns_action.triggered.connect(self._delete_selected_columns)
 
         view_menu = self.menuBar().addMenu("&View")
+        show_sidebar_action = view_menu.addAction("Show &Sidebar")
+        show_sidebar_action.setCheckable(True)
+        show_sidebar_action.setChecked(True)
+        show_sidebar_action.toggled.connect(self._set_sidebar_visible)
+
+        show_workspace_action = view_menu.addAction("Show &Workspace Datasheets")
+        show_workspace_action.setCheckable(True)
+        show_workspace_action.setChecked(True)
+        show_workspace_action.toggled.connect(self._set_workspace_section_visible)
+
+        show_plots_action = view_menu.addAction("Show Saved &Plots")
+        show_plots_action.setCheckable(True)
+        show_plots_action.setChecked(True)
+        show_plots_action.toggled.connect(self._set_plots_section_visible)
+
+        show_plot_options_action = view_menu.addAction("Show Plot &Options")
+        show_plot_options_action.setCheckable(True)
+        show_plot_options_action.setChecked(True)
+        show_plot_options_action.toggled.connect(self._set_plot_options_visible_from_action)
+
+        view_menu.addSeparator()
         reset_view_action = view_menu.addAction("&Reset View to Default")
         reset_view_action.setShortcut("Ctrl+Shift+R")
         reset_view_action.triggered.connect(self._reset_view_to_default)
@@ -287,13 +309,11 @@ class MainWindow(QMainWindow):
 
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
-        toolbar.addAction(add_column_action)
-        toolbar.addAction(add_row_action)
-        toolbar.addAction(delete_columns_action)
-        toolbar.addAction(delete_rows_action)
-        toolbar.addAction(rename_dataset_action)
-        toolbar.addAction(delete_dataset_action)
-        toolbar.addAction(export_action)
+        toolbar.addAction(open_project_action)
+        toolbar.addAction(save_project_action)
+        toolbar.addAction(close_project_action)
+        toolbar.addSeparator()
+        toolbar.addAction(import_action)
         
         toolbar.addSeparator()
 
@@ -322,6 +342,10 @@ class MainWindow(QMainWindow):
         self._load_plot_action = load_plot_action
         self._delete_plot_action = delete_plot_action
         self._add_row_action = add_row_action
+        self._show_sidebar_action = show_sidebar_action
+        self._show_workspace_action = show_workspace_action
+        self._show_plots_action = show_plots_action
+        self._show_plot_options_action = show_plot_options_action
         self._update_dataset_summary()
 
     def _apply_visual_style(self) -> None:
@@ -1023,8 +1047,20 @@ class MainWindow(QMainWindow):
         self._fit_action.setEnabled(has_dataset)
         self._rename_dataset_button.setEnabled(has_dataset)
         self._remove_dataset_button.setEnabled(has_dataset)
+        self._editor_add_row_button.setEnabled(has_dataset)
+        self._editor_add_column_button.setEnabled(has_dataset)
+        self._editor_delete_rows_button.setEnabled(has_dataset)
+        self._editor_delete_columns_button.setEnabled(has_dataset)
+        self._editor_rename_button.setEnabled(has_dataset)
+        self._editor_remove_button.setEnabled(has_dataset)
+        self._editor_export_button.setEnabled(has_dataset)
         self._close_project_action.setEnabled(has_project_content)
         self._update_plot_action_state()
+
+    def _set_sidebar_visible(self, visible: bool) -> None:
+        self._sidebar.setVisible(visible)
+        if hasattr(self, "_show_sidebar_action"):
+            self._sync_checkable_action(self._show_sidebar_action, visible)
 
     def _toggle_workspace_section(self) -> None:
         self._set_workspace_section_visible(self._dataset_list.isHidden())
@@ -1036,13 +1072,30 @@ class MainWindow(QMainWindow):
         self._dataset_list.setVisible(visible)
         self._dataset_buttons_panel.setVisible(visible)
         self._workspace_toggle_button.setText("Hide" if visible else "Show")
+        if hasattr(self, "_show_workspace_action"):
+            self._sync_checkable_action(self._show_workspace_action, visible)
 
     def _set_plots_section_visible(self, visible: bool) -> None:
         self._plot_list.setVisible(visible)
-        self._plot_buttons_panel.setVisible(visible)
         self._plots_toggle_button.setText("Hide" if visible else "Show")
+        if hasattr(self, "_show_plots_action"):
+            self._sync_checkable_action(self._show_plots_action, visible)
+
+    def _set_plot_options_visible_from_action(self, visible: bool) -> None:
+        self._plot_tab_widget.set_plot_options_visible(visible)
+
+    def _sync_plot_options_action(self, visible: bool) -> None:
+        if hasattr(self, "_show_plot_options_action"):
+            self._sync_checkable_action(self._show_plot_options_action, visible)
+
+    @staticmethod
+    def _sync_checkable_action(action: QAction, checked: bool) -> None:
+        action.blockSignals(True)
+        action.setChecked(checked)
+        action.blockSignals(False)
 
     def _reset_view_to_default(self) -> None:
+        self._set_sidebar_visible(True)
         self._set_workspace_section_visible(True)
         self._set_plots_section_visible(True)
         self._main_splitter.setSizes([380, 720])
@@ -1307,10 +1360,12 @@ class MainWindow(QMainWindow):
             self._load_plot_action.setEnabled(has_saved_plot)
             self._delete_plot_action.setEnabled(has_saved_plot)
 
-        if hasattr(self, "_save_plot_button"):
-            self._save_plot_button.setEnabled(has_current_plot)
-            self._load_plot_button.setEnabled(has_saved_plot)
-            self._remove_plot_button.setEnabled(has_saved_plot)
+        self._plot_tab_widget.set_plot_actions_enabled(
+            can_save=has_current_plot,
+            can_load=has_saved_plot,
+            can_remove=has_saved_plot,
+        )
+        self._plot_tab_widget.set_active_plot_name(self._current_plot_name())
 
     def _rename_dataset(self, old_name: str) -> None:
         new_name, ok = QInputDialog.getText(self, "Rename Dataset", "New name:", text=old_name)
