@@ -132,6 +132,15 @@
 - [x] Restored/generated plots now select the first queued trace so Series controls reflect the editable trace instead of stale controls from the previous plot.
 - [x] Added File > Close Project to clear the current workspace, saved plots, active plot, and editor state without exiting the app.
 - [x] Added an initial visual polish stylesheet with stronger button hover/pressed states, clearer list selection, tab framing, table headers, and section labels.
+- [x] Removed duplicated Data Editor action buttons so sheet operations are concentrated in the main toolbar and menus.
+- [x] Added hide/show controls for Workspace Datasheets and Saved Plots so the Data Input/manual-entry area can expand.
+- [x] Added a Plot Options hide/show control so the Matplotlib canvas can use the full plot workspace.
+- [x] Manual Entry columns now keep an interactive default width and use horizontal scrolling instead of shrinking to fit all columns.
+- [x] Plot Options now opens at a wider usable default size and can be reset with the new View menu.
+- [x] Added View > Reset View to Default (`Ctrl+Shift+R`) to restore sidebar sections, splitters, and plot option visibility.
+- [x] Removed the non-functional "Scatter" shortcut button from the Plot tab.
+- [x] Fixed Manual Entry button layout in the sidebar to prevent text from being cut off.
+
 
 ## 3. Active Bugs / Known Issues
 - [ ] No runtime application bugs found in the previous smoke testing, but this session could not rerun Python checks because no usable Python launcher is available in the current shell.

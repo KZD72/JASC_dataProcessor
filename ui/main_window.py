@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([380, 720])
+        self._main_splitter = splitter
 
         self.setCentralWidget(splitter)
         self._create_actions()
@@ -124,19 +125,35 @@ class MainWindow(QMainWindow):
         plots_label.setObjectName("SectionLabel")
 
         layout = QVBoxLayout(sidebar)
-        layout.addWidget(datasheet_label)
+        datasheet_header = QHBoxLayout()
+        datasheet_header.addWidget(datasheet_label)
+        datasheet_header.addStretch(1)
+        self._workspace_toggle_button = QPushButton("Hide")
+        self._workspace_toggle_button.clicked.connect(self._toggle_workspace_section)
+        datasheet_header.addWidget(self._workspace_toggle_button)
+        layout.addLayout(datasheet_header)
         layout.addWidget(self._dataset_list, 2)
-        dataset_buttons = QHBoxLayout()
+        self._dataset_buttons_panel = QWidget()
+        dataset_buttons = QHBoxLayout(self._dataset_buttons_panel)
+        dataset_buttons.setContentsMargins(0, 0, 0, 0)
         self._rename_dataset_button = QPushButton("Rename")
         self._rename_dataset_button.clicked.connect(self._rename_current_dataset)
         self._remove_dataset_button = QPushButton("Remove")
         self._remove_dataset_button.clicked.connect(self._delete_current_dataset)
         dataset_buttons.addWidget(self._rename_dataset_button)
         dataset_buttons.addWidget(self._remove_dataset_button)
-        layout.addLayout(dataset_buttons)
-        layout.addWidget(plots_label)
+        layout.addWidget(self._dataset_buttons_panel)
+        plots_header = QHBoxLayout()
+        plots_header.addWidget(plots_label)
+        plots_header.addStretch(1)
+        self._plots_toggle_button = QPushButton("Hide")
+        self._plots_toggle_button.clicked.connect(self._toggle_plots_section)
+        plots_header.addWidget(self._plots_toggle_button)
+        layout.addLayout(plots_header)
         layout.addWidget(self._plot_list, 1)
-        plot_buttons = QHBoxLayout()
+        self._plot_buttons_panel = QWidget()
+        plot_buttons = QHBoxLayout(self._plot_buttons_panel)
+        plot_buttons.setContentsMargins(0, 0, 0, 0)
         self._save_plot_button = QPushButton("Save Plot")
         self._save_plot_button.clicked.connect(self._save_current_plot)
         self._load_plot_button = QPushButton("Load")
@@ -146,7 +163,7 @@ class MainWindow(QMainWindow):
         plot_buttons.addWidget(self._save_plot_button)
         plot_buttons.addWidget(self._load_plot_button)
         plot_buttons.addWidget(self._remove_plot_button)
-        layout.addLayout(plot_buttons)
+        layout.addWidget(self._plot_buttons_panel)
         layout.addWidget(self._data_input_tabs, 3)
         return sidebar
 
@@ -168,56 +185,8 @@ class MainWindow(QMainWindow):
     def _build_dataset_editor(self) -> QWidget:
         editor = QWidget()
 
-        add_column_button = QPushButton("Add Column")
-        add_column_button.clicked.connect(self._add_empty_column)
-
-        apply_formula_button = QPushButton("Apply Formula")
-        apply_formula_button.clicked.connect(self._apply_column_formula)
-
-        self._derivative_button = QPushButton("Derivative")
-        self._derivative_button.clicked.connect(self._run_derivative)
-
-        self._integral_button = QPushButton("Integral")
-        self._integral_button.clicked.connect(self._run_integral)
-
-        self._fft_button = QPushButton("FFT")
-        self._fft_button.clicked.connect(self._run_fft)
-
-        self._ifft_button = QPushButton("iFFT")
-        self._ifft_button.clicked.connect(self._run_ifft)
-
-        self._fit_button = QPushButton("Fit Curve")
-        self._fit_button.clicked.connect(self._run_curve_fit)
-
-        self._delete_rows_button = QPushButton("Delete Selected Rows")
-        self._delete_rows_button.clicked.connect(self._delete_selected_rows)
-
-        self._delete_columns_button = QPushButton("Delete Selected Columns")
-        self._delete_columns_button.clicked.connect(self._delete_selected_columns)
-
-        export_button = QPushButton("Export Sheet")
-        export_button.clicked.connect(self._export_current_dataset)
-
-        controls_row1 = QHBoxLayout()
-        controls_row1.addWidget(self._dataset_summary)
-        controls_row1.addStretch(1)
-        controls_row1.addWidget(add_column_button)
-        controls_row1.addWidget(apply_formula_button)
-        controls_row1.addWidget(self._delete_rows_button)
-        controls_row1.addWidget(self._delete_columns_button)
-        controls_row1.addWidget(export_button)
-
-        controls_row2 = QHBoxLayout()
-        controls_row2.addStretch(1)
-        controls_row2.addWidget(self._derivative_button)
-        controls_row2.addWidget(self._integral_button)
-        controls_row2.addWidget(self._fft_button)
-        controls_row2.addWidget(self._ifft_button)
-        controls_row2.addWidget(self._fit_button)
-
         layout = QVBoxLayout(editor)
-        layout.addLayout(controls_row1)
-        layout.addLayout(controls_row2)
+        layout.addWidget(self._dataset_summary)
         layout.addWidget(self._dataset_table)
         return editor
 
@@ -255,6 +224,11 @@ class MainWindow(QMainWindow):
 
         delete_columns_action = edit_menu.addAction("Delete Selected &Columns")
         delete_columns_action.triggered.connect(self._delete_selected_columns)
+
+        view_menu = self.menuBar().addMenu("&View")
+        reset_view_action = view_menu.addAction("&Reset View to Default")
+        reset_view_action.setShortcut("Ctrl+Shift+R")
+        reset_view_action.triggered.connect(self._reset_view_to_default)
 
         data_menu = self.menuBar().addMenu("&Data")
         rename_dataset_action = data_menu.addAction("&Rename Dataset...")
@@ -1024,17 +998,33 @@ class MainWindow(QMainWindow):
         self._fft_action.setEnabled(has_dataset)
         self._ifft_action.setEnabled(has_dataset)
         self._fit_action.setEnabled(has_dataset)
-        self._derivative_button.setEnabled(has_dataset)
-        self._integral_button.setEnabled(has_dataset)
-        self._fft_button.setEnabled(has_dataset)
-        self._ifft_button.setEnabled(has_dataset)
-        self._fit_button.setEnabled(has_dataset)
-        self._delete_rows_button.setEnabled(has_dataset)
-        self._delete_columns_button.setEnabled(has_dataset)
         self._rename_dataset_button.setEnabled(has_dataset)
         self._remove_dataset_button.setEnabled(has_dataset)
         self._close_project_action.setEnabled(has_project_content)
         self._update_plot_action_state()
+
+    def _toggle_workspace_section(self) -> None:
+        self._set_workspace_section_visible(self._dataset_list.isHidden())
+
+    def _toggle_plots_section(self) -> None:
+        self._set_plots_section_visible(self._plot_list.isHidden())
+
+    def _set_workspace_section_visible(self, visible: bool) -> None:
+        self._dataset_list.setVisible(visible)
+        self._dataset_buttons_panel.setVisible(visible)
+        self._workspace_toggle_button.setText("Hide" if visible else "Show")
+
+    def _set_plots_section_visible(self, visible: bool) -> None:
+        self._plot_list.setVisible(visible)
+        self._plot_buttons_panel.setVisible(visible)
+        self._plots_toggle_button.setText("Hide" if visible else "Show")
+
+    def _reset_view_to_default(self) -> None:
+        self._set_workspace_section_visible(True)
+        self._set_plots_section_visible(True)
+        self._main_splitter.setSizes([380, 720])
+        self._plot_tab_widget.reset_view_to_default()
+        self.statusBar().showMessage("Reset view to default")
 
     def _path_with_export_suffix(self, path: Path, selected_filter: str) -> Path:
         if path.suffix:

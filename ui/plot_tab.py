@@ -414,8 +414,6 @@ class PlotTab(QWidget):
         clr_btn.clicked.connect(self._clear_series)
         self._clear_series_button = clr_btn
 
-        scatter_btn = QPushButton("Scatter")
-        scatter_btn.clicked.connect(self._set_scatter_only)
 
         self._render_button = QPushButton("Plot")
         self._render_button.clicked.connect(self._render_plot)
@@ -447,7 +445,7 @@ class PlotTab(QWidget):
         sf.addRow("Marker size", self._marker_size_spin)
         sf.addRow("Color", self._color_combo)
         sb = QHBoxLayout()
-        sb.addWidget(add_btn); sb.addWidget(update_btn); sb.addWidget(rm_btn); sb.addWidget(clr_btn); sb.addWidget(scatter_btn)
+        sb.addWidget(add_btn); sb.addWidget(update_btn); sb.addWidget(rm_btn); sb.addWidget(clr_btn)
         sf.addRow(sb)
         sf.addRow("Queued", self._series_list)
 
@@ -486,6 +484,7 @@ class PlotTab(QWidget):
         ctrl_tabs.addTab(locator_group, "Locator")
 
         ctrl_panel = QWidget()
+        ctrl_panel.setMinimumWidth(420)
         cl = QVBoxLayout(ctrl_panel)
         cl.addWidget(ctrl_tabs)
         cl.addStretch(1)
@@ -493,16 +492,26 @@ class PlotTab(QWidget):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(440)
         scroll.setWidget(ctrl_panel)
+        self._plot_options_scroll = scroll
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(scroll)
         splitter.addWidget(self._plot_canvas)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([330, 760])
+        splitter.setSizes([460, 760])
+        self._plot_splitter = splitter
+
+        self._toggle_options_button = QPushButton("Hide Plot Options")
+        self._toggle_options_button.clicked.connect(self._toggle_plot_options)
+        top_row = QHBoxLayout()
+        top_row.addStretch(1)
+        top_row.addWidget(self._toggle_options_button)
 
         layout = QVBoxLayout(self)
+        layout.addLayout(top_row)
         layout.addWidget(splitter)
 
         self._x_dataset_combo.currentTextChanged.connect(
@@ -561,6 +570,21 @@ class PlotTab(QWidget):
         self._add_locator_button.setEnabled(bool(self._plot_series))
         self._remove_locator_button.setEnabled(bool(self._locator_list.selectedItems()))
         self._clear_locators_button.setEnabled(bool(self._plot_locators))
+
+    def _toggle_plot_options(self) -> None:
+        hidden = not self._plot_options_scroll.isHidden()
+        self._plot_options_scroll.setHidden(hidden)
+        self._toggle_options_button.setText("Show Plot Options" if hidden else "Hide Plot Options")
+        if hidden:
+            self._plot_splitter.setSizes([0, 1])
+        else:
+            self._plot_splitter.setSizes([460, 760])
+
+    def reset_view_to_default(self) -> None:
+        """Restore plot-panel visibility and splitter sizing."""
+        self._plot_options_scroll.show()
+        self._toggle_options_button.setText("Hide Plot Options")
+        self._plot_splitter.setSizes([460, 760])
 
     def _refresh_series_list(self) -> None:
         self._series_list.clear()
@@ -718,12 +742,6 @@ class PlotTab(QWidget):
         self.status_message.emit("Cleared plot series")
         self.plot_rendered.emit()
 
-    def _set_scatter_only(self) -> None:
-        none_index = self._line_style_combo.findData("")
-        if none_index >= 0:
-            self._line_style_combo.setCurrentIndex(none_index)
-        if self._marker_combo.currentText() == "None":
-            self._marker_combo.setCurrentText("Circle")
 
     # -- locator management -------------------------------------------------
 
