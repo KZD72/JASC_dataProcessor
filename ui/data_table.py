@@ -30,7 +30,7 @@ class DataTableWidget(QWidget):
 
     dataset_submitted = Signal(str, object)
 
-    def __init__(self, parent: object | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
         self._sheet_name = QLineEdit("Manual Sheet")

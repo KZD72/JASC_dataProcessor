@@ -6,8 +6,8 @@
 
 ## 1. Project State
 - **Current Version**: 0.1.0
-- **Last Updated**: 2026-05-12
-- **Current Phase**: Phase 3 (Basic Math & Signal Processing)
+- **Last Updated**: 2026-05-13
+- **Current Phase**: Phase 5 (Polish & Packaging)
 
 ## 2. Completed Tasks
 - [x] Initial project definition, tech stack selection, and requirements gathering.
@@ -67,6 +67,18 @@
 - [x] Added a full fit report dialog with fitted parameters, standard errors, covariance matrix, R^2, adjusted R^2, RMSE, MAE, and residual statistics.
 - [x] Curve fitting now creates a new workspace result sheet and immediately plots raw data against the fitted curve.
 - [x] Fixed cross-dataset plot-series labels so labels no longer fall through when X and Y come from different sheets.
+- [x] Extracted plotting into `ui/plot_tab.py` and removed stale embedded plot code from `ui/main_window.py`.
+- [x] Fixed workspace refresh after project open and dataset deletion so the data editor selects a valid sheet or clears itself.
+- [x] Fixed plot state cleanup after project open, dataset rename, and dataset deletion.
+- [x] Fixed the Plot tab scatter shortcut so it actually creates marker-only series.
+- [x] Project saves now append `.jasc` when the user enters a filename without an extension.
+- [x] Added Phase 4 fitting refinements: editable parameter initial values, lower/upper bounds, and fixed/free parameter controls.
+- [x] Added weighted fitting through optional sigma/error or weight columns, including absolute-sigma handling.
+- [x] Added confidence-band generation for fitted curves and confidence-band plotting in the plot canvas.
+- [x] Added residual-sheet generation and optional residual plotting on the right Y axis for curve fits.
+- [x] Added Phase 3 "plot result immediately" shortcuts for derivative, integral, FFT, and inverse FFT workflows.
+- [x] Added per-series custom labels, line width, marker size, and edit/update controls in the Plot tab.
+- [x] Exposed dataset Rename/Remove actions through sidebar buttons, the Data menu, and the main toolbar.
 - [x] Ran smoke checks:
   - `python -m py_compile main.py ui/main_window.py ui/plot_canvas.py ui/dialogs.py ui/data_table.py ui/dataframe_model.py core/workspace.py core/file_io.py core/operations.py math_engine/__init__.py math_engine/calculus.py`
   - Core CSV import/workspace smoke test.
@@ -96,17 +108,44 @@
   - Phase 4 main-window fit handler smoke test.
   - DataFrame model selected-column deletion smoke test.
   - Main-window selected-column deletion smoke test.
+  - Main-window project-open refresh regression smoke test.
+  - Main-window dataset-delete editor-clearing smoke test.
+  - Plot tab scatter shortcut regression smoke test.
+  - Project save suffix smoke test.
+  - Fit handler smoke test using the extracted `PlotTab`.
+  - Advanced curve-fit smoke test for bounds, fixed parameters, sigma weights, confidence bands, and residual output.
+  - Enhanced fitting/options dialog smoke test.
+  - Plot tab series add/edit smoke test for custom labels and style sizing.
+  - Main-window curve-fit handler smoke test with residual sheet and residual overlay.
+  - Derivative plot shortcut smoke test.
+  - FFT plot shortcut smoke test.
+  - Plot canvas legend-toggle and confidence-band smoke test.
+  - Workspace menu/sidebar action enablement smoke test.
+- [x] Added saved plot workspace state with named plot definitions.
+- [x] Added a Saved Plots sidebar section and Plot menu actions for saving, loading, and removing current plot definitions.
+- [x] Saved plot definitions now persist through `.jasc` project save/load metadata.
+- [x] Saved plot definitions include series, locators, axes labels, scales, ranges, grid/legend settings, and figure size.
+- [x] Dataset renames update saved plot dataset references.
+- [x] Updated README project-persistence wording to include saved plots instead of fit reports.
+- [x] Updated README Python minimum version to 3.10+ to match current type-hint syntax.
+- [x] Polished saved plot editing so selecting a saved plot loads it into the Plot tab as the active editable plot.
+- [x] Restored/generated plots now select the first queued trace so Series controls reflect the editable trace instead of stale controls from the previous plot.
+- [x] Added File > Close Project to clear the current workspace, saved plots, active plot, and editor state without exiting the app.
+- [x] Added an initial visual polish stylesheet with stronger button hover/pressed states, clearer list selection, tab framing, table headers, and section labels.
 
 ## 3. Active Bugs / Known Issues
-- [ ] No application bugs found in smoke testing.
+- [ ] No runtime application bugs found in the previous smoke testing, but this session could not rerun Python checks because no usable Python launcher is available in the current shell.
 - [ ] `git` is not available in the current shell, so worktree status could not be checked.
+- [ ] Required analytical-model list mentions arbitrary n-th degree polynomial fitting, but the current fit registry only has linear, quadratic, and cubic polynomial models.
+- [ ] There is no automated test suite or PyInstaller/spec packaging file in the repository yet.
 
 ## 4. Next Steps for Current/New Session (To-Do)
-1. Run `python main.py` in a normal desktop session and manually test derivative, integral, FFT, iFFT, selected-column deletion, and curve fitting on real datasets.
-2. Add Phase 4 refinements: parameter bounds, fixed/free parameter controls, weighted fits, and optional confidence-band plotting.
-3. Add optional "plot result immediately" shortcuts for Phase 3 outputs.
-4. Add richer plot controls such as scatter-only mode, legend toggle/location, and per-series labels.
-5. Add workspace management actions such as rename/remove dataset.
+1. Install or activate usable `python` and `git` commands, then rerun the documented smoke checks and capture real worktree status.
+2. Run `python main.py` in a normal desktop session and manually test project open/save, dataset rename/delete, selected-column deletion, derivative, integral, FFT, iFFT, curve fitting bounds/fixed/weights/confidence bands/residuals, and plot series editing on real datasets.
+3. Begin Phase 5 polish: tighten spacing/text in the larger dialogs, review menu/toolbar ordering, and standardize button labels.
+4. Add broader edge-case tests for unusual imported data, singular fits, non-monotonic X values, missing values, and project files with many sheets.
+5. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
+6. Write the PyInstaller setup script for building the standalone `.exe`.
 
 ## 5. Architectural Context Notes
 - File parsing lives in `core/file_io.py`; Qt file selection and dialogs live in the UI layer.
@@ -121,7 +160,8 @@
 - Formula metadata is currently in-memory project state: it is retained while the app session/dataset exists, but it is not yet exported with CSV/TXT files.
 - Formula namespaces expose a curated NumPy/SciPy math/signal/stat/integration subset, including examples such as `np.gradient(x)`, `scipy.special.erf(x)`, `scipy.signal.savgol_filter(y, 11, 3)`, `stats.zscore(x)`, and `integrate.cumulative_trapezoid(y, x, initial=0)`.
 - File-oriented helpers such as `np.load` are intentionally unavailable in formulas.
-- Plotting lives in `ui/plot_canvas.py`; main-window controls collect workspace column mappings and pass `PlotSeries` objects to the canvas.
+- Plotting UI and plot state live in `ui/plot_tab.py`; rendering primitives live in `ui/plot_canvas.py`.
+- Saved plot definitions live in `Workspace` as JSON-friendly state dictionaries and are serialized in `.jasc` project metadata under `plots`.
 - Cross-dataset plots currently align X/Y data by row order and truncate to the shorter column length before dropping non-numeric/blank points.
 - Right-axis plotting is controlled per queued series; moving an already queued series currently means removing it and adding it again with the desired axis.
 - Plot ranges are optional blank min/max fields; blank entries leave that side auto-scaled.
@@ -134,4 +174,7 @@
 - Curve fitting is implemented as the first Phase 4 pass, with model/method selection, fitted-curve datasets, immediate overlay plotting, and full text reports.
 - Phase 4 curve fitting saves fitted curve points as a new workspace dataset with `fit_x` and `fit_y` columns.
 - Running a fit replaces the current plot queue with the source data and fitted curve so the overlay is visible immediately.
-- Fit initial-parameter text accepts comma, semicolon, or whitespace-separated numbers; leaving it blank uses automatic guesses based on the selected data.
+- Fit parameters are edited in a table with initial values, optional lower/upper bounds, and fixed/free checkboxes.
+- Curve fitting can use an optional sigma/error column or weight column; weight mode converts weights to sigma as `1/sqrt(weight)`.
+- Confidence bands are stored as `fit_lower` and `fit_upper` in the fitted-curve dataset when enabled.
+- Residual outputs are stored as a separate dataset with `x`, `observed`, `fitted`, and `residual` columns when enabled.

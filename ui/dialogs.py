@@ -10,11 +10,17 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
+    QHeaderView,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QWidget,
     QVBoxLayout,
 )
 
@@ -34,7 +40,7 @@ class ImportOptionsDialog(QDialog):
         ("Space / whitespace", " "),
     )
 
-    def __init__(self, parent: object | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Import Options")
         self.setModal(True)
@@ -75,7 +81,7 @@ class ColumnExpressionDialog(QDialog):
         selected_rows_available: bool,
         default_target: str | None = None,
         column_formulas: dict[str, str] | None = None,
-        parent: object | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Apply Formula")
@@ -202,7 +208,7 @@ class ColumnMathDialog(QDialog):
         methods: dict[str, str],
         default_target: str,
         include_initial_value: bool = False,
-        parent: object | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(operation_name)
@@ -224,6 +230,8 @@ class ColumnMathDialog(QDialog):
         self._target_edit = QLineEdit(default_target)
         self._initial_value_edit = QLineEdit("0")
         self._include_initial_value = include_initial_value
+        self._plot_result_checkbox = QCheckBox("Plot result immediately")
+        self._plot_result_checkbox.setChecked(True)
 
         form = QFormLayout()
         form.addRow("X column", self._x_column_combo)
@@ -232,6 +240,7 @@ class ColumnMathDialog(QDialog):
         if self._include_initial_value:
             form.addRow("Initial value", self._initial_value_edit)
         form.addRow("Target column", self._target_edit)
+        form.addRow("", self._plot_result_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -261,11 +270,15 @@ class ColumnMathDialog(QDialog):
         """Return the raw initial value text for operations that need it."""
         return self._initial_value_edit.text().strip()
 
+    def plot_result_immediately(self) -> bool:
+        """Return whether the operation result should be plotted immediately."""
+        return self._plot_result_checkbox.isChecked()
+
 
 class FFTDialog(QDialog):
     """Collect settings for FFT operations."""
 
-    def __init__(self, column_names: list[str], default_dataset_name: str, parent: object | None = None) -> None:
+    def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("FFT")
         self.setModal(True)
@@ -286,12 +299,15 @@ class FFTDialog(QDialog):
             self._window_combo.addItem(window_label, window_key)
 
         self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_FFT")
+        self._plot_result_checkbox = QCheckBox("Plot magnitude immediately")
+        self._plot_result_checkbox.setChecked(True)
 
         form = QFormLayout()
         form.addRow("Signal column", self._signal_column_combo)
         form.addRow("X/time column", self._x_column_combo)
         form.addRow("Window", self._window_combo)
         form.addRow("Result sheet", self._target_dataset_edit)
+        form.addRow("", self._plot_result_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -318,11 +334,15 @@ class FFTDialog(QDialog):
         """Return requested result dataset name."""
         return self._target_dataset_edit.text().strip()
 
+    def plot_result_immediately(self) -> bool:
+        """Return whether the FFT magnitude should be plotted immediately."""
+        return self._plot_result_checkbox.isChecked()
+
 
 class IFFTDialog(QDialog):
     """Collect settings for inverse FFT operations."""
 
-    def __init__(self, column_names: list[str], default_dataset_name: str, parent: object | None = None) -> None:
+    def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Inverse FFT")
         self.setModal(True)
@@ -342,11 +362,14 @@ class IFFTDialog(QDialog):
             self._real_column_combo.setCurrentText("real")
 
         self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_iFFT")
+        self._plot_result_checkbox = QCheckBox("Plot reconstructed real signal immediately")
+        self._plot_result_checkbox.setChecked(True)
 
         form = QFormLayout()
         form.addRow("Real column", self._real_column_combo)
         form.addRow("Imaginary column", self._imaginary_column_combo)
         form.addRow("Result sheet", self._target_dataset_edit)
+        form.addRow("", self._plot_result_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -369,15 +392,19 @@ class IFFTDialog(QDialog):
         """Return requested result dataset name."""
         return self._target_dataset_edit.text().strip()
 
+    def plot_result_immediately(self) -> bool:
+        """Return whether the reconstructed real signal should be plotted immediately."""
+        return self._plot_result_checkbox.isChecked()
+
 
 class FitDialog(QDialog):
     """Collect settings for curve fitting."""
 
-    def __init__(self, column_names: list[str], default_dataset_name: str, parent: object | None = None) -> None:
+    def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Curve Fit")
         self.setModal(True)
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(760)
 
         self._x_column_combo = QComboBox()
         self._x_column_combo.addItems(column_names)
@@ -396,10 +423,41 @@ class FitDialog(QDialog):
             self._method_combo.addItem(method_label, method_key)
         self._method_combo.setCurrentText(FIT_METHODS["trf"])
 
-        self._initial_params_edit = QLineEdit()
+        self._parameter_table = QTableWidget(0, 5)
+        self._parameter_table.setHorizontalHeaderLabels(["Parameter", "Initial", "Lower", "Upper", "Fixed"])
+        self._parameter_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._parameter_table.verticalHeader().setVisible(False)
+        self._parameter_table.setMinimumHeight(170)
+
         self._parameter_hint = QLabel()
         self._parameter_hint.setWordWrap(True)
         self._parameter_hint.setTextFormat(Qt.RichText)
+
+        self._weight_column_combo = QComboBox()
+        self._weight_column_combo.addItem("None", None)
+        for column_name in column_names:
+            self._weight_column_combo.addItem(column_name, column_name)
+
+        self._weight_mode_combo = QComboBox()
+        self._weight_mode_combo.addItem("Sigma / standard deviation", "sigma")
+        self._weight_mode_combo.addItem("Weight (larger = stronger)", "weight")
+
+        self._absolute_sigma_checkbox = QCheckBox("Treat sigma as absolute")
+
+        self._confidence_checkbox = QCheckBox("Create confidence band")
+        self._confidence_checkbox.setChecked(True)
+
+        self._confidence_spin = QDoubleSpinBox()
+        self._confidence_spin.setRange(50.0, 99.9)
+        self._confidence_spin.setSingleStep(1.0)
+        self._confidence_spin.setValue(95.0)
+        self._confidence_spin.setSuffix(" %")
+
+        self._residual_sheet_checkbox = QCheckBox("Create residual sheet")
+        self._residual_sheet_checkbox.setChecked(True)
+
+        self._plot_residuals_checkbox = QCheckBox("Plot residuals on right axis")
+        self._plot_residuals_checkbox.setChecked(True)
 
         self._fit_points_spin = QSpinBox()
         self._fit_points_spin.setRange(10, 10000)
@@ -407,16 +465,30 @@ class FitDialog(QDialog):
         self._fit_points_spin.setValue(400)
 
         self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_fit")
+        self._residual_dataset_edit = QLineEdit(f"{default_dataset_name}_residuals")
 
         form = QFormLayout()
         form.addRow("X column", self._x_column_combo)
         form.addRow("Y column", self._y_column_combo)
         form.addRow("Model", self._model_combo)
         form.addRow("Method", self._method_combo)
-        form.addRow("Initial parameters", self._initial_params_edit)
+        form.addRow("Parameters", self._parameter_table)
         form.addRow("", self._parameter_hint)
+        form.addRow("Weight/sigma column", self._weight_column_combo)
+        form.addRow("Weight mode", self._weight_mode_combo)
+        form.addRow("", self._absolute_sigma_checkbox)
+        confidence_row = QWidget()
+        confidence_layout = QHBoxLayout(confidence_row)
+        confidence_layout.setContentsMargins(0, 0, 0, 0)
+        confidence_layout.addWidget(self._confidence_checkbox)
+        confidence_layout.addWidget(self._confidence_spin)
+        confidence_layout.addStretch(1)
+        form.addRow("", confidence_row)
         form.addRow("Fit points", self._fit_points_spin)
         form.addRow("Result sheet", self._target_dataset_edit)
+        form.addRow("", self._residual_sheet_checkbox)
+        form.addRow("", self._plot_residuals_checkbox)
+        form.addRow("Residual sheet", self._residual_dataset_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -427,6 +499,8 @@ class FitDialog(QDialog):
         layout.addWidget(buttons)
 
         self._model_combo.currentIndexChanged.connect(self._update_parameter_hint)
+        self._confidence_checkbox.toggled.connect(self._confidence_spin.setEnabled)
+        self._residual_sheet_checkbox.toggled.connect(self._residual_dataset_edit.setEnabled)
         self._update_parameter_hint()
 
     def x_column(self) -> str:
@@ -447,7 +521,56 @@ class FitDialog(QDialog):
 
     def initial_parameters_text(self) -> str:
         """Return raw initial-parameter text."""
-        return self._initial_params_edit.text().strip()
+        return ", ".join(f"{value:g}" for value in self.initial_parameters())
+
+    def initial_parameters(self) -> list[float]:
+        """Return initial parameter values in model order."""
+        return [self._table_float(row, 1, f"initial value for {self._parameter_name(row)}") for row in range(self._parameter_table.rowCount())]
+
+    def lower_bounds(self) -> list[float | None]:
+        """Return lower bounds in model order."""
+        return [self._optional_table_float(row, 2, f"lower bound for {self._parameter_name(row)}") for row in range(self._parameter_table.rowCount())]
+
+    def upper_bounds(self) -> list[float | None]:
+        """Return upper bounds in model order."""
+        return [self._optional_table_float(row, 3, f"upper bound for {self._parameter_name(row)}") for row in range(self._parameter_table.rowCount())]
+
+    def fixed_parameters(self) -> list[bool]:
+        """Return fixed/free settings in model order."""
+        settings: list[bool] = []
+        for row in range(self._parameter_table.rowCount()):
+            item = self._parameter_table.item(row, 4)
+            settings.append(item.checkState() == Qt.Checked if item is not None else False)
+        return settings
+
+    def weight_column(self) -> str | None:
+        """Return optional weight/sigma column."""
+        value = self._weight_column_combo.currentData()
+        return str(value) if value else None
+
+    def weight_mode(self) -> str:
+        """Return how the selected weight/sigma column should be interpreted."""
+        return str(self._weight_mode_combo.currentData())
+
+    def absolute_sigma(self) -> bool:
+        """Return whether sigma values should be treated as absolute."""
+        return self._absolute_sigma_checkbox.isChecked()
+
+    def include_confidence_band(self) -> bool:
+        """Return whether confidence band columns should be created."""
+        return self._confidence_checkbox.isChecked()
+
+    def confidence_level(self) -> float:
+        """Return confidence level as a fraction."""
+        return self._confidence_spin.value() / 100.0
+
+    def create_residual_sheet(self) -> bool:
+        """Return whether a residual workspace sheet should be created."""
+        return self._residual_sheet_checkbox.isChecked()
+
+    def plot_residuals(self) -> bool:
+        """Return whether residuals should be shown with the fit plot."""
+        return self._plot_residuals_checkbox.isChecked()
 
     def fit_points(self) -> int:
         """Return number of points to generate for the fitted curve."""
@@ -457,6 +580,10 @@ class FitDialog(QDialog):
         """Return requested result dataset name."""
         return self._target_dataset_edit.text().strip()
 
+    def residual_dataset_name(self) -> str:
+        """Return requested residual dataset name."""
+        return self._residual_dataset_edit.text().strip()
+
     def _update_parameter_hint(self) -> None:
         model = get_fit_model(self.model_key())
         parameter_names = ", ".join(model.parameter_names)
@@ -464,14 +591,55 @@ class FitDialog(QDialog):
         self._parameter_hint.setText(
             f"<b>Equation:</b> <code>{escape(model.equation)}</code><br>"
             f"<b>Parameter order:</b> <code>{escape(parameter_names)}</code><br>"
-            f"Leave blank for automatic guesses. Static defaults: <code>{escape(defaults)}</code>."
+            f"Edit initial guesses and optional bounds. Blank bounds are unbounded. "
+            f"Static defaults: <code>{escape(defaults)}</code>."
         )
+        self._populate_parameter_table()
+
+    def _populate_parameter_table(self) -> None:
+        model = get_fit_model(self.model_key())
+        self._parameter_table.setRowCount(len(model.parameter_names))
+        for row, (name, initial_value) in enumerate(zip(model.parameter_names, model.default_initial)):
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            self._parameter_table.setItem(row, 0, name_item)
+            self._parameter_table.setItem(row, 1, QTableWidgetItem(f"{initial_value:g}"))
+            self._parameter_table.setItem(row, 2, QTableWidgetItem(""))
+            self._parameter_table.setItem(row, 3, QTableWidgetItem(""))
+            fixed_item = QTableWidgetItem("")
+            fixed_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            fixed_item.setCheckState(Qt.Unchecked)
+            self._parameter_table.setItem(row, 4, fixed_item)
+
+    def _parameter_name(self, row: int) -> str:
+        item = self._parameter_table.item(row, 0)
+        return item.text() if item is not None else f"parameter {row + 1}"
+
+    def _table_float(self, row: int, column: int, label: str) -> float:
+        item = self._parameter_table.item(row, column)
+        text = item.text().strip() if item is not None else ""
+        if not text:
+            raise ValueError(f"Enter {label}.")
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise ValueError(f"{label.capitalize()} must be numeric.") from exc
+
+    def _optional_table_float(self, row: int, column: int, label: str) -> float | None:
+        item = self._parameter_table.item(row, column)
+        text = item.text().strip() if item is not None else ""
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise ValueError(f"{label.capitalize()} must be numeric.") from exc
 
 
 class FitReportDialog(QDialog):
     """Display a curve-fitting report."""
 
-    def __init__(self, report_text: str, parent: object | None = None) -> None:
+    def __init__(self, report_text: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Fit Report")
         self.setModal(True)

@@ -16,7 +16,7 @@ from core.workspace import Dataset
 class DataFrameTableModel(QAbstractTableModel):
     """Editable table model that writes changes directly into a workspace dataset."""
 
-    def __init__(self, parent: object | None = None) -> None:
+    def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._dataset: Dataset | None = None
 
@@ -185,7 +185,7 @@ class DataFrameTableModel(QAbstractTableModel):
             return True
 
         if pd.isna(value):
-            return not is_numeric_dtype(column) or column.dtype.kind == "f"
+            return column.dtype.kind == "f"
 
         return isinstance(value, Number)
 

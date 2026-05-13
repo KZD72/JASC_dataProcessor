@@ -209,6 +209,29 @@ def bessel_y(
     return amplitude * special.yv(order, scale * x) + offset
 
 
+def stretched_exponential(
+    x: np.ndarray,
+    amplitude: float,
+    tau: float,
+    beta: float,
+    offset: float,
+) -> np.ndarray:
+    safe_x = np.clip(x, 0.0, None)
+    return amplitude * np.exp(-((safe_x / abs(_safe_width(tau))) ** beta)) + offset
+
+
+def asymmetric_gaussian(
+    x: np.ndarray,
+    amplitude: float,
+    center: float,
+    sigma_l: float,
+    sigma_r: float,
+    offset: float,
+) -> np.ndarray:
+    sigma = np.where(x < center, abs(_safe_width(sigma_l)), abs(_safe_width(sigma_r)))
+    return amplitude * np.exp(-0.5 * ((x - center) / sigma) ** 2) + offset
+
+
 FIT_MODELS: dict[str, FitModel] = {
     "linear": FitModel("linear", "Linear", "a*x + b", ("a", "b"), linear, (1.0, 0.0)),
     "quadratic": FitModel(
@@ -363,6 +386,22 @@ FIT_MODELS: dict[str, FitModel] = {
         bessel_y,
         (1.0, 0.0, 1.0, 0.0),
     ),
+    "stretched_exponential": FitModel(
+        "stretched_exponential",
+        "Stretched exponential",
+        "amplitude*exp(-(x/tau)**beta) + offset",
+        ("amplitude", "tau", "beta", "offset"),
+        stretched_exponential,
+        (1.0, 1.0, 0.5, 0.0),
+    ),
+    "asymmetric_gaussian": FitModel(
+        "asymmetric_gaussian",
+        "Asymmetric Gaussian",
+        "amplitude*exp(-0.5*((x-center)/sigma)**2) + offset",
+        ("amplitude", "center", "sigma_l", "sigma_r", "offset"),
+        asymmetric_gaussian,
+        (1.0, 0.0, 1.0, 1.0, 0.0),
+    ),
 }
 
 
@@ -439,6 +478,11 @@ def default_initial_parameters(
         return (1.0, 1.0, offset)
     if model_key == "heidler":
         return (amplitude, x_range / 20.0, x_range / 4.0, 2.0, offset)
+    if model_key == "stretched_exponential":
+        return (amplitude, max(x_range / 2.0, np.finfo(float).eps), 0.5, offset)
+    if model_key == "asymmetric_gaussian":
+        width = max(x_range / 6.0, np.finfo(float).eps)
+        return (amplitude, center, width, width, offset)
 
     return model.default_initial
 

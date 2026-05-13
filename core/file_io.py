@@ -54,6 +54,7 @@ def export_tabular_file(
     path: str | Path,
     delimiter: str = ",",
     include_index: bool = False,
+    encoding: str = "utf-8",
 ) -> None:
     """Export a DataFrame to a delimited text file."""
     if not isinstance(frame, pd.DataFrame):
@@ -64,7 +65,7 @@ def export_tabular_file(
         raise FileNotFoundError(f"Folder does not exist: {file_path.parent}")
 
     try:
-        frame.to_csv(file_path, sep=delimiter, index=include_index, encoding="utf-8")
+        frame.to_csv(file_path, sep=delimiter, index=include_index, encoding=encoding)
     except OSError as exc:
         raise OSError(f"Could not export data to {file_path}: {exc}") from exc
 

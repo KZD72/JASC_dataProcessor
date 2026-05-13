@@ -1,7 +1,3 @@
-### 3. `Roadmap.md`
-*(This keeps the AI from getting overwhelmed by forcing it to build step-by-step)*
-
-```markdown
 # Development Roadmap
 
 > **Instructions for AI Agent**: Development must strictly follow these phases. Do not jump ahead to future phases until the current one is fully functional and tested.

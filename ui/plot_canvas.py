@@ -26,10 +26,18 @@ class PlotSeries:
     line_style: str = "-"
     marker: str = ""
     y_axis: str = "left"
+    custom_label: str = ""
+    line_width: float = 1.8
+    marker_size: float = 6.0
+    lower_column: str = ""
+    upper_column: str = ""
+    fill_alpha: float = 0.18
 
     @property
     def label(self) -> str:
         """Return a readable legend label."""
+        if self.custom_label:
+            return self.custom_label
         if self.x_dataset == self.y_dataset:
             return f"{self.y_dataset}: {self.y_column}"
         return f"{self.y_dataset}: {self.y_column} vs {self.x_dataset}: {self.x_column}"
@@ -70,7 +78,7 @@ class PlotResult:
 class PlotCanvas(QWidget):
     """A QWidget wrapping a Matplotlib FigureCanvas and navigation toolbar."""
 
-    def __init__(self, parent: object | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
         self.figure = Figure(figsize=(7.0, 4.8), constrained_layout=True)
@@ -99,6 +107,8 @@ class PlotCanvas(QWidget):
         y_limits: tuple[float | None, float | None] = (None, None),
         right_y_limits: tuple[float | None, float | None] = (None, None),
         grid_enabled: bool = True,
+        legend_enabled: bool = True,
+        legend_position: str = "best",
         locators: list[PlotLocator] | None = None,
         figure_width: float = 7.0,
         figure_height: float = 4.8,
@@ -138,12 +148,21 @@ class PlotCanvas(QWidget):
                 "label": series.label,
                 "linestyle": series.line_style,
                 "marker": series.marker,
+                "linewidth": series.line_width,
+                "markersize": series.marker_size,
             }
             if series.color:
                 plot_kwargs["color"] = series.color
 
             target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
             target_axes.plot(x_values, y_values, **plot_kwargs)
+            self._draw_confidence_band(
+                workspace=workspace,
+                series=series,
+                target_axes=target_axes,
+                x_scale=x_scale,
+                y_scale=series_y_scale,
+            )
             plotted_series_values[series_index] = (x_values, y_values, series)
             plotted_count += 1
 
@@ -173,7 +192,7 @@ class PlotCanvas(QWidget):
         skipped_messages.extend(locator_messages)
 
         if plotted_count:
-            self._draw_legend()
+            self._draw_legend(legend_enabled, legend_position)
         else:
             self._draw_empty_state(clear_axes=False)
 
@@ -227,6 +246,57 @@ class PlotCanvas(QWidget):
             return pd.Series(dtype=float), pd.Series(dtype=float)
 
         return aligned["x"], aligned["y"]
+
+    def _draw_confidence_band(
+        self,
+        workspace: Workspace,
+        series: PlotSeries,
+        target_axes: Any,
+        x_scale: str,
+        y_scale: str,
+    ) -> None:
+        if not series.lower_column or not series.upper_column:
+            return
+
+        x_frame = workspace.get_dataset(series.x_dataset).frame
+        y_frame = workspace.get_dataset(series.y_dataset).frame
+        if series.x_column not in x_frame.columns:
+            return
+        if series.lower_column not in y_frame.columns or series.upper_column not in y_frame.columns:
+            return
+
+        x_values = pd.to_numeric(x_frame[series.x_column], errors="coerce")
+        lower_values = pd.to_numeric(y_frame[series.lower_column], errors="coerce")
+        upper_values = pd.to_numeric(y_frame[series.upper_column], errors="coerce")
+        point_count = min(len(x_values), len(lower_values), len(upper_values))
+        if point_count == 0:
+            return
+
+        aligned = pd.DataFrame(
+            {
+                "x": x_values.iloc[:point_count].to_numpy(),
+                "lower": lower_values.iloc[:point_count].to_numpy(),
+                "upper": upper_values.iloc[:point_count].to_numpy(),
+            }
+        ).dropna()
+
+        if x_scale == "log":
+            aligned = aligned[aligned["x"] > 0]
+        if y_scale == "log":
+            aligned = aligned[(aligned["lower"] > 0) & (aligned["upper"] > 0)]
+        if aligned.empty:
+            return
+
+        fill_color = series.color or None
+        target_axes.fill_between(
+            aligned["x"],
+            aligned["lower"],
+            aligned["upper"],
+            color=fill_color,
+            alpha=series.fill_alpha,
+            linewidth=0,
+            label=f"{series.label} confidence",
+        )
 
     def _draw_empty_state(self, clear_axes: bool = True) -> None:
         self._remove_right_axes()
@@ -346,7 +416,10 @@ class PlotCanvas(QWidget):
 
         return float(np.interp(x_value, unique_x, unique_y))
 
-    def _draw_legend(self) -> None:
+    def _draw_legend(self, legend_enabled: bool, legend_position: str) -> None:
+        if not legend_enabled:
+            return
+
         handles, labels = self.axes.get_legend_handles_labels()
         if self.right_axes is not None:
             right_handles, right_labels = self.right_axes.get_legend_handles_labels()
@@ -354,4 +427,4 @@ class PlotCanvas(QWidget):
             labels.extend(right_labels)
 
         if handles:
-            self.axes.legend(handles, labels)
+            self.axes.legend(handles, labels, loc=legend_position)

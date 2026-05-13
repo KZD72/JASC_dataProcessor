@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from scipy.optimize import OptimizeWarning, curve_fit
+from scipy.stats import t as student_t
 
 from math_engine.calculus import MathOperationError
 from models.fit_functions import default_initial_parameters, get_fit_model
@@ -34,6 +35,13 @@ class FitReport:
     parameters: tuple[float, ...]
     standard_errors: tuple[float, ...]
     covariance: tuple[tuple[float, ...], ...]
+    fixed_parameters: tuple[bool, ...]
+    lower_bounds: tuple[float, ...]
+    upper_bounds: tuple[float, ...]
+    weight_column: str | None
+    weight_mode: str
+    absolute_sigma: bool
+    confidence_level: float
     r_squared: float
     adjusted_r_squared: float
     rmse: float
@@ -57,8 +65,35 @@ class FitReport:
             "Parameters:",
         ]
 
-        for name, value, error in zip(self.parameter_names, self.parameters, self.standard_errors):
-            lines.append(f"  {name} = {_format_number(value)} +/- {_format_number(error)}")
+        for index, (name, value, error) in enumerate(
+            zip(self.parameter_names, self.parameters, self.standard_errors)
+        ):
+            fixed_text = " (fixed)" if self.fixed_parameters[index] else ""
+            lines.append(
+                f"  {name} = {_format_number(value)} +/- {_format_number(error)}"
+                f"{fixed_text}; bounds [{_format_number(self.lower_bounds[index])}, "
+                f"{_format_number(self.upper_bounds[index])}]"
+            )
+
+        if self.weight_column:
+            lines.extend(
+                [
+                    "",
+                    "Weights:",
+                    f"  Column: {self.weight_column}",
+                    f"  Mode: {self.weight_mode}",
+                    f"  Absolute sigma: {self.absolute_sigma}",
+                ]
+            )
+
+        if self.confidence_level:
+            lines.extend(
+                [
+                    "",
+                    "Confidence band:",
+                    f"  Level: {self.confidence_level * 100:.3g}%",
+                ]
+            )
 
         lines.extend(
             [
@@ -90,6 +125,7 @@ class FitResult:
     """Fit output containing the curve points and report."""
 
     fit_frame: pd.DataFrame
+    residual_frame: pd.DataFrame
     report: FitReport
 
 
@@ -100,6 +136,14 @@ def fit_curve(
     model_key: str,
     method: str,
     initial_parameters: list[float] | tuple[float, ...] | None = None,
+    lower_bounds: list[float | None] | tuple[float | None, ...] | None = None,
+    upper_bounds: list[float | None] | tuple[float | None, ...] | None = None,
+    fixed_parameters: list[bool] | tuple[bool, ...] | None = None,
+    weight_column: str | None = None,
+    weight_mode: str = "none",
+    absolute_sigma: bool = False,
+    include_confidence_band: bool = True,
+    confidence_level: float = 0.95,
     fit_points: int = 400,
 ) -> FitResult:
     """Fit a registered analytical model to two numeric columns."""
@@ -107,7 +151,7 @@ def fit_curve(
         raise MathOperationError(f"Unknown fitting method: {method}")
 
     model = get_fit_model(model_key)
-    aligned = _xy_frame(frame, x_column, y_column)
+    aligned = _fit_input_frame(frame, x_column, y_column, weight_column)
     x_values = aligned["x"].to_numpy(dtype=float)
     y_values = aligned["y"].to_numpy(dtype=float)
 
@@ -122,26 +166,65 @@ def fit_curve(
             f"{', '.join(model.parameter_names)}."
         )
 
-    if method == "lm" and len(x_values) < len(p0):
+    parameter_count = len(p0)
+    lower = _normalize_bounds(lower_bounds, parameter_count, -np.inf)
+    upper = _normalize_bounds(upper_bounds, parameter_count, np.inf)
+    fixed = tuple(bool(value) for value in (fixed_parameters or [False] * parameter_count))
+    if len(fixed) != parameter_count:
+        raise MathOperationError(f"{model.name} expects {parameter_count} fixed/free setting(s).")
+    _validate_parameter_settings(p0, lower, upper, fixed, model.parameter_names)
+
+    free_indices = tuple(index for index, is_fixed in enumerate(fixed) if not is_fixed)
+    if method == "lm" and any(np.isfinite(lower[index]) or np.isfinite(upper[index]) for index in free_indices):
+        raise MathOperationError("Levenberg-Marquardt does not support finite bounds. Use TRF or Dogbox.")
+
+    if method == "lm" and len(x_values) < len(free_indices):
         raise MathOperationError(
             "Levenberg-Marquardt requires at least as many data points as fit parameters."
         )
 
+    sigma = _sigma_values(aligned, weight_column, weight_mode)
     captured_warnings: list[str] = []
-    try:
-        with warnings.catch_warnings(record=True) as warning_records:
-            warnings.simplefilter("always", OptimizeWarning)
-            parameters, covariance = curve_fit(
-                model.function,
-                x_values,
-                y_values,
-                p0=p0,
-                method=method,
-                maxfev=50000,
-            )
-            captured_warnings = [str(record.message) for record in warning_records]
-    except Exception as exc:
-        raise MathOperationError(f"Curve fit failed: {exc}") from exc
+    if free_indices:
+        try:
+            with warnings.catch_warnings(record=True) as warning_records:
+                warnings.simplefilter("always", OptimizeWarning)
+                curve_fit_kwargs = {
+                    "p0": [p0[index] for index in free_indices],
+                    "sigma": sigma,
+                    "absolute_sigma": absolute_sigma,
+                    "method": method,
+                    "maxfev": 50000,
+                }
+                if method != "lm":
+                    curve_fit_kwargs["bounds"] = (
+                        [lower[index] for index in free_indices],
+                        [upper[index] for index in free_indices],
+                    )
+                free_parameters, free_covariance = curve_fit(
+                    _free_parameter_function(model.function, p0, free_indices),
+                    x_values,
+                    y_values,
+                    **curve_fit_kwargs,
+                )
+                captured_warnings = [str(record.message) for record in warning_records]
+        except Exception as exc:
+            raise MathOperationError(f"Curve fit failed: {exc}") from exc
+
+        parameters = np.asarray(p0, dtype=float)
+        parameters[list(free_indices)] = free_parameters
+        covariance = np.zeros((parameter_count, parameter_count), dtype=float)
+        free_covariance = np.asarray(free_covariance, dtype=float)
+        if free_covariance.shape == (len(free_indices), len(free_indices)):
+            for row_position, row_index in enumerate(free_indices):
+                for column_position, column_index in enumerate(free_indices):
+                    covariance[row_index, column_index] = free_covariance[row_position, column_position]
+        else:
+            covariance[:, :] = np.nan
+    else:
+        parameters = np.asarray(p0, dtype=float)
+        covariance = np.zeros((parameter_count, parameter_count), dtype=float)
+        captured_warnings.append("All parameters were fixed; no optimization was performed.")
 
     fitted_y = np.asarray(model.function(x_values, *parameters), dtype=float)
     residuals = y_values - fitted_y
@@ -155,6 +238,13 @@ def fit_curve(
         parameter_names=model.parameter_names,
         parameters=parameters,
         covariance=covariance,
+        fixed_parameters=fixed,
+        lower_bounds=lower,
+        upper_bounds=upper,
+        weight_column=weight_column,
+        weight_mode=weight_mode,
+        absolute_sigma=absolute_sigma,
+        confidence_level=confidence_level if include_confidence_band else 0.0,
         y_values=y_values,
         residuals=residuals,
         warnings=captured_warnings,
@@ -166,28 +256,158 @@ def fit_curve(
     fit_x = np.linspace(x_min, x_max, point_count)
     fit_y = np.asarray(model.function(fit_x, *parameters), dtype=float)
     fit_frame = pd.DataFrame({"fit_x": fit_x, "fit_y": fit_y})
+    if include_confidence_band:
+        lower_band, upper_band = _confidence_band(
+            model.function,
+            fit_x,
+            parameters,
+            covariance,
+            confidence_level=confidence_level,
+            degrees_of_freedom=max(len(x_values) - len(free_indices), 1),
+        )
+        fit_frame["fit_lower"] = lower_band
+        fit_frame["fit_upper"] = upper_band
 
-    return FitResult(fit_frame=fit_frame, report=report)
+    residual_frame = pd.DataFrame(
+        {
+            "x": x_values,
+            "observed": y_values,
+            "fitted": fitted_y,
+            "residual": residuals,
+        }
+    )
+    if sigma is not None:
+        residual_frame["sigma"] = sigma
+
+    return FitResult(fit_frame=fit_frame, residual_frame=residual_frame, report=report)
 
 
-def _xy_frame(frame: pd.DataFrame, x_column: str, y_column: str) -> pd.DataFrame:
+def _fit_input_frame(
+    frame: pd.DataFrame,
+    x_column: str,
+    y_column: str,
+    weight_column: str | None,
+) -> pd.DataFrame:
     if x_column not in frame.columns:
         raise MathOperationError(f"Column '{x_column}' does not exist.")
     if y_column not in frame.columns:
         raise MathOperationError(f"Column '{y_column}' does not exist.")
 
-    aligned = pd.DataFrame(
-        {
-            "x": pd.to_numeric(frame[x_column], errors="coerce"),
-            "y": pd.to_numeric(frame[y_column], errors="coerce"),
-        }
-    ).replace([np.inf, -np.inf], np.nan).dropna()
+    values = {
+        "x": pd.to_numeric(frame[x_column], errors="coerce"),
+        "y": pd.to_numeric(frame[y_column], errors="coerce"),
+    }
+    if weight_column:
+        if weight_column not in frame.columns:
+            raise MathOperationError(f"Weight column '{weight_column}' does not exist.")
+        values["weight"] = pd.to_numeric(frame[weight_column], errors="coerce")
+
+    aligned = pd.DataFrame(values).replace([np.inf, -np.inf], np.nan).dropna()
 
     if len(aligned) < 2:
         raise MathOperationError("Curve fitting requires at least two aligned numeric points.")
     if aligned["x"].nunique() < 2:
         raise MathOperationError("Curve fitting requires at least two distinct X values.")
     return aligned
+
+
+def _normalize_bounds(
+    bounds: list[float | None] | tuple[float | None, ...] | None,
+    parameter_count: int,
+    fallback: float,
+) -> tuple[float, ...]:
+    if bounds is None:
+        return tuple([fallback] * parameter_count)
+    if len(bounds) != parameter_count:
+        raise MathOperationError(f"Expected {parameter_count} bound value(s).")
+    return tuple(fallback if value is None else float(value) for value in bounds)
+
+
+def _validate_parameter_settings(
+    p0: tuple[float, ...],
+    lower: tuple[float, ...],
+    upper: tuple[float, ...],
+    fixed: tuple[bool, ...],
+    parameter_names: tuple[str, ...],
+) -> None:
+    for index, (initial, lower_value, upper_value) in enumerate(zip(p0, lower, upper)):
+        if lower_value > upper_value:
+            raise MathOperationError(f"Lower bound exceeds upper bound for {parameter_names[index]}.")
+        if not fixed[index] and lower_value == upper_value:
+            raise MathOperationError(
+                f"Lower and upper bounds are equal for {parameter_names[index]}; mark it fixed instead."
+            )
+        if not lower_value <= initial <= upper_value:
+            raise MathOperationError(f"Initial value for {parameter_names[index]} must be inside its bounds.")
+        if fixed[index] and (np.isfinite(lower_value) or np.isfinite(upper_value)):
+            if not lower_value <= initial <= upper_value:
+                raise MathOperationError(f"Fixed value for {parameter_names[index]} must be inside its bounds.")
+
+
+def _sigma_values(aligned: pd.DataFrame, weight_column: str | None, weight_mode: str) -> np.ndarray | None:
+    if not weight_column:
+        return None
+
+    values = aligned["weight"].to_numpy(dtype=float)
+    if np.any(values <= 0):
+        raise MathOperationError("Weight/sigma values must be positive.")
+
+    if weight_mode == "sigma":
+        return values
+    if weight_mode == "weight":
+        return 1.0 / np.sqrt(values)
+    raise MathOperationError(f"Unknown weight mode: {weight_mode}")
+
+
+def _free_parameter_function(
+    function: object,
+    initial_parameters: tuple[float, ...],
+    free_indices: tuple[int, ...],
+) -> object:
+    def wrapped(x_values: np.ndarray, *free_parameters: float) -> np.ndarray:
+        parameters = np.asarray(initial_parameters, dtype=float)
+        parameters[list(free_indices)] = free_parameters
+        return function(x_values, *parameters)
+
+    return wrapped
+
+
+def _confidence_band(
+    function: object,
+    x_values: np.ndarray,
+    parameters: np.ndarray,
+    covariance: np.ndarray,
+    confidence_level: float,
+    degrees_of_freedom: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    fit_y = np.asarray(function(x_values, *parameters), dtype=float)
+    if covariance.shape != (len(parameters), len(parameters)) or not np.isfinite(covariance).any():
+        nan_band = np.full_like(fit_y, np.nan, dtype=float)
+        return nan_band, nan_band
+
+    jacobian = _numerical_jacobian(function, x_values, parameters)
+    prediction_variance = np.einsum("ij,jk,ik->i", jacobian, covariance, jacobian)
+    prediction_variance = np.maximum(prediction_variance, 0.0)
+    standard_error = np.sqrt(prediction_variance)
+    alpha = 1.0 - min(max(confidence_level, 0.001), 0.999)
+    critical_value = float(student_t.ppf(1.0 - alpha / 2.0, degrees_of_freedom))
+    margin = critical_value * standard_error
+    return fit_y - margin, fit_y + margin
+
+
+def _numerical_jacobian(function: object, x_values: np.ndarray, parameters: np.ndarray) -> np.ndarray:
+    base_parameters = np.asarray(parameters, dtype=float)
+    jacobian = np.empty((len(x_values), len(base_parameters)), dtype=float)
+    for parameter_index, parameter_value in enumerate(base_parameters):
+        step = np.sqrt(np.finfo(float).eps) * max(abs(parameter_value), 1.0)
+        plus = base_parameters.copy()
+        minus = base_parameters.copy()
+        plus[parameter_index] += step
+        minus[parameter_index] -= step
+        y_plus = np.asarray(function(x_values, *plus), dtype=float)
+        y_minus = np.asarray(function(x_values, *minus), dtype=float)
+        jacobian[:, parameter_index] = (y_plus - y_minus) / (2.0 * step)
+    return jacobian
 
 
 def _build_report(
@@ -200,6 +420,13 @@ def _build_report(
     parameter_names: tuple[str, ...],
     parameters: np.ndarray,
     covariance: np.ndarray,
+    fixed_parameters: tuple[bool, ...],
+    lower_bounds: tuple[float, ...],
+    upper_bounds: tuple[float, ...],
+    weight_column: str | None,
+    weight_mode: str,
+    absolute_sigma: bool,
+    confidence_level: float,
     y_values: np.ndarray,
     residuals: np.ndarray,
     warnings: list[str],
@@ -239,6 +466,13 @@ def _build_report(
         parameters=tuple(float(value) for value in parameters),
         standard_errors=tuple(float(value) for value in standard_errors),
         covariance=covariance_tuple,
+        fixed_parameters=fixed_parameters,
+        lower_bounds=tuple(float(value) for value in lower_bounds),
+        upper_bounds=tuple(float(value) for value in upper_bounds),
+        weight_column=weight_column,
+        weight_mode=weight_mode,
+        absolute_sigma=absolute_sigma,
+        confidence_level=confidence_level,
         r_squared=float(r_squared),
         adjusted_r_squared=float(adjusted_r_squared),
         rmse=rmse,
@@ -251,6 +485,10 @@ def _build_report(
 
 
 def _format_number(value: float) -> str:
+    if value == np.inf:
+        return "inf"
+    if value == -np.inf:
+        return "-inf"
     if not np.isfinite(value):
         return "n/a"
     return f"{value:.8g}"

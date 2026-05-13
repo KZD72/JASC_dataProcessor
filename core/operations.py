@@ -501,6 +501,10 @@ class _ExpressionValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr.startswith("_"):
+            raise ExpressionError(
+                f"Access to private attributes is not allowed: .{node.attr}"
+            )
         path = self._attribute_path(node)
         if path not in self._attribute_names:
             raise ExpressionError(f"{'.'.join(path)} is not available in formulas.")
