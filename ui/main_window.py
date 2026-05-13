@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 from PySide6.QtCore import QModelIndex, Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -62,6 +63,9 @@ class MainWindow(QMainWindow):
         self._workspace = Workspace()
 
         self.setWindowTitle("JASC Data Processor")
+        icon_path = Path(__file__).parent.parent / "resources" / "logo.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1100, 720)
 
         self._dataset_list = QListWidget()
@@ -213,7 +217,7 @@ class MainWindow(QMainWindow):
         import_action.setShortcut("Ctrl+I")
         import_action.triggered.connect(self._import_data_file)
 
-        export_action = file_menu.addAction("&Export Sheet...")
+        export_action = file_menu.addAction("&Export Dataset...")
         export_action.setShortcut("Ctrl+E")
         export_action.triggered.connect(self._export_current_dataset)
 
@@ -241,6 +245,9 @@ class MainWindow(QMainWindow):
 
         add_column_action = data_menu.addAction("&Add Column...")
         add_column_action.triggered.connect(self._add_empty_column)
+
+        add_row_action = data_menu.addAction("Add &Row")
+        add_row_action.triggered.connect(self._add_empty_row)
 
         apply_formula_action = data_menu.addAction("&Apply Formula...")
         apply_formula_action.setShortcut("Ctrl+Shift+F")
@@ -280,18 +287,22 @@ class MainWindow(QMainWindow):
 
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
-        toolbar.addAction(export_action)
         toolbar.addAction(add_column_action)
+        toolbar.addAction(add_row_action)
+        toolbar.addAction(delete_columns_action)
+        toolbar.addAction(delete_rows_action)
         toolbar.addAction(rename_dataset_action)
         toolbar.addAction(delete_dataset_action)
+        toolbar.addAction(export_action)
+        
+        toolbar.addSeparator()
+
         toolbar.addAction(apply_formula_action)
         toolbar.addAction(derivative_action)
         toolbar.addAction(integral_action)
         toolbar.addAction(fft_action)
         toolbar.addAction(ifft_action)
         toolbar.addAction(fit_action)
-        toolbar.addAction(delete_rows_action)
-        toolbar.addAction(delete_columns_action)
         self.addToolBar(toolbar)
 
         self._export_action = export_action
@@ -310,6 +321,7 @@ class MainWindow(QMainWindow):
         self._save_plot_action = save_plot_action
         self._load_plot_action = load_plot_action
         self._delete_plot_action = delete_plot_action
+        self._add_row_action = add_row_action
         self._update_dataset_summary()
 
     def _apply_visual_style(self) -> None:
@@ -501,13 +513,13 @@ class MainWindow(QMainWindow):
     def _export_current_dataset(self) -> None:
         dataset = self._current_dataset()
         if dataset is None:
-            QMessageBox.information(self, "Export Sheet", "Select a dataset before exporting.")
+            QMessageBox.information(self, "Export Dataset", "Select a dataset before exporting.")
             return
 
         default_name = f"{dataset.name}.csv"
         file_name, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Export Sheet",
+            "Export Dataset",
             default_name,
             "CSV Files (*.csv);;Tab-delimited Text Files (*.txt);;All Files (*)",
         )
@@ -551,6 +563,16 @@ class MainWindow(QMainWindow):
         self._update_dataset_summary()
         self._select_column(final_name)
         self.statusBar().showMessage(f"Added column '{final_name}' to {dataset.name}")
+
+    def _add_empty_row(self) -> None:
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(self, "Add Row", "Select a dataset before adding a row.")
+            return
+
+        self._dataset_model.add_row()
+        self._update_dataset_summary()
+        self.statusBar().showMessage(f"Added empty row to {dataset.name}")
 
     def _apply_column_formula(self) -> None:
         dataset = self._current_dataset()
@@ -992,6 +1014,7 @@ class MainWindow(QMainWindow):
         self._rename_dataset_action.setEnabled(has_dataset)
         self._delete_dataset_action.setEnabled(has_dataset)
         self._add_column_action.setEnabled(has_dataset)
+        self._add_row_action.setEnabled(has_dataset)
         self._apply_formula_action.setEnabled(has_dataset)
         self._derivative_action.setEnabled(has_dataset)
         self._integral_action.setEnabled(has_dataset)

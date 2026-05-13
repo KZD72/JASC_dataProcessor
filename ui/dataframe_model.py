@@ -111,6 +111,18 @@ class DataFrameTableModel(QAbstractTableModel):
         self.endResetModel()
         return len(valid_rows)
 
+    def add_row(self) -> None:
+        """Add an empty row to the end of the current dataset."""
+        if self._dataset is None:
+            return
+
+        insert_position = len(self._dataset.frame)
+        self.beginInsertRows(QModelIndex(), insert_position, insert_position)
+        # Append a row of NAs
+        new_row = pd.Series([pd.NA] * len(self._dataset.frame.columns), index=self._dataset.frame.columns)
+        self._dataset.frame.loc[insert_position] = new_row
+        self.endInsertRows()
+
     def delete_columns(self, columns: list[int]) -> list[str]:
         """Delete column positions from the current dataset and return removed names."""
         if self._dataset is None:

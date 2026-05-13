@@ -140,6 +140,10 @@
 - [x] Added View > Reset View to Default (`Ctrl+Shift+R`) to restore sidebar sections, splitters, and plot option visibility.
 - [x] Removed the non-functional "Scatter" shortcut button from the Plot tab.
 - [x] Fixed Manual Entry button layout in the sidebar to prevent text from being cut off.
+- [x] Reorganized the main toolbar into logical groups: Data Editor options (Add/Delete/Rename/Export) and Math Operations (Formula/Calculus/FFT/Fit).
+- [x] Added "Add Row" capability to the Data Editor and integrated it into the toolbar and Data menu, with proper enablement state tied to dataset availability.
+- [x] Renamed "Export Sheet" to "Export Dataset" across the UI for consistency.
+- [x] Added support for an application window icon, loading from the `resources/logo.png` directory.
 
 
 ## 3. Active Bugs / Known Issues
