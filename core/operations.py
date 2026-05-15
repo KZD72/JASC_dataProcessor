@@ -118,6 +118,7 @@ _NUMPY_FUNCTION_NAMES = {
 _NUMPY_CONSTANT_NAMES = {"e", "inf", "nan", "pi"}
 _NUMPY_FFT_FUNCTION_NAMES = {"fft", "fftfreq", "fftshift", "ifft", "ifftshift"}
 _NUMPY_LINALG_FUNCTION_NAMES = {"norm"}
+_NUMPY_RANDOM_FUNCTION_NAMES = {"rand", "randn", "randint", "random", "choice", "normal", "uniform"}
 
 _SCIPY_SPECIAL_FUNCTION_NAMES = {
     "airy",
@@ -380,6 +381,10 @@ def _build_numpy_namespace() -> _SafeNamespace:
     members["linalg"] = _SafeNamespace(
         "np.linalg",
         {name: getattr(np.linalg, name) for name in _NUMPY_LINALG_FUNCTION_NAMES},
+    )
+    members["random"] = _SafeNamespace(
+        "np.random",
+        {name: getattr(np.random, name) for name in _NUMPY_RANDOM_FUNCTION_NAMES},
     )
     return _SafeNamespace("np", members)
 

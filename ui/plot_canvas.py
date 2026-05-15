@@ -22,6 +22,8 @@ class PlotSeries:
     x_column: str
     y_dataset: str
     y_column: str
+    x_err_column: str = ""
+    y_err_column: str = ""
     color: str = ""
     line_style: str = "-"
     marker: str = ""
@@ -131,7 +133,7 @@ class PlotCanvas(QWidget):
         for series_index, series in enumerate(series_list):
             series_y_scale = right_y_scale if series.y_axis == "right" else y_scale
             try:
-                x_values, y_values = self._series_values(
+                x_values, y_values, x_err, y_err = self._series_values(
                     workspace,
                     series,
                     x_scale=x_scale,
@@ -156,7 +158,20 @@ class PlotCanvas(QWidget):
                 plot_kwargs["color"] = series.color
 
             target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
-            target_axes.plot(x_values, y_values, **plot_kwargs)
+            
+            if x_err is not None or y_err is not None:
+                target_axes.errorbar(
+                    x_values, y_values, xerr=x_err, yerr=y_err,
+                    fmt=series.marker if series.marker else 'none',
+                    label=series.label,
+                    linestyle=series.line_style,
+                    linewidth=series.line_width,
+                    markersize=series.marker_size,
+                    color=series.color if series.color else None,
+                )
+            else:
+                target_axes.plot(x_values, y_values, **plot_kwargs)
+                
             self._draw_confidence_band(
                 workspace=workspace,
                 series=series,
@@ -215,8 +230,8 @@ class PlotCanvas(QWidget):
         series: PlotSeries,
         x_scale: str,
         y_scale: str,
-    ) -> tuple[pd.Series, pd.Series]:
-        """Return aligned numeric X/Y values for a plot series."""
+    ) -> tuple[pd.Series, pd.Series, pd.Series | None, pd.Series | None]:
+        """Return aligned numeric X/Y values and their errors for a plot series."""
         x_frame = workspace.get_dataset(series.x_dataset).frame
         y_frame = workspace.get_dataset(series.y_dataset).frame
 
@@ -227,17 +242,27 @@ class PlotCanvas(QWidget):
 
         x_values = pd.to_numeric(x_frame[series.x_column], errors="coerce")
         y_values = pd.to_numeric(y_frame[series.y_column], errors="coerce")
+        
+        cols = {
+            "x": x_values,
+            "y": y_values,
+        }
+        
+        if series.x_err_column and series.x_err_column in x_frame.columns:
+            cols["x_err"] = pd.to_numeric(x_frame[series.x_err_column], errors="coerce")
+        if series.y_err_column and series.y_err_column in y_frame.columns:
+            cols["y_err"] = pd.to_numeric(y_frame[series.y_err_column], errors="coerce")
 
-        point_count = min(len(x_values), len(y_values))
+        # Find the minimum valid length across all provided columns
+        point_count = min(len(col) for col in cols.values())
         if point_count == 0:
-            return pd.Series(dtype=float), pd.Series(dtype=float)
+            return pd.Series(dtype=float), pd.Series(dtype=float), None, None
 
-        aligned = pd.DataFrame(
-            {
-                "x": x_values.iloc[:point_count].to_numpy(),
-                "y": y_values.iloc[:point_count].to_numpy(),
-            }
-        ).dropna()
+        # Truncate to matching length
+        for key in cols:
+            cols[key] = cols[key].iloc[:point_count].to_numpy()
+
+        aligned = pd.DataFrame(cols).dropna()
 
         if x_scale == "log":
             aligned = aligned[aligned["x"] > 0]
@@ -245,9 +270,11 @@ class PlotCanvas(QWidget):
             aligned = aligned[aligned["y"] > 0]
 
         if aligned.empty:
-            return pd.Series(dtype=float), pd.Series(dtype=float)
+            return pd.Series(dtype=float), pd.Series(dtype=float), None, None
 
-        return aligned["x"], aligned["y"]
+        x_err_out = aligned["x_err"] if "x_err" in aligned.columns else None
+        y_err_out = aligned["y_err"] if "y_err" in aligned.columns else None
+        return aligned["x"], aligned["y"], x_err_out, y_err_out
 
     def _draw_confidence_band(
         self,

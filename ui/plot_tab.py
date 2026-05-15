@@ -87,7 +87,9 @@ class PlotTab(QWidget):
         self._set_combo_items(self._x_dataset_combo, names, selected_dataset)
         self._set_combo_items(self._y_dataset_combo, names, selected_dataset)
         self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
+        self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo)
         self._update_column_combo(self._y_dataset_combo, self._y_column_combo)
+        self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
         self._set_controls_enabled(bool(names))
 
     def has_plot_series(self) -> bool:
@@ -180,6 +182,8 @@ class PlotTab(QWidget):
         model_name: str,
         residual_dataset: Dataset | None = None,
         show_residuals: bool = False,
+        x_err_column: str = "",
+        y_err_column: str = "",
     ) -> None:
         """Replace the current series queue with a data-vs-fit overlay."""
         fit_lower = "fit_lower" if "fit_lower" in fit_dataset.frame.columns else ""
@@ -188,6 +192,8 @@ class PlotTab(QWidget):
             PlotSeries(
                 x_dataset=source_dataset.name, x_column=x_column,
                 y_dataset=source_dataset.name, y_column=y_column,
+                x_err_column=x_err_column,
+                y_err_column=y_err_column,
                 color="tab:blue", line_style="", marker="o",
                 custom_label=f"{source_dataset.name}: {y_column}",
             ),
@@ -310,8 +316,10 @@ class PlotTab(QWidget):
         """Build plot controls, option tabs, header actions, and canvas."""
         self._x_dataset_combo = QComboBox()
         self._x_column_combo = QComboBox()
+        self._x_err_column_combo = QComboBox()
         self._y_dataset_combo = QComboBox()
         self._y_column_combo = QComboBox()
+        self._y_err_column_combo = QComboBox()
 
         self._y_axis_combo = QComboBox()
         self._y_axis_combo.addItem("Left", "left")
@@ -452,8 +460,10 @@ class PlotTab(QWidget):
         sf = QFormLayout(series_group)
         sf.addRow("X dataset", self._x_dataset_combo)
         sf.addRow("X column", self._x_column_combo)
+        sf.addRow("X error", self._x_err_column_combo)
         sf.addRow("Y dataset", self._y_dataset_combo)
         sf.addRow("Y column", self._y_column_combo)
+        sf.addRow("Y error", self._y_err_column_combo)
         sf.addRow("Y axis", self._y_axis_combo)
         sf.addRow("Label", self._series_label_edit)
         sf.addRow("Line", self._line_style_combo)
@@ -548,8 +558,14 @@ class PlotTab(QWidget):
         self._x_dataset_combo.currentTextChanged.connect(
             lambda: self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
         )
+        self._x_dataset_combo.currentTextChanged.connect(
+            lambda: self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo)
+        )
         self._y_dataset_combo.currentTextChanged.connect(
             lambda: self._update_column_combo(self._y_dataset_combo, self._y_column_combo)
+        )
+        self._y_dataset_combo.currentTextChanged.connect(
+            lambda: self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
         )
         self.refresh_controls()
 
@@ -582,6 +598,18 @@ class PlotTab(QWidget):
                 pass
         self._set_combo_items(col_combo, cols)
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
+
+    def _update_error_column_combo(self, ds_combo: QComboBox, col_combo: QComboBox) -> None:
+        """Refresh an error column combo, allowing a blank 'no error' selection."""
+        name = ds_combo.currentText()
+        cols: list[str] = [""]
+        if name:
+            try:
+                ds = self._workspace.get_dataset(name)
+                cols.extend([str(c) for c in ds.frame.columns])
+            except KeyError:
+                pass
+        self._set_combo_items(col_combo, cols)
 
     @staticmethod
     def _set_combo_items(combo: QComboBox, items: list[str], preferred: str | None = None) -> None:
@@ -718,8 +746,10 @@ class PlotTab(QWidget):
         return PlotSeries(
             x_dataset=self._x_dataset_combo.currentText(),
             x_column=self._x_column_combo.currentText(),
+            x_err_column=self._x_err_column_combo.currentText(),
             y_dataset=self._y_dataset_combo.currentText(),
             y_column=self._y_column_combo.currentText(),
+            y_err_column=self._y_err_column_combo.currentText(),
             color=str(self._color_combo.currentData() or ""),
             line_style=str(line_style_data) if line_style_data is not None else "-",
             marker=str(self._marker_combo.currentData() or ""),
@@ -759,10 +789,15 @@ class PlotTab(QWidget):
         """Populate series edit controls from a PlotSeries."""
         self._x_dataset_combo.setCurrentText(series.x_dataset)
         self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
+        self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo)
         self._x_column_combo.setCurrentText(series.x_column)
+        self._x_err_column_combo.setCurrentText(series.x_err_column)
+        
         self._y_dataset_combo.setCurrentText(series.y_dataset)
         self._update_column_combo(self._y_dataset_combo, self._y_column_combo)
+        self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
         self._y_column_combo.setCurrentText(series.y_column)
+        self._y_err_column_combo.setCurrentText(series.y_err_column)
         self._set_combo_data(self._y_axis_combo, series.y_axis)
         self._series_label_edit.setText(series.custom_label)
         self._set_combo_data(self._line_style_combo, series.line_style)

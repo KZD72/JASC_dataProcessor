@@ -144,6 +144,9 @@
 - [x] Added "Add Row" capability to the Data Editor and integrated it into the toolbar and Data menu, with proper enablement state tied to dataset availability.
 - [x] Renamed "Export Sheet" to "Export Dataset" across the UI for consistency.
 - [x] Added support for an application window icon, loading from the `resources/logo.png` directory.
+- [x] Implemented X and Y error bar plotting support in `PlotCanvas` and `PlotTab`.
+- [x] Integrated `scipy.odr` to allow fitting that accounts for both X and Y uncertainties. The `FitDialog` now dynamically switches to Orthogonal Distance Regression when an X error column is selected.
+- [x] Exposed `np.random` submodule functions (rand, randn, normal, choice, etc.) inside the Apply Formula editor.
 - [x] Added Manual Entry "Fill Range" for generating arithmetic X-style columns with start value, step, start row, and row count.
 - [x] Replaced Manual Entry "Fill Formula" with "Table Size" because formula generation belongs in the Data Editor manipulation workflow after saving the manual sheet.
 - [x] Added Manual Entry "Table Size" for setting explicit row and column counts.
@@ -155,6 +158,11 @@
 - [x] Performed a codebase-wide documentation pass and added missing docstrings for Python classes, public methods, private helpers, Qt slots, model functions, and dialog accessors.
 - [x] Fixed `ui/dataframe_model.py` by importing `QObject`, which is used by the table model constructor annotation.
 - [x] Hardened `.jasc` project loading so dataset names remain consistent with the workspace's unique-name registry even if a project file contains duplicate or conflicting dataset names.
+- [x] Reviewed the previous fitting changes and fixed X-uncertainty fitting by routing X error columns through SciPy ODR with proper `sx` handling instead of reading from the Y-weight column.
+- [x] Curve-fit reports now list X and Y uncertainty/weight columns separately, and residual sheets include `x_sigma` when X uncertainty is used.
+- [x] Immediate fit plots now carry selected sigma-mode X/Y error columns into the source data overlay as error bars.
+- [x] Confirmed `np.random` remains available in the safe formula namespace and restored its example in the formula cheatsheet.
+- [x] Updated ODR fitting to prefer the maintained external `odrpack` backend, added `odrpack` to `requirements.txt`, increased the ODR iteration budget, and retained a quiet `scipy.odr` fallback for older environments.
 
 
 ## 3. Active Bugs / Known Issues

@@ -881,6 +881,7 @@ class MainWindow(QMainWindow):
                 include_confidence_band=dialog.include_confidence_band(),
                 confidence_level=dialog.confidence_level(),
                 fit_points=dialog.fit_points(),
+                x_weight_column=dialog.x_weight_column(),
             )
             result_dataset = self._workspace.add_dataset(
                 dialog.target_dataset_name() or f"{dataset.name}_fit",
@@ -900,6 +901,8 @@ class MainWindow(QMainWindow):
             return
 
         self._refresh_dataset_list(result_dataset.name)
+        x_error_column = dialog.x_weight_column() if dialog.weight_mode() == "sigma" else ""
+        y_error_column = dialog.weight_column() if dialog.weight_mode() == "sigma" else ""
         self._plot_tab_widget.queue_fit_plot(
             source_dataset=dataset,
             fit_dataset=result_dataset,
@@ -908,6 +911,8 @@ class MainWindow(QMainWindow):
             model_name=result.report.model_name,
             residual_dataset=residual_dataset,
             show_residuals=dialog.plot_residuals(),
+            x_err_column=x_error_column or "",
+            y_err_column=y_error_column or "",
         )
         self._tabs.setCurrentWidget(self._plot_tab_widget)
         FitReportDialog(result.report.to_text(), self).exec()

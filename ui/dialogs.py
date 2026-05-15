@@ -172,7 +172,8 @@ class ColumnExpressionDialog(QDialog):
             "<code>log</code>, <code>abs</code>, <code>where</code>, <code>minimum</code>, "
             "<code>maximum</code>, <code>pi</code>, <code>np.pi</code>.<br>"
             "NumPy/SciPy examples: <code>np.gradient(x)</code>, "
-            "<code>np.mean(x)</code>, <code>scipy.special.erf(x)</code>, "
+            "<code>np.mean(x)</code>, <code>np.random.normal(0, 1, len(x))</code>, "
+            "<code>scipy.special.erf(x)</code>, "
             "<code>scipy.signal.savgol_filter(y, 11, 3)</code>, "
             "<code>stats.zscore(x)</code>. A safe math/signal/stat subset is exposed; "
             "file IO and arbitrary imports are blocked.<br>"
@@ -441,6 +442,11 @@ class FitDialog(QDialog):
         self._parameter_hint.setWordWrap(True)
         self._parameter_hint.setTextFormat(Qt.RichText)
 
+        self._x_weight_column_combo = QComboBox()
+        self._x_weight_column_combo.addItem("None", None)
+        for column_name in column_names:
+            self._x_weight_column_combo.addItem(column_name, column_name)
+
         self._weight_column_combo = QComboBox()
         self._weight_column_combo.addItem("None", None)
         for column_name in column_names:
@@ -482,7 +488,8 @@ class FitDialog(QDialog):
         form.addRow("Method", self._method_combo)
         form.addRow("Parameters", self._parameter_table)
         form.addRow("", self._parameter_hint)
-        form.addRow("Weight/sigma column", self._weight_column_combo)
+        form.addRow("X weight/sigma column", self._x_weight_column_combo)
+        form.addRow("Y weight/sigma column", self._weight_column_combo)
         form.addRow("Weight mode", self._weight_mode_combo)
         form.addRow("", self._absolute_sigma_checkbox)
         confidence_row = QWidget()
@@ -509,7 +516,19 @@ class FitDialog(QDialog):
         self._model_combo.currentIndexChanged.connect(self._update_parameter_hint)
         self._confidence_checkbox.toggled.connect(self._confidence_spin.setEnabled)
         self._residual_sheet_checkbox.toggled.connect(self._residual_dataset_edit.setEnabled)
+        self._x_weight_column_combo.currentTextChanged.connect(self._on_x_weight_changed)
         self._update_parameter_hint()
+
+    def _on_x_weight_changed(self) -> None:
+        """Lock method to ODR if X errors are provided."""
+        has_x_weight = self.x_weight_column() is not None
+        if has_x_weight:
+            self._method_combo.setCurrentText(FIT_METHODS.get("odr", "Orthogonal Distance Regression"))
+            self._method_combo.setEnabled(False)
+        else:
+            self._method_combo.setEnabled(True)
+            if self.method() == "odr":
+                self._method_combo.setCurrentText(FIT_METHODS.get("trf", "Trust Region Reflective"))
 
     def x_column(self) -> str:
         """Return selected X column."""
@@ -551,8 +570,13 @@ class FitDialog(QDialog):
             settings.append(item.checkState() == Qt.Checked if item is not None else False)
         return settings
 
+    def x_weight_column(self) -> str | None:
+        """Return optional X weight/sigma column."""
+        value = self._x_weight_column_combo.currentData()
+        return str(value) if value else None
+
     def weight_column(self) -> str | None:
-        """Return optional weight/sigma column."""
+        """Return optional Y weight/sigma column."""
         value = self._weight_column_combo.currentData()
         return str(value) if value else None
 

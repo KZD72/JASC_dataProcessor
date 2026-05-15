@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import OptimizeWarning, curve_fit
+from scipy.optimize import curve_fit
 from scipy.stats import t as student_t
 
 from math_engine.calculus import MathOperationError
@@ -18,7 +18,10 @@ FIT_METHODS: dict[str, str] = {
     "lm": "Levenberg-Marquardt",
     "trf": "Trust Region Reflective",
     "dogbox": "Dogbox",
+    "odr": "Orthogonal Distance Regression",
 }
+
+_ODR_MAX_ITERATIONS = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +41,7 @@ class FitReport:
     fixed_parameters: tuple[bool, ...]
     lower_bounds: tuple[float, ...]
     upper_bounds: tuple[float, ...]
+    x_weight_column: str | None
     weight_column: str | None
     weight_mode: str
     absolute_sigma: bool
@@ -75,12 +79,13 @@ class FitReport:
                 f"{_format_number(self.upper_bounds[index])}]"
             )
 
-        if self.weight_column:
+        if self.x_weight_column or self.weight_column:
             lines.extend(
                 [
                     "",
-                    "Weights:",
-                    f"  Column: {self.weight_column}",
+                    "Uncertainty / weights:",
+                    f"  X column: {self.x_weight_column or 'None'}",
+                    f"  Y column: {self.weight_column or 'None'}",
                     f"  Mode: {self.weight_mode}",
                     f"  Absolute sigma: {self.absolute_sigma}",
                 ]
@@ -140,18 +145,19 @@ def fit_curve(
     upper_bounds: list[float | None] | tuple[float | None, ...] | None = None,
     fixed_parameters: list[bool] | tuple[bool, ...] | None = None,
     weight_column: str | None = None,
-    weight_mode: str = "none",
+    weight_mode: str = "sigma",
     absolute_sigma: bool = False,
     include_confidence_band: bool = True,
     confidence_level: float = 0.95,
     fit_points: int = 400,
+    x_weight_column: str | None = None,
 ) -> FitResult:
     """Fit a registered analytical model to two numeric columns."""
     if method not in FIT_METHODS:
         raise MathOperationError(f"Unknown fitting method: {method}")
 
     model = get_fit_model(model_key)
-    aligned = _fit_input_frame(frame, x_column, y_column, weight_column)
+    aligned = _fit_input_frame(frame, x_column, y_column, weight_column, x_weight_column)
     x_values = aligned["x"].to_numpy(dtype=float)
     y_values = aligned["y"].to_numpy(dtype=float)
 
@@ -175,6 +181,11 @@ def fit_curve(
     _validate_parameter_settings(p0, lower, upper, fixed, model.parameter_names)
 
     free_indices = tuple(index for index, is_fixed in enumerate(fixed) if not is_fixed)
+    prefit_warnings: list[str] = []
+    if x_weight_column and method != "odr":
+        prefit_warnings.append("X uncertainty requires Orthogonal Distance Regression; method was switched to ODR.")
+        method = "odr"
+
     if method == "lm" and any(np.isfinite(lower[index]) or np.isfinite(upper[index]) for index in free_indices):
         raise MathOperationError("Levenberg-Marquardt does not support finite bounds. Use TRF or Dogbox.")
 
@@ -183,31 +194,50 @@ def fit_curve(
             "Levenberg-Marquardt requires at least as many data points as fit parameters."
         )
 
-    sigma = _sigma_values(aligned, weight_column, weight_mode)
-    captured_warnings: list[str] = []
+    sigma = _sigma_values(aligned, "weight" if weight_column else None, "Y", weight_mode)
+    x_sigma = _sigma_values(aligned, "x_weight" if x_weight_column else None, "X", weight_mode)
+    
+    captured_warnings: list[str] = list(prefit_warnings)
     if free_indices:
         try:
             with warnings.catch_warnings(record=True) as warning_records:
-                warnings.simplefilter("always", OptimizeWarning)
-                curve_fit_kwargs = {
-                    "p0": [p0[index] for index in free_indices],
-                    "sigma": sigma,
-                    "absolute_sigma": absolute_sigma,
-                    "method": method,
-                    "maxfev": 50000,
-                }
-                if method != "lm":
-                    curve_fit_kwargs["bounds"] = (
-                        [lower[index] for index in free_indices],
-                        [upper[index] for index in free_indices],
+                warnings.simplefilter("always")
+                warnings.filterwarnings("ignore", message=".*scipy\\.odr.*", category=Warning)
+                
+                if method == "odr":
+                    free_parameters, free_covariance, odr_warnings = _run_odr_fit(
+                        function=model.function,
+                        initial_parameters=p0,
+                        free_indices=free_indices,
+                        x_values=x_values,
+                        y_values=y_values,
+                        x_sigma=x_sigma,
+                        y_sigma=sigma,
+                        lower_bounds=lower,
+                        upper_bounds=upper,
+                        absolute_sigma=absolute_sigma,
                     )
-                free_parameters, free_covariance = curve_fit(
-                    _free_parameter_function(model.function, p0, free_indices),
-                    x_values,
-                    y_values,
-                    **curve_fit_kwargs,
-                )
-                captured_warnings = [str(record.message) for record in warning_records]
+                    captured_warnings.extend(odr_warnings)
+                else:
+                    curve_fit_kwargs = {
+                        "p0": [p0[index] for index in free_indices],
+                        "sigma": sigma,
+                        "absolute_sigma": absolute_sigma,
+                        "method": method,
+                        "maxfev": 50000,
+                    }
+                    if method != "lm":
+                        curve_fit_kwargs["bounds"] = (
+                            [lower[index] for index in free_indices],
+                            [upper[index] for index in free_indices],
+                        )
+                    free_parameters, free_covariance = curve_fit(
+                        _free_parameter_function(model.function, p0, free_indices),
+                        x_values,
+                        y_values,
+                        **curve_fit_kwargs,
+                    )
+                captured_warnings.extend(str(record.message) for record in warning_records)
         except Exception as exc:
             raise MathOperationError(f"Curve fit failed: {exc}") from exc
 
@@ -241,6 +271,7 @@ def fit_curve(
         fixed_parameters=fixed,
         lower_bounds=lower,
         upper_bounds=upper,
+        x_weight_column=x_weight_column,
         weight_column=weight_column,
         weight_mode=weight_mode,
         absolute_sigma=absolute_sigma,
@@ -278,6 +309,8 @@ def fit_curve(
     )
     if sigma is not None:
         residual_frame["sigma"] = sigma
+    if x_sigma is not None:
+        residual_frame["x_sigma"] = x_sigma
 
     return FitResult(fit_frame=fit_frame, residual_frame=residual_frame, report=report)
 
@@ -287,6 +320,7 @@ def _fit_input_frame(
     x_column: str,
     y_column: str,
     weight_column: str | None,
+    x_weight_column: str | None = None,
 ) -> pd.DataFrame:
     """Return aligned numeric fit inputs and optional weights."""
     if x_column not in frame.columns:
@@ -302,6 +336,11 @@ def _fit_input_frame(
         if weight_column not in frame.columns:
             raise MathOperationError(f"Weight column '{weight_column}' does not exist.")
         values["weight"] = pd.to_numeric(frame[weight_column], errors="coerce")
+    
+    if x_weight_column:
+        if x_weight_column not in frame.columns:
+            raise MathOperationError(f"X weight column '{x_weight_column}' does not exist.")
+        values["x_weight"] = pd.to_numeric(frame[x_weight_column], errors="coerce")
 
     aligned = pd.DataFrame(values).replace([np.inf, -np.inf], np.nan).dropna()
 
@@ -347,20 +386,157 @@ def _validate_parameter_settings(
                 raise MathOperationError(f"Fixed value for {parameter_names[index]} must be inside its bounds.")
 
 
-def _sigma_values(aligned: pd.DataFrame, weight_column: str | None, weight_mode: str) -> np.ndarray | None:
-    """Return sigma values for curve_fit from sigma or weight mode."""
-    if not weight_column:
+def _sigma_values(
+    aligned: pd.DataFrame,
+    aligned_column: str | None,
+    axis_label: str,
+    weight_mode: str,
+) -> np.ndarray | None:
+    """Return positive sigma values from an aligned sigma or weight column."""
+    if not aligned_column:
         return None
 
-    values = aligned["weight"].to_numpy(dtype=float)
+    values = aligned[aligned_column].to_numpy(dtype=float)
     if np.any(values <= 0):
-        raise MathOperationError("Weight/sigma values must be positive.")
+        raise MathOperationError(f"{axis_label} weight/sigma values must be positive.")
 
     if weight_mode == "sigma":
         return values
     if weight_mode == "weight":
         return 1.0 / np.sqrt(values)
     raise MathOperationError(f"Unknown weight mode: {weight_mode}")
+
+
+def _run_odr_fit(
+    function: object,
+    initial_parameters: tuple[float, ...],
+    free_indices: tuple[int, ...],
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    x_sigma: np.ndarray | None,
+    y_sigma: np.ndarray | None,
+    lower_bounds: tuple[float, ...],
+    upper_bounds: tuple[float, ...],
+    absolute_sigma: bool,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Fit with ODR, preferring the maintained odrpack package."""
+    try:
+        return _run_odrpack_fit(
+            function=function,
+            initial_parameters=initial_parameters,
+            free_indices=free_indices,
+            x_values=x_values,
+            y_values=y_values,
+            x_sigma=x_sigma,
+            y_sigma=y_sigma,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            absolute_sigma=absolute_sigma,
+        )
+    except ImportError:
+        return _run_scipy_odr_fit(
+            function=function,
+            initial_parameters=initial_parameters,
+            free_indices=free_indices,
+            x_values=x_values,
+            y_values=y_values,
+            x_sigma=x_sigma,
+            y_sigma=y_sigma,
+            absolute_sigma=absolute_sigma,
+        )
+
+
+def _run_odrpack_fit(
+    function: object,
+    initial_parameters: tuple[float, ...],
+    free_indices: tuple[int, ...],
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    x_sigma: np.ndarray | None,
+    y_sigma: np.ndarray | None,
+    lower_bounds: tuple[float, ...],
+    upper_bounds: tuple[float, ...],
+    absolute_sigma: bool,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Run ODR through the maintained external odrpack package."""
+    from odrpack import odr_fit
+
+    beta0 = np.asarray([initial_parameters[index] for index in free_indices], dtype=float)
+
+    def wrapped(x_data: np.ndarray, free_parameters: np.ndarray) -> np.ndarray:
+        full_parameters = np.asarray(initial_parameters, dtype=float)
+        full_parameters[list(free_indices)] = free_parameters
+        return function(x_data, *full_parameters)
+
+    fit_kwargs: dict[str, object] = {"maxit": _ODR_MAX_ITERATIONS}
+
+    lower = np.asarray([lower_bounds[index] for index in free_indices], dtype=float)
+    upper = np.asarray([upper_bounds[index] for index in free_indices], dtype=float)
+    if np.isfinite(lower).any() or np.isfinite(upper).any():
+        fit_kwargs["bounds"] = (lower, upper)
+
+    if x_sigma is not None:
+        fit_kwargs["weight_x"] = 1.0 / np.square(x_sigma)
+    if y_sigma is not None:
+        fit_kwargs["weight_y"] = 1.0 / np.square(y_sigma)
+
+    result = odr_fit(wrapped, x_values, y_values, beta0, **fit_kwargs)
+    covariance = np.asarray(result.cov_beta, dtype=float)
+    if not absolute_sigma:
+        covariance = covariance * float(result.res_var)
+
+    messages: list[str] = []
+    if not bool(result.success):
+        messages.append(f"ODR may not have converged. Stop reason: {result.stopreason}")
+    return np.asarray(result.beta, dtype=float), covariance, messages
+
+
+def _run_scipy_odr_fit(
+    function: object,
+    initial_parameters: tuple[float, ...],
+    free_indices: tuple[int, ...],
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    x_sigma: np.ndarray | None,
+    y_sigma: np.ndarray | None,
+    absolute_sigma: bool,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Run ODR through scipy.odr as a compatibility fallback."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*scipy\\.odr.*", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", message=".*scipy\\.odr.*", category=FutureWarning)
+        from scipy.odr import Model, Data, ODR, RealData
+
+    def odr_wrapper(beta: np.ndarray, x_data: np.ndarray) -> np.ndarray:
+        full_parameters = np.asarray(initial_parameters, dtype=float)
+        full_parameters[list(free_indices)] = beta
+        return function(x_data, *full_parameters)
+
+    odr_model = Model(odr_wrapper)
+    if y_sigma is not None or x_sigma is not None:
+        data = RealData(x_values, y_values, sx=x_sigma, sy=y_sigma)
+    else:
+        data = Data(x_values, y_values)
+
+    odr_obj = ODR(
+        data,
+        odr_model,
+        beta0=[initial_parameters[index] for index in free_indices],
+        maxit=_ODR_MAX_ITERATIONS,
+    )
+    output = odr_obj.run()
+    covariance = (
+        np.full((len(free_indices), len(free_indices)), np.nan)
+        if output.cov_beta is None
+        else np.asarray(output.cov_beta, dtype=float)
+    )
+    if not absolute_sigma:
+        covariance = covariance * float(output.res_var)
+
+    messages = ["Using scipy.odr compatibility fallback; install odrpack to use the maintained ODR backend."]
+    if output.info not in (1, 2, 3):
+        messages.append(f"ODR may not have converged. Stop reason: {output.stopreason}")
+    return np.asarray(output.beta, dtype=float), covariance, messages
 
 
 def _free_parameter_function(
@@ -431,6 +607,7 @@ def _build_report(
     fixed_parameters: tuple[bool, ...],
     lower_bounds: tuple[float, ...],
     upper_bounds: tuple[float, ...],
+    x_weight_column: str | None,
     weight_column: str | None,
     weight_mode: str,
     absolute_sigma: bool,
@@ -478,6 +655,7 @@ def _build_report(
         fixed_parameters=fixed_parameters,
         lower_bounds=tuple(float(value) for value in lower_bounds),
         upper_bounds=tuple(float(value) for value in upper_bounds),
+        x_weight_column=x_weight_column,
         weight_column=weight_column,
         weight_mode=weight_mode,
         absolute_sigma=absolute_sigma,
