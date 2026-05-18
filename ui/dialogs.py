@@ -16,7 +16,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -27,7 +30,12 @@ from PySide6.QtWidgets import (
 from core.file_io import ImportOptions
 from math_engine.curve_fitting import FIT_METHODS
 from math_engine.calculus import DERIVATIVE_METHODS, INTEGRATION_METHODS, WINDOW_METHODS
-from models.fit_functions import available_fit_models, get_fit_model
+from models.fit_functions import (
+    CustomFitModel,
+    available_fit_models,
+    create_custom_fit_model,
+    get_fit_model,
+)
 
 
 class ImportOptionsDialog(QDialog):
@@ -405,15 +413,271 @@ class IFFTDialog(QDialog):
         return self._plot_result_checkbox.isChecked()
 
 
+class CustomFitModelDialog(QDialog):
+    """Create or edit one expression-based custom fit model."""
+
+    def __init__(
+        self,
+        model: CustomFitModel | None = None,
+        existing_names: set[str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build custom model fields and validation controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Custom Fit Model")
+        self.setModal(True)
+        self.setMinimumWidth(680)
+        self._existing_names = existing_names or set()
+        self._model: CustomFitModel | None = model
+
+        self._name_edit = QLineEdit(model.name if model else "Custom Model")
+        self._parameters_edit = QLineEdit(
+            ", ".join(model.parameter_names) if model else "a, b"
+        )
+        self._initial_edit = QLineEdit(
+            ", ".join(f"{value:g}" for value in model.default_initial) if model else "1, 0"
+        )
+        self._expression_edit = QPlainTextEdit()
+        self._expression_edit.setMinimumHeight(110)
+        self._expression_edit.setPlainText(model.expression if model else "a*x + b")
+        self._expression_edit.setPlaceholderText("Example: a*np.exp(-x/tau) + c")
+
+        hint = QLabel(
+            "Use x for the independent variable and comma-separated parameter names. "
+            "Available namespaces include np, scipy.special, scipy.signal, scipy.stats, and scipy.integrate."
+        )
+        hint.setWordWrap(True)
+
+        validate_button = QPushButton("Validate")
+        validate_button.clicked.connect(self._validate_model)
+
+        form = QFormLayout()
+        form.addRow("Name", self._name_edit)
+        form.addRow("Expression", self._expression_edit)
+        form.addRow("Parameters", self._parameters_edit)
+        form.addRow("Initial values", self._initial_edit)
+        form.addRow("", hint)
+        form.addRow("", validate_button)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def model(self) -> CustomFitModel:
+        """Return the validated custom fit model."""
+        if self._model is None:
+            raise ValueError("Custom model has not been validated.")
+        return self._model
+
+    def accept(self) -> None:
+        """Validate and accept the dialog."""
+        try:
+            self._model = self._model_from_fields()
+        except Exception as exc:
+            QMessageBox.warning(self, "Custom Fit Model", str(exc))
+            return
+        super().accept()
+
+    def _validate_model(self) -> None:
+        """Validate current fields and show the result to the user."""
+        try:
+            self._model = self._model_from_fields()
+        except Exception as exc:
+            QMessageBox.warning(self, "Custom Fit Model", str(exc))
+            return
+        QMessageBox.information(self, "Custom Fit Model", "Model expression is valid.")
+
+    def _model_from_fields(self) -> CustomFitModel:
+        """Create a custom model from the current dialog fields."""
+        name = self._name_edit.text().strip()
+        if name in self._existing_names:
+            raise ValueError(f"A custom model named '{name}' already exists.")
+        return create_custom_fit_model(
+            name=name,
+            expression=self._expression_edit.toPlainText(),
+            parameter_names=self._parse_csv_text(self._parameters_edit.text()),
+            default_initial=[float(value) for value in self._parse_csv_text(self._initial_edit.text())],
+        )
+
+    @staticmethod
+    def _parse_csv_text(text: str) -> list[str]:
+        """Return comma-separated entries with whitespace stripped."""
+        return [item.strip() for item in text.split(",") if item.strip()]
+
+
+class CustomFitModelsDialog(QDialog):
+    """Manage project custom fit models."""
+
+    def __init__(self, models: list[CustomFitModel], parent: QWidget | None = None) -> None:
+        """Build the custom model manager."""
+        super().__init__(parent)
+        self.setWindowTitle("Custom Fit Models")
+        self.setModal(True)
+        self.resize(720, 420)
+        self._models = list(models)
+
+        self._model_list = QListWidget()
+        self._model_list.currentRowChanged.connect(self._update_preview)
+
+        self._preview = QPlainTextEdit()
+        self._preview.setReadOnly(True)
+
+        add_button = QPushButton("Add")
+        add_button.clicked.connect(self._add_model)
+        edit_button = QPushButton("Edit")
+        edit_button.clicked.connect(self._edit_model)
+        duplicate_button = QPushButton("Duplicate")
+        duplicate_button.clicked.connect(self._duplicate_model)
+        remove_button = QPushButton("Remove")
+        remove_button.clicked.connect(self._remove_model)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(add_button)
+        button_row.addWidget(edit_button)
+        button_row.addWidget(duplicate_button)
+        button_row.addWidget(remove_button)
+        button_row.addStretch(1)
+
+        content_row = QHBoxLayout()
+        content_row.addWidget(self._model_list, 1)
+        content_row.addWidget(self._preview, 2)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(content_row)
+        layout.addLayout(button_row)
+        layout.addWidget(buttons)
+        self._refresh_model_list()
+
+    def custom_models(self) -> list[CustomFitModel]:
+        """Return the edited custom fit model list."""
+        return list(self._models)
+
+    def _add_model(self) -> None:
+        """Create a new custom model."""
+        dialog = CustomFitModelDialog(existing_names=self._model_names(), parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._models.append(dialog.model())
+        self._refresh_model_list(len(self._models) - 1)
+
+    def _edit_model(self) -> None:
+        """Edit the selected custom model."""
+        row = self._selected_row()
+        if row is None:
+            QMessageBox.information(self, "Custom Fit Models", "Select a model before editing it.")
+            return
+        model = self._models[row]
+        dialog = CustomFitModelDialog(
+            model=model,
+            existing_names=self._model_names(excluding=row),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._models[row] = dialog.model()
+        self._refresh_model_list(row)
+
+    def _duplicate_model(self) -> None:
+        """Duplicate the selected custom model."""
+        row = self._selected_row()
+        if row is None:
+            QMessageBox.information(self, "Custom Fit Models", "Select a model before duplicating it.")
+            return
+        source = self._models[row]
+        model = CustomFitModel(
+            name=self._unique_name(f"{source.name} Copy"),
+            expression=source.expression,
+            parameter_names=source.parameter_names,
+            default_initial=source.default_initial,
+        )
+        self._models.append(model)
+        self._refresh_model_list(len(self._models) - 1)
+
+    def _remove_model(self) -> None:
+        """Remove the selected custom model."""
+        row = self._selected_row()
+        if row is None:
+            QMessageBox.information(self, "Custom Fit Models", "Select a model before removing it.")
+            return
+        self._models.pop(row)
+        self._refresh_model_list(min(row, len(self._models) - 1))
+
+    def _refresh_model_list(self, selected_row: int | None = None) -> None:
+        """Refresh the visible model list."""
+        self._model_list.blockSignals(True)
+        self._model_list.clear()
+        self._model_list.addItems([model.name for model in self._models])
+        self._model_list.blockSignals(False)
+        if selected_row is not None and selected_row >= 0 and self._models:
+            self._model_list.setCurrentRow(selected_row)
+        elif self._models:
+            self._model_list.setCurrentRow(0)
+        else:
+            self._update_preview()
+
+    def _update_preview(self) -> None:
+        """Show a read-only summary for the selected model."""
+        row = self._selected_row()
+        if row is None:
+            self._preview.clear()
+            return
+        model = self._models[row]
+        initial_values = ", ".join(f"{value:g}" for value in model.default_initial)
+        self._preview.setPlainText(
+            f"Name: {model.name}\n"
+            f"Expression: {model.expression}\n"
+            f"Parameters: {', '.join(model.parameter_names)}\n"
+            f"Initial values: {initial_values}"
+        )
+
+    def _selected_row(self) -> int | None:
+        """Return the selected model row, if any."""
+        row = self._model_list.currentRow()
+        return row if 0 <= row < len(self._models) else None
+
+    def _model_names(self, excluding: int | None = None) -> set[str]:
+        """Return existing model names, optionally excluding one row."""
+        return {
+            model.name
+            for index, model in enumerate(self._models)
+            if excluding is None or index != excluding
+        }
+
+    def _unique_name(self, base_name: str) -> str:
+        """Return a custom model name unique within the manager."""
+        names = self._model_names()
+        if base_name not in names:
+            return base_name
+        counter = 2
+        while f"{base_name} ({counter})" in names:
+            counter += 1
+        return f"{base_name} ({counter})"
+
+
 class FitDialog(QDialog):
     """Collect settings for curve fitting."""
 
-    def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        column_names: list[str],
+        default_dataset_name: str,
+        custom_models: list[CustomFitModel] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         """Create controls for model selection, optimizer settings, and outputs."""
         super().__init__(parent)
         self.setWindowTitle("Curve Fit")
         self.setModal(True)
         self.setMinimumWidth(760)
+        self._custom_models = custom_models or []
 
         self._x_column_combo = QComboBox()
         self._x_column_combo.addItems(column_names)
@@ -424,7 +688,7 @@ class FitDialog(QDialog):
             self._y_column_combo.setCurrentIndex(1)
 
         self._model_combo = QComboBox()
-        for model in available_fit_models():
+        for model in available_fit_models(self._custom_models):
             self._model_combo.addItem(model.name, model.key)
 
         self._method_combo = QComboBox()
@@ -618,7 +882,7 @@ class FitDialog(QDialog):
 
     def _update_parameter_hint(self) -> None:
         """Refresh model equation help and rebuild the parameter table."""
-        model = get_fit_model(self.model_key())
+        model = get_fit_model(self.model_key(), self._custom_models)
         parameter_names = ", ".join(model.parameter_names)
         defaults = ", ".join(f"{value:g}" for value in model.default_initial)
         self._parameter_hint.setText(
@@ -631,7 +895,7 @@ class FitDialog(QDialog):
 
     def _populate_parameter_table(self) -> None:
         """Populate editable parameter rows for the selected model."""
-        model = get_fit_model(self.model_key())
+        model = get_fit_model(self.model_key(), self._custom_models)
         self._parameter_table.setRowCount(len(model.parameter_names))
         for row, (name, initial_value) in enumerate(zip(model.parameter_names, model.default_initial)):
             name_item = QTableWidgetItem(name)

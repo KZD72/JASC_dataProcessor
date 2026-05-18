@@ -11,7 +11,7 @@ from scipy.optimize import curve_fit
 from scipy.stats import t as student_t
 
 from math_engine.calculus import MathOperationError
-from models.fit_functions import default_initial_parameters, get_fit_model
+from models.fit_functions import CustomFitModel, default_initial_parameters, get_fit_model
 
 
 FIT_METHODS: dict[str, str] = {
@@ -151,12 +151,13 @@ def fit_curve(
     confidence_level: float = 0.95,
     fit_points: int = 400,
     x_weight_column: str | None = None,
+    custom_models: list[CustomFitModel] | None = None,
 ) -> FitResult:
     """Fit a registered analytical model to two numeric columns."""
     if method not in FIT_METHODS:
         raise MathOperationError(f"Unknown fitting method: {method}")
 
-    model = get_fit_model(model_key)
+    model = get_fit_model(model_key, custom_models)
     aligned = _fit_input_frame(frame, x_column, y_column, weight_column, x_weight_column)
     x_values = aligned["x"].to_numpy(dtype=float)
     y_values = aligned["y"].to_numpy(dtype=float)
@@ -165,6 +166,7 @@ def fit_curve(
         model_key,
         x_values,
         y_values,
+        custom_models,
     )
     if len(p0) != len(model.parameter_names):
         raise MathOperationError(
@@ -464,6 +466,7 @@ def _run_odrpack_fit(
     beta0 = np.asarray([initial_parameters[index] for index in free_indices], dtype=float)
 
     def wrapped(x_data: np.ndarray, free_parameters: np.ndarray) -> np.ndarray:
+        """Evaluate an ODRPACK model with free parameters merged into fixed values."""
         full_parameters = np.asarray(initial_parameters, dtype=float)
         full_parameters[list(free_indices)] = free_parameters
         return function(x_data, *full_parameters)
@@ -508,6 +511,7 @@ def _run_scipy_odr_fit(
         from scipy.odr import Model, Data, ODR, RealData
 
     def odr_wrapper(beta: np.ndarray, x_data: np.ndarray) -> np.ndarray:
+        """Evaluate a scipy.odr model with free parameters merged into fixed values."""
         full_parameters = np.asarray(initial_parameters, dtype=float)
         full_parameters[list(free_indices)] = beta
         return function(x_data, *full_parameters)

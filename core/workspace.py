@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from models.fit_functions import CustomFitModel
+
 
 @dataclass(slots=True)
 class Dataset:
@@ -34,6 +36,7 @@ class Workspace:
         """Initialize empty dataset and saved-plot registries."""
         self._datasets: dict[str, Dataset] = {}
         self._plots: dict[str, SavedPlot] = {}
+        self._custom_fit_models: dict[str, CustomFitModel] = {}
 
     def add_dataset(
         self,
@@ -120,10 +123,35 @@ class Workspace:
         """Return saved plot names in insertion order."""
         return list(self._plots.keys())
 
+    def add_custom_fit_model(self, model: CustomFitModel) -> CustomFitModel:
+        """Add a custom fit model under a unique display name."""
+        unique_name = self._make_unique_custom_fit_model_name(model.name)
+        stored_model = CustomFitModel(
+            name=unique_name,
+            expression=model.expression,
+            parameter_names=model.parameter_names,
+            default_initial=model.default_initial,
+        )
+        self._custom_fit_models[unique_name] = stored_model
+        return stored_model
+
+    def set_custom_fit_models(self, models: list[CustomFitModel]) -> None:
+        """Replace all project custom fit models."""
+        self._custom_fit_models = {model.name: model for model in models}
+
+    def list_custom_fit_models(self) -> list[CustomFitModel]:
+        """Return custom fit models in insertion order."""
+        return list(self._custom_fit_models.values())
+
+    def custom_fit_model_names(self) -> list[str]:
+        """Return custom fit model names in insertion order."""
+        return list(self._custom_fit_models.keys())
+
     def clear(self) -> None:
-        """Remove all datasets and saved plots from the workspace."""
+        """Remove all datasets, saved plots, and custom fit models from the workspace."""
         self._datasets.clear()
         self._plots.clear()
+        self._custom_fit_models.clear()
 
     def _make_unique_name(self, base_name: str) -> str:
         """Return a dataset name that does not collide with existing datasets."""
@@ -142,6 +170,16 @@ class Workspace:
 
         counter = 2
         while f"{base_name} ({counter})" in self._plots:
+            counter += 1
+        return f"{base_name} ({counter})"
+
+    def _make_unique_custom_fit_model_name(self, base_name: str) -> str:
+        """Return a custom fit model name that does not collide with existing models."""
+        if base_name not in self._custom_fit_models:
+            return base_name
+
+        counter = 2
+        while f"{base_name} ({counter})" in self._custom_fit_models:
             counter += 1
         return f"{base_name} ({counter})"
 

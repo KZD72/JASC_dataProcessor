@@ -163,17 +163,22 @@
 - [x] Immediate fit plots now carry selected sigma-mode X/Y error columns into the source data overlay as error bars.
 - [x] Confirmed `np.random` remains available in the safe formula namespace and restored its example in the formula cheatsheet.
 - [x] Updated ODR fitting to prefer the maintained external `odrpack` backend, added `odrpack` to `requirements.txt`, increased the ODR iteration budget, and retained a quiet `scipy.odr` fallback for older environments.
+- [x] Added a Roadmap item for project-saved custom fit models built from safe NumPy/SciPy expressions.
+- [x] Added expression-based custom fit model definitions with validation, parameter names, initial values, and compilation into the existing `FitModel` workflow.
+- [x] Added `Analysis > Custom Fit Models...` for adding, editing, duplicating, validating, and removing project custom fit models.
+- [x] Custom fit models now appear in the standard Curve Fit dialog and are passed through the existing curve-fit engine, reports, result sheets, and plot workflow.
+- [x] `.jasc` project files now save and load custom fit model definitions.
 
 
 ## 3. Active Bugs / Known Issues
-- [ ] Current documentation/review session could not rerun Python compile or smoke checks because `python.exe` fails to start and `py` is not installed in the current shell.
+- [ ] Current development sessions could not rerun Python compile or smoke checks because `python.exe` fails to start and `py` is not installed in the current shell.
 - [ ] `git` is not available in the current shell, so worktree status could not be checked.
 - [ ] Required analytical-model list mentions arbitrary n-th degree polynomial fitting, but the current fit registry only has linear, quadratic, and cubic polynomial models.
 - [ ] There is no automated test suite or PyInstaller/spec packaging file in the repository yet.
 
 ## 4. Next Steps for Current/New Session (To-Do)
 1. Install or activate usable `python` and `git` commands, then rerun the documented smoke checks and capture real worktree status.
-2. Run `python main.py` in a normal desktop session and manually test project open/save, dataset rename/delete, selected-column deletion, derivative, integral, FFT, iFFT, curve fitting bounds/fixed/weights/confidence bands/residuals, and plot series editing on real datasets.
+2. Run `python main.py` in a normal desktop session and manually test project open/save, dataset rename/delete, selected-column deletion, derivative, integral, FFT, iFFT, curve fitting bounds/fixed/weights/confidence bands/residuals, custom fit model creation/use/persistence, and plot series editing on real datasets.
 3. Begin Phase 5 polish: tighten spacing/text in the larger dialogs, review menu/toolbar ordering, and standardize button labels.
 4. Add broader edge-case tests for unusual imported data, singular fits, non-monotonic X values, missing values, and project files with many sheets.
 5. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
@@ -208,5 +213,7 @@
 - Running a fit replaces the current plot queue with the source data and fitted curve so the overlay is visible immediately.
 - Fit parameters are edited in a table with initial values, optional lower/upper bounds, and fixed/free checkboxes.
 - Curve fitting can use an optional sigma/error column or weight column; weight mode converts weights to sigma as `1/sqrt(weight)`.
+- Custom fit models are project-scoped definitions made of a model name, expression, parameter names, and default initial values. They compile into the same `FitModel` structure used by built-in models.
+- Custom fit model expressions use `x` for the independent variable and expose a deterministic safe NumPy/SciPy subset. Random generation remains available for data formulas, not for fit model evaluation.
 - Confidence bands are stored as `fit_lower` and `fit_upper` in the fitted-curve dataset when enabled.
 - Residual outputs are stored as a separate dataset with `x`, `observed`, `fitted`, and `residual` columns when enabled.

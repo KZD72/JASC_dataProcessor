@@ -24,6 +24,7 @@
 - Implement the library of analytical functions (`models/fit_functions.py`).
 - Link UI to `scipy.optimize.curve_fit`.
 - Plot the fitted curve over the raw scatter data and display parameters (e.g., $R^2$, equation coefficients).
+- Add project-saved custom fit models built from safe NumPy/SciPy expressions, with editable parameter lists, initial values, validation, and integration into the standard fit workflow.
 
 ## Phase 5: Polish & Packaging
 - Refine the UI (menus, icons, layout).

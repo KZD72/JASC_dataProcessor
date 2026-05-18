@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from core.workspace import Workspace
+from models.fit_functions import CustomFitModel
 
 PROJECT_EXTENSION = ".jasc"
 _META_FILENAME = "project.json"
@@ -32,6 +33,7 @@ def save_project(workspace: Workspace, path: str | Path) -> None:
         "version": _PROJECT_VERSION,
         "datasets": [],
         "plots": [],
+        "custom_fit_models": [],
     }
 
     with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -53,6 +55,9 @@ def save_project(workspace: Workspace, path: str | Path) -> None:
                 "name": plot.name,
                 "state": plot.state,
             })
+
+        for model in workspace.list_custom_fit_models():
+            metadata["custom_fit_models"].append(model.to_metadata())
 
         archive.writestr(_META_FILENAME, json.dumps(metadata, indent=2, ensure_ascii=False))
 
@@ -95,6 +100,12 @@ def load_project(path: str | Path) -> Workspace:
             state = entry.get("state")
             if isinstance(name, str) and isinstance(state, dict):
                 workspace.add_plot(name, state)
+
+        for entry in metadata.get("custom_fit_models", []):
+            try:
+                workspace.add_custom_fit_model(CustomFitModel.from_metadata(entry))
+            except (TypeError, ValueError):
+                continue
 
     return workspace
 

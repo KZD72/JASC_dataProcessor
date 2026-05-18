@@ -8,6 +8,7 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 - **Formula Engine**: Apply safe math operations to columns using a sandboxed expression evaluator supporting standard numpy/scipy operations.
 - **Signal Processing & Calculus**: Perform numerical differentiation, cumulative integration, and Fast Fourier Transforms (FFT).
 - **Curve Fitting**: Fit analytical models (Linear, Exponential, Gaussian, Peak functions, etc.) with customizable parameters using Levenberg-Marquardt or Trust-Region algorithms.
+- **Custom Fit Models**: Define project-saved fit models from safe NumPy/SciPy expressions and use them in the standard fitting workflow.
 - **Dynamic Plotting**: High-performance multi-axis plotting with Matplotlib, featuring data locators, scaling controls, and visual customization.
 - **Saved Plots**: Store named plot definitions in the workspace so plot series, locators, axes, legends, and sizing can be restored later.
 - **Project Persistence**: Save and load complete workspaces, including datasets, mathematical formulas, and saved plots using `.jasc` project files.

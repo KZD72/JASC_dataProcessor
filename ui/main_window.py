@@ -46,6 +46,7 @@ from ui.dataframe_model import DataFrameTableModel
 from ui.dialogs import (
     ColumnExpressionDialog,
     ColumnMathDialog,
+    CustomFitModelsDialog,
     FFTDialog,
     FitDialog,
     FitReportDialog,
@@ -292,6 +293,9 @@ class MainWindow(QMainWindow):
         ifft_action = analysis_menu.addAction("&Inverse FFT...")
         ifft_action.triggered.connect(self._run_ifft)
 
+        custom_models_action = analysis_menu.addAction("Custom Fit &Models...")
+        custom_models_action.triggered.connect(self._manage_custom_fit_models)
+
         fit_action = analysis_menu.addAction("&Curve Fit...")
         fit_action.setShortcut("Ctrl+Shift+C")
         fit_action.triggered.connect(self._run_curve_fit)
@@ -326,6 +330,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(integral_action)
         toolbar.addAction(fft_action)
         toolbar.addAction(ifft_action)
+        toolbar.addAction(custom_models_action)
         toolbar.addAction(fit_action)
         self.addToolBar(toolbar)
 
@@ -340,6 +345,7 @@ class MainWindow(QMainWindow):
         self._integral_action = integral_action
         self._fft_action = fft_action
         self._ifft_action = ifft_action
+        self._custom_models_action = custom_models_action
         self._fit_action = fit_action
         self._close_project_action = close_project_action
         self._save_plot_action = save_plot_action
@@ -840,6 +846,20 @@ class MainWindow(QMainWindow):
             f"Inverse FFT saved as '{result_dataset.name}' ({len(result_dataset.frame)} rows)"
         )
 
+    def _manage_custom_fit_models(self) -> None:
+        """Open the project custom fit model manager."""
+        dialog = CustomFitModelsDialog(
+            models=self._workspace.list_custom_fit_models(),
+            parent=self,
+        )
+        if dialog.exec() != CustomFitModelsDialog.Accepted:
+            return
+        self._workspace.set_custom_fit_models(dialog.custom_models())
+        self._update_dataset_summary()
+        self.statusBar().showMessage(
+            f"Custom fit models updated ({len(self._workspace.list_custom_fit_models())})"
+        )
+
     def _run_curve_fit(self) -> None:
         """Run the curve-fitting workflow and plot/save fit outputs."""
         dataset = self._current_dataset()
@@ -850,6 +870,7 @@ class MainWindow(QMainWindow):
         dialog = FitDialog(
             column_names=[str(column) for column in dataset.frame.columns],
             default_dataset_name=dataset.name,
+            custom_models=self._workspace.list_custom_fit_models(),
             parent=self,
         )
         if dialog.exec() != FitDialog.Accepted:
@@ -882,6 +903,7 @@ class MainWindow(QMainWindow):
                 confidence_level=dialog.confidence_level(),
                 fit_points=dialog.fit_points(),
                 x_weight_column=dialog.x_weight_column(),
+                custom_models=self._workspace.list_custom_fit_models(),
             )
             result_dataset = self._workspace.add_dataset(
                 dialog.target_dataset_name() or f"{dataset.name}_fit",
@@ -1184,7 +1206,11 @@ class MainWindow(QMainWindow):
 
     def _has_project_content(self) -> bool:
         """Return whether the current workspace has datasets or saved plots."""
-        return bool(self._workspace.dataset_names() or self._workspace.plot_names())
+        return bool(
+            self._workspace.dataset_names()
+            or self._workspace.plot_names()
+            or self._workspace.custom_fit_model_names()
+        )
 
     def _open_project(self) -> None:
         """Open a `.jasc` project, replacing the current workspace."""
