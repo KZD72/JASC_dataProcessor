@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from core.file_io import ImportOptions
 from math_engine.curve_fitting import FIT_METHODS
 from math_engine.calculus import DERIVATIVE_METHODS, INTEGRATION_METHODS, WINDOW_METHODS
+from math_engine.statistics import STATISTIC_OPERATIONS
 from models.fit_functions import (
     CustomFitModel,
     available_fit_models,
@@ -411,6 +412,134 @@ class IFFTDialog(QDialog):
     def plot_result_immediately(self) -> bool:
         """Return whether the reconstructed real signal should be plotted immediately."""
         return self._plot_result_checkbox.isChecked()
+
+
+class StatisticsDialog(QDialog):
+    """Collect settings for rich single-column and two-column statistics."""
+
+    def __init__(
+        self,
+        dataset_columns: dict[str, list[str]],
+        default_dataset_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build operation, dataset, column, and result-sheet controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Statistics")
+        self.setModal(True)
+        self.setMinimumWidth(620)
+        self._dataset_columns = dataset_columns
+
+        self._operation_combo = QComboBox()
+        for key, operation in STATISTIC_OPERATIONS.items():
+            self._operation_combo.addItem(operation.label, key)
+
+        self._primary_dataset_combo = QComboBox()
+        self._primary_dataset_combo.addItems(list(dataset_columns.keys()))
+        if default_dataset_name in dataset_columns:
+            self._primary_dataset_combo.setCurrentText(default_dataset_name)
+
+        self._primary_column_combo = QComboBox()
+        self._secondary_dataset_combo = QComboBox()
+        self._secondary_dataset_combo.addItems(list(dataset_columns.keys()))
+        if default_dataset_name in dataset_columns:
+            self._secondary_dataset_combo.setCurrentText(default_dataset_name)
+
+        self._secondary_column_combo = QComboBox()
+        self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_statistics")
+
+        self._hint_label = QLabel()
+        self._hint_label.setWordWrap(True)
+
+        form = QFormLayout()
+        form.addRow("Operation", self._operation_combo)
+        form.addRow("Primary sheet", self._primary_dataset_combo)
+        form.addRow("Primary column", self._primary_column_combo)
+        form.addRow("Secondary sheet", self._secondary_dataset_combo)
+        form.addRow("Secondary column", self._secondary_column_combo)
+        form.addRow("Result sheet", self._target_dataset_edit)
+        form.addRow("", self._hint_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+        self._operation_combo.currentIndexChanged.connect(self._update_scope)
+        self._primary_dataset_combo.currentTextChanged.connect(self._refresh_primary_columns)
+        self._secondary_dataset_combo.currentTextChanged.connect(self._refresh_secondary_columns)
+
+        self._refresh_primary_columns(self._primary_dataset_combo.currentText())
+        self._refresh_secondary_columns(self._secondary_dataset_combo.currentText())
+        self._update_scope()
+
+    def operation_key(self) -> str:
+        """Return the selected statistics operation key."""
+        return str(self._operation_combo.currentData())
+
+    def primary_dataset_name(self) -> str:
+        """Return the selected primary dataset name."""
+        return self._primary_dataset_combo.currentText()
+
+    def primary_column(self) -> str:
+        """Return the selected primary column name."""
+        return self._primary_column_combo.currentText()
+
+    def secondary_dataset_name(self) -> str:
+        """Return the selected secondary dataset name."""
+        return self._secondary_dataset_combo.currentText()
+
+    def secondary_column(self) -> str:
+        """Return the selected secondary column name."""
+        return self._secondary_column_combo.currentText()
+
+    def target_dataset_name(self) -> str:
+        """Return requested statistics result dataset name."""
+        return self._target_dataset_edit.text().strip()
+
+    def requires_secondary_column(self) -> bool:
+        """Return whether the selected operation compares two columns."""
+        operation = STATISTIC_OPERATIONS[self.operation_key()]
+        return operation.scope == "pair"
+
+    def _refresh_primary_columns(self, dataset_name: str) -> None:
+        """Refresh primary column choices for the selected dataset."""
+        self._refresh_column_combo(self._primary_column_combo, dataset_name, prefer_second=False)
+
+    def _refresh_secondary_columns(self, dataset_name: str) -> None:
+        """Refresh secondary column choices for the selected dataset."""
+        self._refresh_column_combo(self._secondary_column_combo, dataset_name, prefer_second=True)
+
+    def _refresh_column_combo(self, combo: QComboBox, dataset_name: str, prefer_second: bool) -> None:
+        """Reload one column combo from the dataset-column map."""
+        previous = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        columns = self._dataset_columns.get(dataset_name, [])
+        combo.addItems(columns)
+        if previous in columns:
+            combo.setCurrentText(previous)
+        elif prefer_second and len(columns) > 1:
+            combo.setCurrentIndex(1)
+        combo.blockSignals(False)
+
+    def _update_scope(self) -> None:
+        """Enable secondary selectors only for two-column operations."""
+        is_pair = self.requires_secondary_column()
+        self._secondary_dataset_combo.setEnabled(is_pair)
+        self._secondary_column_combo.setEnabled(is_pair)
+        if is_pair:
+            self._hint_label.setText(
+                "Two-column operations align values by row position for paired tests and correlations. "
+                "Independent-sample tests use all numeric values in each selected column."
+            )
+        else:
+            self._hint_label.setText(
+                "Single-column operations use numeric values from the primary column and ignore blanks, text, and infinities."
+            )
 
 
 class CustomFitModelDialog(QDialog):

@@ -19,12 +19,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from core.workspace import Dataset, Workspace
+from models.plot_types import PLOT_TYPES, plot_type_label
 from ui.plot_canvas import LocatedPoint, PlotCanvas, PlotLocator, PlotSeries
 
 _LINE_LABELS: dict[str, str] = {
@@ -53,10 +55,16 @@ class PlotTab(QWidget):
     remove_plot_requested = Signal()
     options_visibility_changed = Signal(bool)
 
-    def __init__(self, workspace: Workspace, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        parent: QWidget | None = None,
+        external_options: bool = False,
+    ) -> None:
         """Create a plot editor bound to a workspace."""
         super().__init__(parent)
         self._workspace = workspace
+        self._external_options = external_options
         self._plot_series: list[PlotSeries] = []
         self._plot_locators: list[PlotLocator] = []
         self._plot_canvas = PlotCanvas()
@@ -143,6 +151,10 @@ class PlotTab(QWidget):
             },
         }
 
+    def options_widget(self) -> QWidget:
+        """Return the plot controls widget for placement in an external inspector."""
+        return self._plot_options_scroll
+
     def load_plot_state(self, state: dict[str, object]) -> None:
         """Load a saved plot definition into the tab and render it."""
         series_list = state.get("series", [])
@@ -194,12 +206,14 @@ class PlotTab(QWidget):
                 y_dataset=source_dataset.name, y_column=y_column,
                 x_err_column=x_err_column,
                 y_err_column=y_err_column,
+                plot_type="errorbar" if x_err_column or y_err_column else "scatter",
                 color="tab:blue", line_style="", marker="o",
                 custom_label=f"{source_dataset.name}: {y_column}",
             ),
             PlotSeries(
                 x_dataset=fit_dataset.name, x_column="fit_x",
                 y_dataset=fit_dataset.name, y_column="fit_y",
+                plot_type="line",
                 color="tab:red", line_style="-", marker="",
                 custom_label=f"{model_name} fit",
                 lower_column=fit_lower,
@@ -213,6 +227,7 @@ class PlotTab(QWidget):
                     x_column="x",
                     y_dataset=residual_dataset.name,
                     y_column="residual",
+                    plot_type="scatter",
                     color="tab:green",
                     line_style="",
                     marker=".",
@@ -248,6 +263,7 @@ class PlotTab(QWidget):
                 x_column=x_column,
                 y_dataset=dataset.name,
                 y_column=source_column,
+                plot_type="line",
                 color="tab:blue",
                 line_style="-",
                 marker="",
@@ -258,6 +274,7 @@ class PlotTab(QWidget):
                 x_column=x_column,
                 y_dataset=dataset.name,
                 y_column=result_column,
+                plot_type="line",
                 color="tab:red",
                 line_style="-",
                 marker="",
@@ -292,6 +309,7 @@ class PlotTab(QWidget):
                 x_column=x_column,
                 y_dataset=dataset.name,
                 y_column=y_column,
+                plot_type="line",
                 color="tab:blue",
                 line_style="-",
                 marker="",
@@ -320,6 +338,10 @@ class PlotTab(QWidget):
         self._y_dataset_combo = QComboBox()
         self._y_column_combo = QComboBox()
         self._y_err_column_combo = QComboBox()
+
+        self._plot_type_combo = QComboBox()
+        for plot_type in PLOT_TYPES.values():
+            self._plot_type_combo.addItem(plot_type.label, plot_type.key)
 
         self._y_axis_combo = QComboBox()
         self._y_axis_combo.addItem("Left", "left")
@@ -351,6 +373,23 @@ class PlotTab(QWidget):
         self._marker_size_spin.setRange(1.0, 30.0)
         self._marker_size_spin.setSingleStep(1.0)
         self._marker_size_spin.setValue(6.0)
+
+        self._bar_width_spin = QDoubleSpinBox()
+        self._bar_width_spin.setRange(0.01, 1000.0)
+        self._bar_width_spin.setSingleStep(0.1)
+        self._bar_width_spin.setValue(0.8)
+
+        self._fill_alpha_spin = QDoubleSpinBox()
+        self._fill_alpha_spin.setRange(0.0, 1.0)
+        self._fill_alpha_spin.setSingleStep(0.05)
+        self._fill_alpha_spin.setValue(0.25)
+
+        self._histogram_bins_spin = QSpinBox()
+        self._histogram_bins_spin.setRange(1, 1000)
+        self._histogram_bins_spin.setValue(20)
+
+        self._histogram_density_checkbox = QCheckBox("Density")
+        self._histogram_cumulative_checkbox = QCheckBox("Cumulative")
 
         self._title_edit = QLineEdit()
         self._x_label_edit = QLineEdit()
@@ -458,19 +497,27 @@ class PlotTab(QWidget):
         # --- layout groups ---
         series_group = QGroupBox("Series")
         sf = QFormLayout(series_group)
-        sf.addRow("X dataset", self._x_dataset_combo)
-        sf.addRow("X column", self._x_column_combo)
-        sf.addRow("X error", self._x_err_column_combo)
-        sf.addRow("Y dataset", self._y_dataset_combo)
-        sf.addRow("Y column", self._y_column_combo)
-        sf.addRow("Y error", self._y_err_column_combo)
-        sf.addRow("Y axis", self._y_axis_combo)
-        sf.addRow("Label", self._series_label_edit)
-        sf.addRow("Line", self._line_style_combo)
-        sf.addRow("Line width", self._line_width_spin)
-        sf.addRow("Marker", self._marker_combo)
-        sf.addRow("Marker size", self._marker_size_spin)
-        sf.addRow("Color", self._color_combo)
+        self._series_rows: dict[str, tuple[QWidget | None, QWidget]] = {}
+        self._bar_options_panel = self._build_bar_options_panel()
+        self._fill_options_panel = self._build_fill_options_panel()
+        self._histogram_options_panel = self._build_histogram_options_panel()
+        self._add_series_row(sf, "plot_type", "Plot type", self._plot_type_combo)
+        self._add_series_row(sf, "x_dataset", "X dataset", self._x_dataset_combo)
+        self._add_series_row(sf, "x_column", "X column", self._x_column_combo)
+        self._add_series_row(sf, "x_error", "X error", self._x_err_column_combo)
+        self._add_series_row(sf, "y_dataset", "Y dataset", self._y_dataset_combo)
+        self._add_series_row(sf, "y_column", "Y column", self._y_column_combo)
+        self._add_series_row(sf, "y_error", "Y error", self._y_err_column_combo)
+        self._add_series_row(sf, "y_axis", "Y axis", self._y_axis_combo)
+        self._add_series_row(sf, "label", "Label", self._series_label_edit)
+        self._add_series_row(sf, "line", "Line", self._line_style_combo)
+        self._add_series_row(sf, "line_width", "Line width", self._line_width_spin)
+        self._add_series_row(sf, "marker", "Marker", self._marker_combo)
+        self._add_series_row(sf, "marker_size", "Marker size", self._marker_size_spin)
+        self._add_series_row(sf, "color", "Color", self._color_combo)
+        self._add_series_row(sf, "bar_options", None, self._bar_options_panel)
+        self._add_series_row(sf, "fill_options", None, self._fill_options_panel)
+        self._add_series_row(sf, "histogram_options", None, self._histogram_options_panel)
         sb = QHBoxLayout()
         sb.addWidget(add_btn); sb.addWidget(update_btn); sb.addWidget(rm_btn); sb.addWidget(clr_btn)
         sf.addRow(sb)
@@ -523,13 +570,16 @@ class PlotTab(QWidget):
         scroll.setWidget(ctrl_panel)
         self._plot_options_scroll = scroll
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(scroll)
-        splitter.addWidget(self._plot_canvas)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([460, 760])
-        self._plot_splitter = splitter
+        if self._external_options:
+            self._plot_splitter = None
+        else:
+            splitter = QSplitter(Qt.Horizontal)
+            splitter.addWidget(scroll)
+            splitter.addWidget(self._plot_canvas)
+            splitter.setStretchFactor(0, 0)
+            splitter.setStretchFactor(1, 1)
+            splitter.setSizes([460, 760])
+            self._plot_splitter = splitter
 
         self._active_plot_label = QLabel("Unsaved plot")
         self._active_plot_label.setObjectName("SectionLabel")
@@ -541,7 +591,7 @@ class PlotTab(QWidget):
         self._remove_plot_button = QPushButton("Remove Saved")
         self._remove_plot_button.clicked.connect(self.remove_plot_requested.emit)
 
-        self._toggle_options_button = QPushButton("Hide Options")
+        self._toggle_options_button = QPushButton("Hide Inspector" if self._external_options else "Hide Options")
         self._toggle_options_button.clicked.connect(self._toggle_plot_options)
         top_row = QHBoxLayout()
         top_row.addWidget(self._active_plot_label)
@@ -553,7 +603,10 @@ class PlotTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_row)
-        layout.addWidget(splitter)
+        if self._external_options:
+            layout.addWidget(self._plot_canvas)
+        else:
+            layout.addWidget(self._plot_splitter)
 
         self._x_dataset_combo.currentTextChanged.connect(
             lambda: self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
@@ -567,6 +620,8 @@ class PlotTab(QWidget):
         self._y_dataset_combo.currentTextChanged.connect(
             lambda: self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
         )
+        self._plot_type_combo.currentIndexChanged.connect(self._apply_plot_type_defaults)
+        self._update_plot_type_option_visibility()
         self.refresh_controls()
 
     # -- helpers ------------------------------------------------------------
@@ -585,6 +640,54 @@ class PlotTab(QWidget):
         h.addWidget(max_edit)
         h.addStretch(1)
         return row
+
+    def _build_bar_options_panel(self) -> QWidget:
+        """Return bar-specific series controls."""
+        panel = QWidget()
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Bar width"))
+        layout.addWidget(self._bar_width_spin)
+        layout.addStretch(1)
+        return panel
+
+    def _build_fill_options_panel(self) -> QWidget:
+        """Return fill/alpha series controls."""
+        panel = QWidget()
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Fill alpha"))
+        layout.addWidget(self._fill_alpha_spin)
+        layout.addStretch(1)
+        return panel
+
+    def _build_histogram_options_panel(self) -> QWidget:
+        """Return histogram-specific series controls."""
+        panel = QWidget()
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Bins"))
+        layout.addWidget(self._histogram_bins_spin)
+        layout.addWidget(self._histogram_density_checkbox)
+        layout.addWidget(self._histogram_cumulative_checkbox)
+        layout.addStretch(1)
+        return panel
+
+    def _add_series_row(
+        self,
+        form: QFormLayout,
+        key: str,
+        label: str | None,
+        field: QWidget,
+    ) -> None:
+        """Add a Series form row and remember its label/widget pair for visibility updates."""
+        if label is None:
+            form.addRow(field)
+            label_widget = None
+        else:
+            form.addRow(label, field)
+            label_widget = form.labelForField(field)
+        self._series_rows[key] = (label_widget, field)
 
     def _update_column_combo(self, ds_combo: QComboBox, col_combo: QComboBox) -> None:
         """Refresh a column combo from the dataset currently selected beside it."""
@@ -641,8 +744,13 @@ class PlotTab(QWidget):
     def set_plot_options_visible(self, visible: bool) -> None:
         """Show or hide the plot options panel."""
         self._plot_options_scroll.setVisible(visible)
-        self._toggle_options_button.setText("Hide Options" if visible else "Show Options")
-        if visible:
+        if self._external_options:
+            self._toggle_options_button.setText("Hide Inspector" if visible else "Show Inspector")
+        else:
+            self._toggle_options_button.setText("Hide Options" if visible else "Show Options")
+        if self._plot_splitter is None:
+            pass
+        elif visible:
             self._plot_splitter.setSizes([460, 760])
         else:
             self._plot_splitter.setSizes([0, 1])
@@ -743,13 +851,15 @@ class PlotTab(QWidget):
     def _series_from_controls(self) -> PlotSeries:
         """Create a PlotSeries from current series control values."""
         line_style_data = self._line_style_combo.currentData()
+        plot_type = str(self._plot_type_combo.currentData() or "line")
         return PlotSeries(
             x_dataset=self._x_dataset_combo.currentText(),
             x_column=self._x_column_combo.currentText(),
-            x_err_column=self._x_err_column_combo.currentText(),
+            x_err_column=self._x_err_column_combo.currentText() if plot_type == "errorbar" else "",
             y_dataset=self._y_dataset_combo.currentText(),
             y_column=self._y_column_combo.currentText(),
-            y_err_column=self._y_err_column_combo.currentText(),
+            y_err_column=self._y_err_column_combo.currentText() if plot_type == "errorbar" else "",
+            plot_type=plot_type,
             color=str(self._color_combo.currentData() or ""),
             line_style=str(line_style_data) if line_style_data is not None else "-",
             marker=str(self._marker_combo.currentData() or ""),
@@ -757,6 +867,11 @@ class PlotTab(QWidget):
             custom_label=self._series_label_edit.text().strip(),
             line_width=self._line_width_spin.value(),
             marker_size=self._marker_size_spin.value(),
+            fill_alpha=self._fill_alpha_spin.value(),
+            bar_width=self._bar_width_spin.value(),
+            histogram_bins=self._histogram_bins_spin.value(),
+            histogram_density=self._histogram_density_checkbox.isChecked(),
+            histogram_cumulative=self._histogram_cumulative_checkbox.isChecked(),
         )
 
     def _update_selected_series(self) -> None:
@@ -798,6 +913,7 @@ class PlotTab(QWidget):
         self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
         self._y_column_combo.setCurrentText(series.y_column)
         self._y_err_column_combo.setCurrentText(series.y_err_column)
+        self._set_combo_data(self._plot_type_combo, series.plot_type)
         self._set_combo_data(self._y_axis_combo, series.y_axis)
         self._series_label_edit.setText(series.custom_label)
         self._set_combo_data(self._line_style_combo, series.line_style)
@@ -805,6 +921,12 @@ class PlotTab(QWidget):
         self._set_combo_data(self._color_combo, series.color)
         self._line_width_spin.setValue(series.line_width)
         self._marker_size_spin.setValue(series.marker_size)
+        self._fill_alpha_spin.setValue(series.fill_alpha)
+        self._bar_width_spin.setValue(series.bar_width)
+        self._histogram_bins_spin.setValue(series.histogram_bins)
+        self._histogram_density_checkbox.setChecked(series.histogram_density)
+        self._histogram_cumulative_checkbox.setChecked(series.histogram_cumulative)
+        self._update_plot_type_option_visibility()
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: str) -> None:
@@ -812,6 +934,85 @@ class PlotTab(QWidget):
         index = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def _apply_plot_type_defaults(self) -> None:
+        """Apply practical line/marker defaults when the user changes plot type."""
+        plot_type = str(self._plot_type_combo.currentData() or "line")
+        self._update_plot_type_option_visibility()
+        if plot_type == "scatter":
+            self._set_combo_data(self._line_style_combo, "")
+            self._set_combo_data(self._marker_combo, "o")
+        elif plot_type == "line_marker":
+            self._set_combo_data(self._line_style_combo, "-")
+            self._set_combo_data(self._marker_combo, "o")
+        elif plot_type == "errorbar":
+            self._set_combo_data(self._line_style_combo, "-")
+            self._set_combo_data(self._marker_combo, "o")
+        elif plot_type in {"bar", "barh"}:
+            self._set_combo_data(self._line_style_combo, "")
+            self._set_combo_data(self._marker_combo, "")
+        elif plot_type == "area":
+            self._set_combo_data(self._line_style_combo, "-")
+            self._set_combo_data(self._marker_combo, "")
+        elif plot_type == "histogram":
+            self._set_combo_data(self._line_style_combo, "")
+            self._set_combo_data(self._marker_combo, "")
+        else:
+            self._set_combo_data(self._line_style_combo, "-")
+            self._set_combo_data(self._marker_combo, "")
+
+    def _update_plot_type_option_visibility(self) -> None:
+        """Show only the option rows relevant to the selected plot type."""
+        plot_type = str(self._plot_type_combo.currentData() or "line")
+        x_y_types = {"line", "scatter", "line_marker", "errorbar", "bar", "barh", "area"}
+        line_types = {"line", "line_marker", "errorbar", "area"}
+        marker_types = {"scatter", "line_marker", "errorbar"}
+
+        self._set_series_row_visible("x_dataset", plot_type in x_y_types)
+        self._set_series_row_visible("x_column", plot_type in x_y_types)
+        self._set_series_row_visible("x_error", plot_type == "errorbar")
+        self._set_series_row_visible("y_error", plot_type == "errorbar")
+        self._set_series_row_visible("y_axis", plot_type in {"line", "scatter", "line_marker", "errorbar", "bar", "area"})
+        self._set_series_row_visible("line", plot_type in line_types)
+        self._set_series_row_visible("line_width", plot_type in line_types)
+        self._set_series_row_visible("marker", plot_type in marker_types)
+        self._set_series_row_visible("marker_size", plot_type in marker_types)
+        self._set_series_row_visible("bar_options", plot_type in {"bar", "barh"})
+        self._set_series_row_visible("fill_options", plot_type in {"area", "histogram"})
+        self._set_series_row_visible("histogram_options", plot_type == "histogram")
+
+        if plot_type == "histogram":
+            self._set_series_row_label("y_dataset", "Value dataset")
+            self._set_series_row_label("y_column", "Value column")
+        elif plot_type == "barh":
+            self._set_series_row_label("x_dataset", "Position dataset")
+            self._set_series_row_label("x_column", "Position column")
+            self._set_series_row_label("y_dataset", "Value dataset")
+            self._set_series_row_label("y_column", "Value column")
+        else:
+            self._set_series_row_label("x_dataset", "X dataset")
+            self._set_series_row_label("x_column", "X column")
+            self._set_series_row_label("y_dataset", "Y dataset")
+            self._set_series_row_label("y_column", "Y column")
+
+    def _set_series_row_visible(self, key: str, visible: bool) -> None:
+        """Show or hide one remembered Series form row."""
+        row = self._series_rows.get(key)
+        if row is None:
+            return
+        label, field = row
+        if label is not None:
+            label.setVisible(visible)
+        field.setVisible(visible)
+
+    def _set_series_row_label(self, key: str, text: str) -> None:
+        """Update the label text for one remembered Series form row."""
+        row = self._series_rows.get(key)
+        if row is None:
+            return
+        label, _field = row
+        if isinstance(label, QLabel):
+            label.setText(text)
 
     def _remove_selected_series(self) -> None:
         """Remove selected series and reindex locators that remain."""
@@ -931,8 +1132,17 @@ class PlotTab(QWidget):
         ry_label = self._right_y_label_edit.text().strip()
         if len(self._plot_series) == 1:
             s0 = self._plot_series[0]
-            x_label = x_label or s0.x_column
-            if s0.y_axis == "right":
+            if s0.plot_type == "histogram":
+                x_label = x_label or s0.y_column
+                y_label = y_label or ("Density" if s0.histogram_density else "Count")
+            elif s0.plot_type == "barh":
+                x_label = x_label or s0.y_column
+                y_label = y_label or s0.x_column
+            else:
+                x_label = x_label or s0.x_column
+            if s0.plot_type in {"histogram", "barh"}:
+                pass
+            elif s0.y_axis == "right":
                 ry_label = ry_label or s0.y_column
             else:
                 y_label = y_label or s0.y_column
@@ -974,6 +1184,7 @@ class PlotTab(QWidget):
     def _series_text(series: PlotSeries) -> str:
         """Return readable queued-series text for the list widget."""
         bits = [
+            plot_type_label(series.plot_type),
             _LINE_LABELS.get(series.line_style, series.line_style or "None"),
             _MARKER_LABELS.get(series.marker, series.marker or "None"),
             _COLOR_LABELS.get(series.color, series.color or "Auto"),

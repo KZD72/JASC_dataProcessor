@@ -6,7 +6,7 @@
 
 ## 1. Project State
 - **Current Version**: 0.1.0
-- **Last Updated**: 2026-05-13
+- **Last Updated**: 2026-05-18
 - **Current Phase**: Phase 5 (Polish & Packaging)
 
 ## 2. Completed Tasks
@@ -168,6 +168,20 @@
 - [x] Added `Analysis > Custom Fit Models...` for adding, editing, duplicating, validating, and removing project custom fit models.
 - [x] Custom fit models now appear in the standard Curve Fit dialog and are passed through the existing curve-fit engine, reports, result sheets, and plot workflow.
 - [x] `.jasc` project files now save and load custom fit model definitions.
+- [x] Added `math_engine/statistics.py` with single-column summaries, quantiles, distribution diagnostics, normality tests, outlier checks, z-score/cumulative series, correlations, regression, agreement metrics, and paired/independent-sample tests.
+- [x] Added `Analysis > Statistics...` with primary/secondary sheet and column selection so statistical reports can compare columns inside one sheet or across different workspace sheets.
+- [x] Statistics outputs are saved as new workspace datasets for inspection, export, plotting, and project persistence.
+- [x] Refactored the main GUI shell into docked Workspace and Inspector panels so the central Data/Plot work area is less congested.
+- [x] Moved manual entry out of the workspace navigator and into the Data Inspector as its own tab.
+- [x] Moved plot controls into the external Plot Inspector so the plot canvas gets the central space.
+- [x] Reduced the main toolbar to project/import/export actions and grouped data/analysis actions inside the Data Inspector.
+- [x] Added current project path tracking so `Ctrl+S` saves back to the opened/saved `.jasc` file, with `Save Project As...` for choosing a new path.
+- [x] Added Data Editor undo/redo history (`Ctrl+Z`/`Ctrl+Y`) for cell edits, row/column insert/delete, formula application, and in-place derivative/integral result columns.
+- [x] Added the full multi-phase plot-type expansion plan to `Roadmap.md`, covering bar, histogram, box, violin, pie/donut, heatmap, density, contour, candlestick/OHLC, and subplot layouts.
+- [x] Started plot-type expansion Phase 1 by adding `models/plot_types.py`, a Plot Inspector plot-type selector, saved-plot persistence for plot type, and explicit Line/Scatter/Line + Markers/Errorbar rendering paths.
+- [x] Continued plot-type expansion with X/Y-compatible reporting plots: vertical bar, horizontal bar, area/fill, and histogram.
+- [x] Added saved per-series plot options for bar width, fill alpha, histogram bin count, histogram density, and cumulative histogram mode, with Plot Inspector controls shown only for relevant plot types.
+- [x] Reworked the Plot Inspector Series tab so each plot type hides non-applicable controls and relabels column-role fields where needed, e.g. Histogram uses Value dataset/column and hides line, marker, axis, and error controls.
 
 
 ## 3. Active Bugs / Known Issues

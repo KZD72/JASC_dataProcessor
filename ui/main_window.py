@@ -10,6 +10,7 @@ from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDockWidget,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QSplitter,
+    QStackedWidget,
     QTabWidget,
     QTableView,
     QToolBar,
@@ -41,6 +42,7 @@ from math_engine.calculus import (
     integral_column,
 )
 from math_engine.curve_fitting import fit_curve
+from math_engine.statistics import run_statistical_analysis
 from ui.data_table import DataTableWidget
 from ui.dataframe_model import DataFrameTableModel
 from ui.dialogs import (
@@ -52,6 +54,7 @@ from ui.dialogs import (
     FitReportDialog,
     IFFTDialog,
     ImportOptionsDialog,
+    StatisticsDialog,
 )
 from ui.plot_tab import PlotTab
 
@@ -63,6 +66,7 @@ class MainWindow(QMainWindow):
         """Create the main window, shared workspace, and primary UI regions."""
         super().__init__()
         self._workspace = Workspace()
+        self._project_path: Path | None = None
 
         self.setWindowTitle("JASC Data Processor")
         icon_path = Path(__file__).parent.parent / "resources" / "logo.png"
@@ -82,6 +86,7 @@ class MainWindow(QMainWindow):
         self._plot_list.customContextMenuRequested.connect(self._show_plot_context_menu)
 
         self._dataset_model = DataFrameTableModel(self)
+        self._dataset_model.history_changed.connect(self._handle_dataset_history_changed)
         self._dataset_table = QTableView()
         self._dataset_table.setModel(self._dataset_model)
         self._dataset_table.setAlternatingRowColors(True)
@@ -97,52 +102,38 @@ class MainWindow(QMainWindow):
         self._manual_table.dataset_submitted.connect(self._add_manual_dataset)
 
         self._tabs = QTabWidget()
-        self._tabs.addTab(self._build_dataset_editor(), "Data Editor")
-        self._plot_tab_widget = PlotTab(self._workspace, parent=self)
+        self._tabs.currentChanged.connect(self._sync_inspector_to_current_tab)
+        self._tabs.addTab(self._build_dataset_editor(), "Data")
+        self._plot_tab_widget = PlotTab(self._workspace, parent=self, external_options=True)
         self._plot_tab_widget.status_message.connect(self.statusBar().showMessage)
         self._plot_tab_widget.plot_rendered.connect(self._update_plot_action_state)
         self._plot_tab_widget.save_plot_requested.connect(self._save_current_plot)
         self._plot_tab_widget.load_plot_requested.connect(self._load_selected_plot)
         self._plot_tab_widget.remove_plot_requested.connect(self._delete_selected_plot)
-        self._plot_tab_widget.options_visibility_changed.connect(self._sync_plot_options_action)
+        self._plot_tab_widget.options_visibility_changed.connect(self._handle_plot_options_visibility_changed)
         self._tabs.addTab(self._plot_tab_widget, "Plot")
 
-        sidebar = self._build_sidebar()
-        self._sidebar = sidebar
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(sidebar)
-        splitter.addWidget(self._tabs)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([380, 720])
-        self._main_splitter = splitter
-
-        self.setCentralWidget(splitter)
+        self.setCentralWidget(self._tabs)
+        self._build_workspace_dock()
+        self._build_inspector_dock()
         self._create_actions()
         self._apply_visual_style()
+        self._sync_inspector_to_current_tab()
         self.statusBar().showMessage("Ready")
 
-    def _build_sidebar(self) -> QWidget:
-        """Build the left navigation and manual data-entry sidebar."""
-        sidebar = QWidget()
-        sidebar.setMinimumWidth(320)
+    def _build_workspace_dock(self) -> None:
+        """Build the docked workspace navigator for datasets and saved plots."""
+        dock = QDockWidget("Workspace", self)
+        dock.setObjectName("WorkspaceDock")
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setMinimumWidth(240)
 
-        datasheet_label = QLabel("Workspace Datasheets")
-        datasheet_label.setObjectName("SectionLabel")
-        plots_label = QLabel("Saved Plots")
-        plots_label.setObjectName("SectionLabel")
-        manual_label = QLabel("Manual Entry")
-        manual_label.setObjectName("SectionLabel")
+        self._workspace_nav_tabs = QTabWidget()
 
-        layout = QVBoxLayout(sidebar)
-        datasheet_header = QHBoxLayout()
-        datasheet_header.addWidget(datasheet_label)
-        datasheet_header.addStretch(1)
-        self._workspace_toggle_button = QPushButton("Hide")
-        self._workspace_toggle_button.clicked.connect(self._toggle_workspace_section)
-        datasheet_header.addWidget(self._workspace_toggle_button)
-        layout.addLayout(datasheet_header)
-        layout.addWidget(self._dataset_list, 2)
+        dataset_page = QWidget()
+        self._dataset_nav_page = dataset_page
+        dataset_layout = QVBoxLayout(dataset_page)
+        dataset_layout.addWidget(self._dataset_list)
         self._dataset_buttons_panel = QWidget()
         dataset_buttons = QHBoxLayout(self._dataset_buttons_panel)
         dataset_buttons.setContentsMargins(0, 0, 0, 0)
@@ -152,22 +143,47 @@ class MainWindow(QMainWindow):
         self._remove_dataset_button.clicked.connect(self._delete_current_dataset)
         dataset_buttons.addWidget(self._rename_dataset_button)
         dataset_buttons.addWidget(self._remove_dataset_button)
-        layout.addWidget(self._dataset_buttons_panel)
-        plots_header = QHBoxLayout()
-        plots_header.addWidget(plots_label)
-        plots_header.addStretch(1)
-        self._plots_toggle_button = QPushButton("Hide")
-        self._plots_toggle_button.clicked.connect(self._toggle_plots_section)
-        plots_header.addWidget(self._plots_toggle_button)
-        layout.addLayout(plots_header)
-        layout.addWidget(self._plot_list, 1)
-        layout.addWidget(manual_label)
-        layout.addWidget(self._manual_table, 3)
-        return sidebar
+        dataset_layout.addWidget(self._dataset_buttons_panel)
 
-    def _build_dataset_editor(self) -> QWidget:
-        """Build the central dataset table editor and local action header."""
-        editor = QWidget()
+        plot_page = QWidget()
+        self._plot_nav_page = plot_page
+        plot_layout = QVBoxLayout(plot_page)
+        plot_layout.addWidget(self._plot_list)
+
+        self._workspace_nav_tabs.addTab(dataset_page, "Datasets")
+        self._workspace_nav_tabs.addTab(plot_page, "Plots")
+        dock.setWidget(self._workspace_nav_tabs)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self._workspace_dock = dock
+
+    def _build_inspector_dock(self) -> None:
+        """Build the context-sensitive inspector dock."""
+        dock = QDockWidget("Inspector", self)
+        dock.setObjectName("InspectorDock")
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setMinimumWidth(360)
+
+        self._inspector_stack = QStackedWidget()
+        self._data_inspector = self._build_data_inspector()
+        self._plot_inspector = self._plot_tab_widget.options_widget()
+        self._inspector_stack.addWidget(self._data_inspector)
+        self._inspector_stack.addWidget(self._plot_inspector)
+        dock.setWidget(self._inspector_stack)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self._inspector_dock = dock
+
+    def _build_data_inspector(self) -> QWidget:
+        """Build the Data-mode inspector with sheet actions, analysis, and manual entry."""
+        inspector_tabs = QTabWidget()
+        inspector_tabs.addTab(self._build_sheet_actions_panel(), "Sheet")
+        inspector_tabs.addTab(self._build_analysis_actions_panel(), "Analysis")
+        inspector_tabs.addTab(self._manual_table, "Manual Entry")
+        return inspector_tabs
+
+    def _build_sheet_actions_panel(self) -> QWidget:
+        """Build compact dataset-editing actions for the inspector."""
+        panel = QWidget()
+        self._dataset_summary.setWordWrap(True)
 
         self._editor_add_row_button = QPushButton("Add Row")
         self._editor_add_row_button.clicked.connect(self._add_empty_row)
@@ -184,18 +200,73 @@ class MainWindow(QMainWindow):
         self._editor_export_button = QPushButton("Export")
         self._editor_export_button.clicked.connect(self._export_current_dataset)
 
-        action_row = QHBoxLayout()
-        action_row.addWidget(self._dataset_summary, 1)
-        action_row.addWidget(self._editor_add_row_button)
-        action_row.addWidget(self._editor_add_column_button)
-        action_row.addWidget(self._editor_delete_rows_button)
-        action_row.addWidget(self._editor_delete_columns_button)
-        action_row.addWidget(self._editor_rename_button)
-        action_row.addWidget(self._editor_remove_button)
-        action_row.addWidget(self._editor_export_button)
+        layout = QVBoxLayout(panel)
+        layout.addWidget(self._dataset_summary)
+        layout.addLayout(self._button_row(self._editor_add_row_button, self._editor_delete_rows_button))
+        layout.addLayout(self._button_row(self._editor_add_column_button, self._editor_delete_columns_button))
+        layout.addLayout(self._button_row(self._editor_rename_button, self._editor_remove_button))
+        layout.addWidget(self._editor_export_button)
+        layout.addStretch(1)
+        return panel
+
+    def _build_analysis_actions_panel(self) -> QWidget:
+        """Build grouped analysis launch buttons for the inspector."""
+        panel = QWidget()
+        formula_button = QPushButton("Apply Formula")
+        formula_button.clicked.connect(self._apply_column_formula)
+        derivative_button = QPushButton("Derivative")
+        derivative_button.clicked.connect(self._run_derivative)
+        integral_button = QPushButton("Integral")
+        integral_button.clicked.connect(self._run_integral)
+        fft_button = QPushButton("FFT")
+        fft_button.clicked.connect(self._run_fft)
+        ifft_button = QPushButton("Inverse FFT")
+        ifft_button.clicked.connect(self._run_ifft)
+        statistics_button = QPushButton("Statistics")
+        statistics_button.clicked.connect(self._run_statistics)
+        fit_button = QPushButton("Curve Fit")
+        fit_button.clicked.connect(self._run_curve_fit)
+        custom_models_button = QPushButton("Custom Fit Models")
+        custom_models_button.clicked.connect(self._manage_custom_fit_models)
+
+        self._analysis_buttons = [
+            formula_button,
+            derivative_button,
+            integral_button,
+            fft_button,
+            ifft_button,
+            statistics_button,
+            fit_button,
+        ]
+
+        layout = QVBoxLayout(panel)
+        layout.addWidget(QLabel("Column Math"))
+        layout.addWidget(formula_button)
+        layout.addLayout(self._button_row(derivative_button, integral_button))
+        layout.addWidget(QLabel("Signal"))
+        layout.addLayout(self._button_row(fft_button, ifft_button))
+        layout.addWidget(QLabel("Statistics and Fitting"))
+        layout.addWidget(statistics_button)
+        layout.addWidget(fit_button)
+        layout.addWidget(custom_models_button)
+        layout.addStretch(1)
+        return panel
+
+    @staticmethod
+    def _button_row(left_button: QPushButton, right_button: QPushButton) -> QHBoxLayout:
+        """Return a two-button row with stable button widths."""
+        left_button.setMinimumWidth(120)
+        right_button.setMinimumWidth(120)
+        row = QHBoxLayout()
+        row.addWidget(left_button)
+        row.addWidget(right_button)
+        return row
+
+    def _build_dataset_editor(self) -> QWidget:
+        """Build the central dataset table editor."""
+        editor = QWidget()
 
         layout = QVBoxLayout(editor)
-        layout.addLayout(action_row)
         layout.addWidget(self._dataset_table)
         return editor
 
@@ -207,9 +278,13 @@ class MainWindow(QMainWindow):
         open_project_action.setShortcut("Ctrl+O")
         open_project_action.triggered.connect(self._open_project)
 
-        save_project_action = file_menu.addAction("&Save Project...")
+        save_project_action = file_menu.addAction("&Save Project")
         save_project_action.setShortcut("Ctrl+S")
         save_project_action.triggered.connect(self._save_project)
+
+        save_project_as_action = file_menu.addAction("Save Project &As...")
+        save_project_as_action.setShortcut("Ctrl+Shift+S")
+        save_project_as_action.triggered.connect(self._save_project_as)
 
         file_menu.addSeparator()
 
@@ -228,6 +303,16 @@ class MainWindow(QMainWindow):
         export_action.triggered.connect(self._export_current_dataset)
 
         edit_menu = self.menuBar().addMenu("&Edit")
+        undo_action = edit_menu.addAction("&Undo")
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.triggered.connect(self._undo_dataset_edit)
+
+        redo_action = edit_menu.addAction("&Redo")
+        redo_action.setShortcut("Ctrl+Y")
+        redo_action.triggered.connect(self._redo_dataset_edit)
+
+        edit_menu.addSeparator()
+
         delete_rows_action = edit_menu.addAction("&Delete Selected Rows")
         delete_rows_action.setShortcut("Del")
         delete_rows_action.triggered.connect(self._delete_selected_rows)
@@ -236,7 +321,7 @@ class MainWindow(QMainWindow):
         delete_columns_action.triggered.connect(self._delete_selected_columns)
 
         view_menu = self.menuBar().addMenu("&View")
-        show_sidebar_action = view_menu.addAction("Show &Sidebar")
+        show_sidebar_action = view_menu.addAction("Show &Workspace Navigator")
         show_sidebar_action.setCheckable(True)
         show_sidebar_action.setChecked(True)
         show_sidebar_action.toggled.connect(self._set_sidebar_visible)
@@ -251,7 +336,7 @@ class MainWindow(QMainWindow):
         show_plots_action.setChecked(True)
         show_plots_action.toggled.connect(self._set_plots_section_visible)
 
-        show_plot_options_action = view_menu.addAction("Show Plot &Options")
+        show_plot_options_action = view_menu.addAction("Show &Inspector")
         show_plot_options_action.setCheckable(True)
         show_plot_options_action.setChecked(True)
         show_plot_options_action.toggled.connect(self._set_plot_options_visible_from_action)
@@ -293,6 +378,9 @@ class MainWindow(QMainWindow):
         ifft_action = analysis_menu.addAction("&Inverse FFT...")
         ifft_action.triggered.connect(self._run_ifft)
 
+        statistics_action = analysis_menu.addAction("&Statistics...")
+        statistics_action.triggered.connect(self._run_statistics)
+
         custom_models_action = analysis_menu.addAction("Custom Fit &Models...")
         custom_models_action.triggered.connect(self._manage_custom_fit_models)
 
@@ -302,7 +390,7 @@ class MainWindow(QMainWindow):
 
         plot_menu = self.menuBar().addMenu("&Plot")
         save_plot_action = plot_menu.addAction("&Save Current Plot...")
-        save_plot_action.setShortcut("Ctrl+Shift+S")
+        save_plot_action.setShortcut("Ctrl+Alt+S")
         save_plot_action.triggered.connect(self._save_current_plot)
 
         load_plot_action = plot_menu.addAction("&Load Selected Plot")
@@ -319,22 +407,18 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.addAction(open_project_action)
         toolbar.addAction(save_project_action)
+        toolbar.addAction(save_project_as_action)
         toolbar.addAction(close_project_action)
         toolbar.addSeparator()
         toolbar.addAction(import_action)
-        
-        toolbar.addSeparator()
-
-        toolbar.addAction(apply_formula_action)
-        toolbar.addAction(derivative_action)
-        toolbar.addAction(integral_action)
-        toolbar.addAction(fft_action)
-        toolbar.addAction(ifft_action)
-        toolbar.addAction(custom_models_action)
-        toolbar.addAction(fit_action)
+        toolbar.addAction(export_action)
         self.addToolBar(toolbar)
 
         self._export_action = export_action
+        self._save_project_action = save_project_action
+        self._save_project_as_action = save_project_as_action
+        self._undo_action = undo_action
+        self._redo_action = redo_action
         self._delete_rows_action = delete_rows_action
         self._delete_columns_action = delete_columns_action
         self._rename_dataset_action = rename_dataset_action
@@ -345,6 +429,7 @@ class MainWindow(QMainWindow):
         self._integral_action = integral_action
         self._fft_action = fft_action
         self._ifft_action = ifft_action
+        self._statistics_action = statistics_action
         self._custom_models_action = custom_models_action
         self._fit_action = fit_action
         self._close_project_action = close_project_action
@@ -356,6 +441,10 @@ class MainWindow(QMainWindow):
         self._show_workspace_action = show_workspace_action
         self._show_plots_action = show_plots_action
         self._show_plot_options_action = show_plot_options_action
+        self._workspace_dock.visibilityChanged.connect(
+            lambda visible: self._sync_checkable_action(self._show_sidebar_action, visible)
+        )
+        self._inspector_dock.visibilityChanged.connect(self._sync_plot_options_action)
         self._update_dataset_summary()
 
     def _apply_visual_style(self) -> None:
@@ -378,6 +467,15 @@ class MainWindow(QMainWindow):
                 border-bottom: 1px solid #c7d0da;
                 spacing: 4px;
                 padding: 4px;
+            }
+            QDockWidget {
+                font-weight: 700;
+            }
+            QDockWidget::title {
+                background: #edf2f7;
+                border: 1px solid #c7d0da;
+                padding: 6px;
+                text-align: left;
             }
             QToolButton, QPushButton {
                 background: #ffffff;
@@ -675,6 +773,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            self._dataset_model.capture_undo_state()
             result = derivative_column(
                 dataset.frame,
                 x_column=dialog.x_column(),
@@ -683,6 +782,7 @@ class MainWindow(QMainWindow):
                 target_column=dialog.target_column(),
             )
         except MathOperationError as exc:
+            self._dataset_model.discard_latest_undo_state()
             QMessageBox.warning(self, "Derivative Failed", str(exc))
             return
 
@@ -727,6 +827,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            self._dataset_model.capture_undo_state()
             result = integral_column(
                 dataset.frame,
                 x_column=dialog.x_column(),
@@ -736,6 +837,7 @@ class MainWindow(QMainWindow):
                 initial_value=initial_value or 0.0,
             )
         except MathOperationError as exc:
+            self._dataset_model.discard_latest_undo_state()
             QMessageBox.warning(self, "Integral Failed", str(exc))
             return
 
@@ -844,6 +946,69 @@ class MainWindow(QMainWindow):
             self._tabs.setCurrentWidget(self._plot_tab_widget)
         self.statusBar().showMessage(
             f"Inverse FFT saved as '{result_dataset.name}' ({len(result_dataset.frame)} rows)"
+        )
+
+    def _run_statistics(self) -> None:
+        """Run a statistics workflow and create a result dataset."""
+        selected_dataset = self._current_dataset()
+        dataset_columns = {
+            dataset.name: [str(column) for column in dataset.frame.columns]
+            for dataset in self._workspace.list_datasets()
+            if len(dataset.frame.columns) > 0
+        }
+        if not dataset_columns:
+            QMessageBox.information(self, "Statistics", "Load or create a dataset before running statistics.")
+            return
+
+        default_dataset_name = (
+            selected_dataset.name
+            if selected_dataset is not None and selected_dataset.name in dataset_columns
+            else next(iter(dataset_columns))
+        )
+        dialog = StatisticsDialog(
+            dataset_columns=dataset_columns,
+            default_dataset_name=default_dataset_name,
+            parent=self,
+        )
+        if dialog.exec() != StatisticsDialog.Accepted:
+            return
+
+        try:
+            primary_dataset = self._workspace.get_dataset(dialog.primary_dataset_name())
+            primary_column = dialog.primary_column()
+            secondary_series = None
+            secondary_label = ""
+            if dialog.requires_secondary_column():
+                secondary_dataset = self._workspace.get_dataset(dialog.secondary_dataset_name())
+                secondary_column = dialog.secondary_column()
+                secondary_series = secondary_dataset.frame[secondary_column]
+                secondary_label = f"{secondary_dataset.name}: {secondary_column}"
+
+            primary_series = primary_dataset.frame[primary_column]
+            result_frame = run_statistical_analysis(
+                primary=primary_series,
+                primary_label=f"{primary_dataset.name}: {primary_column}",
+                operation_key=dialog.operation_key(),
+                secondary=secondary_series,
+                secondary_label=secondary_label,
+            )
+            result_dataset = self._workspace.add_dataset(
+                dialog.target_dataset_name() or f"{primary_dataset.name}_statistics",
+                result_frame,
+            )
+        except KeyError as exc:
+            QMessageBox.warning(self, "Statistics Failed", f"Selected data is no longer available: {exc}")
+            return
+        except MathOperationError as exc:
+            QMessageBox.warning(self, "Statistics Failed", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Statistics Failed", str(exc))
+            return
+
+        self._refresh_dataset_list(result_dataset.name)
+        self.statusBar().showMessage(
+            f"Statistics saved as '{result_dataset.name}' ({len(result_dataset.frame)} rows)"
         )
 
     def _manage_custom_fit_models(self) -> None:
@@ -1098,6 +1263,7 @@ class MainWindow(QMainWindow):
         self._integral_action.setEnabled(has_dataset)
         self._fft_action.setEnabled(has_dataset)
         self._ifft_action.setEnabled(has_dataset)
+        self._statistics_action.setEnabled(has_dataset)
         self._fit_action.setEnabled(has_dataset)
         self._rename_dataset_button.setEnabled(has_dataset)
         self._remove_dataset_button.setEnabled(has_dataset)
@@ -1108,14 +1274,53 @@ class MainWindow(QMainWindow):
         self._editor_rename_button.setEnabled(has_dataset)
         self._editor_remove_button.setEnabled(has_dataset)
         self._editor_export_button.setEnabled(has_dataset)
+        for button in getattr(self, "_analysis_buttons", []):
+            button.setEnabled(has_dataset)
+        self._undo_action.setEnabled(self._dataset_model.can_undo())
+        self._redo_action.setEnabled(self._dataset_model.can_redo())
+        self._save_project_action.setEnabled(has_project_content)
+        self._save_project_as_action.setEnabled(has_project_content)
         self._close_project_action.setEnabled(has_project_content)
         self._update_plot_action_state()
 
+    def _handle_dataset_history_changed(self) -> None:
+        """Refresh controls after an undoable dataset edit changes history."""
+        dataset = self._dataset_model.dataset
+        if dataset is not None and hasattr(self, "_plot_tab_widget"):
+            self._dataset_table.resizeColumnsToContents()
+            self._plot_tab_widget.refresh_controls(dataset.name)
+        if hasattr(self, "_undo_action"):
+            self._update_dataset_summary()
+
+    def _undo_dataset_edit(self) -> None:
+        """Undo the most recent editable dataset operation."""
+        if not self._dataset_model.undo():
+            return
+        self.statusBar().showMessage("Undid dataset edit")
+
+    def _redo_dataset_edit(self) -> None:
+        """Redo the most recently undone dataset operation."""
+        if not self._dataset_model.redo():
+            return
+        self.statusBar().showMessage("Redid dataset edit")
+
     def _set_sidebar_visible(self, visible: bool) -> None:
-        """Show or hide the full left sidebar."""
-        self._sidebar.setVisible(visible)
+        """Show or hide the workspace navigator dock."""
+        self._workspace_dock.setVisible(visible)
         if hasattr(self, "_show_sidebar_action"):
             self._sync_checkable_action(self._show_sidebar_action, visible)
+
+    def _sync_inspector_to_current_tab(self, _index: int | None = None) -> None:
+        """Show the inspector page that matches the active work area tab."""
+        if not hasattr(self, "_inspector_stack"):
+            return
+
+        if self._tabs.currentWidget() is self._plot_tab_widget:
+            self._inspector_stack.setCurrentWidget(self._plot_inspector)
+            self._inspector_dock.setWindowTitle("Plot Inspector")
+        else:
+            self._inspector_stack.setCurrentWidget(self._data_inspector)
+            self._inspector_dock.setWindowTitle("Data Inspector")
 
     def _toggle_workspace_section(self) -> None:
         """Toggle visibility of the workspace dataset section."""
@@ -1127,25 +1332,40 @@ class MainWindow(QMainWindow):
 
     def _set_workspace_section_visible(self, visible: bool) -> None:
         """Show or hide workspace dataset navigation controls."""
+        dataset_tab_index = self._workspace_nav_tabs.indexOf(self._dataset_nav_page)
+        if dataset_tab_index >= 0:
+            self._workspace_nav_tabs.setTabEnabled(dataset_tab_index, visible)
         self._dataset_list.setVisible(visible)
         self._dataset_buttons_panel.setVisible(visible)
-        self._workspace_toggle_button.setText("Hide" if visible else "Show")
+        if visible:
+            self._workspace_nav_tabs.setCurrentWidget(self._dataset_nav_page)
         if hasattr(self, "_show_workspace_action"):
             self._sync_checkable_action(self._show_workspace_action, visible)
 
     def _set_plots_section_visible(self, visible: bool) -> None:
         """Show or hide saved plot navigation controls."""
-        self._plot_list.setVisible(visible)
-        self._plots_toggle_button.setText("Hide" if visible else "Show")
+        plot_tab_index = self._workspace_nav_tabs.indexOf(self._plot_nav_page)
+        if plot_tab_index >= 0:
+            self._workspace_nav_tabs.setTabEnabled(plot_tab_index, visible)
+        self._plot_nav_page.setVisible(visible)
+        if visible:
+            self._workspace_nav_tabs.setCurrentWidget(self._plot_nav_page)
         if hasattr(self, "_show_plots_action"):
             self._sync_checkable_action(self._show_plots_action, visible)
 
     def _set_plot_options_visible_from_action(self, visible: bool) -> None:
-        """Apply the View menu plot-options visibility state."""
+        """Apply the View menu inspector visibility state."""
+        self._inspector_dock.setVisible(visible)
         self._plot_tab_widget.set_plot_options_visible(visible)
 
+    def _handle_plot_options_visibility_changed(self, visible: bool) -> None:
+        """Apply plot-tab option visibility to the external inspector dock."""
+        if self._tabs.currentWidget() is self._plot_tab_widget:
+            self._inspector_dock.setVisible(visible)
+        self._sync_plot_options_action(visible)
+
     def _sync_plot_options_action(self, visible: bool) -> None:
-        """Synchronize the View menu with plot-tab option visibility."""
+        """Synchronize the View menu with inspector visibility."""
         if hasattr(self, "_show_plot_options_action"):
             self._sync_checkable_action(self._show_plot_options_action, visible)
 
@@ -1157,12 +1377,13 @@ class MainWindow(QMainWindow):
         action.blockSignals(False)
 
     def _reset_view_to_default(self) -> None:
-        """Restore default sidebar and plot-option visibility/layout."""
+        """Restore default workspace and inspector dock visibility/layout."""
         self._set_sidebar_visible(True)
+        self._inspector_dock.setVisible(True)
         self._set_workspace_section_visible(True)
         self._set_plots_section_visible(True)
-        self._main_splitter.setSizes([380, 720])
         self._plot_tab_widget.reset_view_to_default()
+        self._sync_inspector_to_current_tab()
         self.statusBar().showMessage("Reset view to default")
 
     def _path_with_export_suffix(self, path: Path, selected_filter: str) -> Path:
@@ -1212,6 +1433,13 @@ class MainWindow(QMainWindow):
             or self._workspace.custom_fit_model_names()
         )
 
+    def _set_project_window_title(self) -> None:
+        """Refresh the main window title with the current project file."""
+        if self._project_path is None:
+            self.setWindowTitle("JASC Data Processor")
+        else:
+            self.setWindowTitle(f"JASC Data Processor - {self._project_path.name}")
+
     def _open_project(self) -> None:
         """Open a `.jasc` project, replacing the current workspace."""
         if self._has_project_content():
@@ -1229,20 +1457,39 @@ class MainWindow(QMainWindow):
             
         try:
             self._workspace = project_io.load_project(file_name)
+            self._project_path = Path(file_name)
             self._plot_tab_widget.set_workspace(self._workspace)
             self._refresh_dataset_list()
             self._refresh_plot_list()
+            self._set_project_window_title()
             self.statusBar().showMessage(f"Opened project {Path(file_name).name}")
         except Exception as exc:
             QMessageBox.critical(self, "Open Failed", str(exc))
 
     def _save_project(self) -> None:
-        """Save the current workspace to a `.jasc` project file."""
+        """Save the current workspace to its project path, or prompt for one."""
         if not self._has_project_content():
             QMessageBox.information(self, "Save Project", "The workspace is empty.")
             return
-            
-        file_name, _ = QFileDialog.getSaveFileName(self, "Save Project", "workspace.jasc", "JASC Projects (*.jasc)")
+
+        if self._project_path is None:
+            self._save_project_as()
+            return
+
+        try:
+            project_io.save_project(self._workspace, self._project_path)
+            self.statusBar().showMessage(f"Saved project {self._project_path.name}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Failed", str(exc))
+
+    def _save_project_as(self) -> None:
+        """Prompt for a project path and save the current workspace there."""
+        if not self._has_project_content():
+            QMessageBox.information(self, "Save Project", "The workspace is empty.")
+            return
+
+        default_name = str(self._project_path) if self._project_path else "workspace.jasc"
+        file_name, _ = QFileDialog.getSaveFileName(self, "Save Project", default_name, "JASC Projects (*.jasc)")
         if not file_name:
             return
 
@@ -1252,6 +1499,8 @@ class MainWindow(QMainWindow):
 
         try:
             project_io.save_project(self._workspace, path)
+            self._project_path = path
+            self._set_project_window_title()
             self.statusBar().showMessage(f"Saved project {path.name}")
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
@@ -1273,10 +1522,12 @@ class MainWindow(QMainWindow):
             return
 
         self._workspace = Workspace()
+        self._project_path = None
         self._plot_tab_widget.set_workspace(self._workspace)
         self._refresh_dataset_list()
         self._refresh_plot_list()
         self._tabs.setCurrentIndex(0)
+        self._set_project_window_title()
         self.statusBar().showMessage("Closed project")
 
     def _show_dataset_context_menu(self, pos) -> None:

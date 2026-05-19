@@ -22,6 +22,7 @@ class PlotSeries:
     x_column: str
     y_dataset: str
     y_column: str
+    plot_type: str = "line"
     x_err_column: str = ""
     y_err_column: str = ""
     color: str = ""
@@ -34,6 +35,10 @@ class PlotSeries:
     lower_column: str = ""
     upper_column: str = ""
     fill_alpha: float = 0.18
+    bar_width: float = 0.8
+    histogram_bins: int = 20
+    histogram_density: bool = False
+    histogram_cumulative: bool = False
 
     @property
     def label(self) -> str:
@@ -159,18 +164,15 @@ class PlotCanvas(QWidget):
 
             target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
             
-            if x_err is not None or y_err is not None:
-                target_axes.errorbar(
-                    x_values, y_values, xerr=x_err, yerr=y_err,
-                    fmt=series.marker if series.marker else 'none',
-                    label=series.label,
-                    linestyle=series.line_style,
-                    linewidth=series.line_width,
-                    markersize=series.marker_size,
-                    color=series.color if series.color else None,
-                )
-            else:
-                target_axes.plot(x_values, y_values, **plot_kwargs)
+            self._draw_series_by_type(
+                target_axes=target_axes,
+                series=series,
+                x_values=x_values,
+                y_values=y_values,
+                x_err=x_err,
+                y_err=y_err,
+                plot_kwargs=plot_kwargs,
+            )
                 
             self._draw_confidence_band(
                 workspace=workspace,
@@ -179,7 +181,8 @@ class PlotCanvas(QWidget):
                 x_scale=x_scale,
                 y_scale=series_y_scale,
             )
-            plotted_series_values[series_index] = (x_values, y_values, series)
+            if series.plot_type != "histogram":
+                plotted_series_values[series_index] = (x_values, y_values, series)
             plotted_count += 1
 
         self.axes.set_title(title)
@@ -232,9 +235,20 @@ class PlotCanvas(QWidget):
         y_scale: str,
     ) -> tuple[pd.Series, pd.Series, pd.Series | None, pd.Series | None]:
         """Return aligned numeric X/Y values and their errors for a plot series."""
-        x_frame = workspace.get_dataset(series.x_dataset).frame
         y_frame = workspace.get_dataset(series.y_dataset).frame
 
+        if series.plot_type == "histogram":
+            if series.y_column not in y_frame.columns:
+                raise ValueError(f"missing value column '{series.y_column}'")
+            y_values = pd.to_numeric(y_frame[series.y_column], errors="coerce").dropna()
+            if x_scale == "log":
+                y_values = y_values[y_values > 0]
+            if y_values.empty:
+                return pd.Series(dtype=float), pd.Series(dtype=float), None, None
+            x_values = pd.Series(np.arange(len(y_values)), dtype=float)
+            return x_values, y_values.reset_index(drop=True), None, None
+
+        x_frame = workspace.get_dataset(series.x_dataset).frame
         if series.x_column not in x_frame.columns:
             raise ValueError(f"missing X column '{series.x_column}'")
         if series.y_column not in y_frame.columns:
@@ -275,6 +289,101 @@ class PlotCanvas(QWidget):
         x_err_out = aligned["x_err"] if "x_err" in aligned.columns else None
         y_err_out = aligned["y_err"] if "y_err" in aligned.columns else None
         return aligned["x"], aligned["y"], x_err_out, y_err_out
+
+    def _draw_series_by_type(
+        self,
+        target_axes: Any,
+        series: PlotSeries,
+        x_values: pd.Series,
+        y_values: pd.Series,
+        x_err: pd.Series | None,
+        y_err: pd.Series | None,
+        plot_kwargs: dict[str, object],
+    ) -> None:
+        """Draw one aligned series using its explicit plot type."""
+        plot_type = series.plot_type or "line"
+        if plot_type == "scatter":
+            scatter_kwargs: dict[str, object] = {
+                "label": series.label,
+                "marker": series.marker or "o",
+                "s": series.marker_size**2,
+            }
+            if series.color:
+                scatter_kwargs["color"] = series.color
+            target_axes.scatter(x_values, y_values, **scatter_kwargs)
+            return
+
+        if plot_type == "line_marker":
+            plot_kwargs["marker"] = series.marker or "o"
+            plot_kwargs["linestyle"] = series.line_style or "-"
+            target_axes.plot(x_values, y_values, **plot_kwargs)
+            return
+
+        if plot_type == "errorbar" or (
+            plot_type in {"line", "line_marker", "scatter"} and (x_err is not None or y_err is not None)
+        ):
+            marker = series.marker or "o"
+            target_axes.errorbar(
+                x_values,
+                y_values,
+                xerr=x_err,
+                yerr=y_err,
+                fmt=marker,
+                label=series.label,
+                linestyle=series.line_style,
+                linewidth=series.line_width,
+                markersize=series.marker_size,
+                color=series.color if series.color else None,
+            )
+            return
+
+        if plot_type == "bar":
+            target_axes.bar(
+                x_values,
+                y_values,
+                width=series.bar_width,
+                label=series.label,
+                color=series.color if series.color else None,
+            )
+            return
+
+        if plot_type == "barh":
+            target_axes.barh(
+                x_values,
+                y_values,
+                height=series.bar_width,
+                label=series.label,
+                color=series.color if series.color else None,
+            )
+            return
+
+        if plot_type == "area":
+            line_kwargs = dict(plot_kwargs)
+            line_kwargs["label"] = "_nolegend_"
+            target_axes.plot(x_values, y_values, **line_kwargs)
+            target_axes.fill_between(
+                x_values,
+                y_values,
+                0,
+                label=series.label,
+                color=series.color if series.color else None,
+                alpha=series.fill_alpha,
+            )
+            return
+
+        if plot_type == "histogram":
+            target_axes.hist(
+                y_values,
+                bins=max(series.histogram_bins, 1),
+                density=series.histogram_density,
+                cumulative=series.histogram_cumulative,
+                label=series.label,
+                color=series.color if series.color else None,
+                alpha=series.fill_alpha,
+            )
+            return
+
+        target_axes.plot(x_values, y_values, **plot_kwargs)
 
     def _draw_confidence_band(
         self,

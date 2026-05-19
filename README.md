@@ -7,10 +7,12 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 - **Data Ingestion**: Import tabular datasets (CSV/TXT) with dynamic type detection, or manually enter data in a spreadsheet interface.
 - **Formula Engine**: Apply safe math operations to columns using a sandboxed expression evaluator supporting standard numpy/scipy operations.
 - **Signal Processing & Calculus**: Perform numerical differentiation, cumulative integration, and Fast Fourier Transforms (FFT).
+- **Statistics Workbench**: Generate single-column summaries, distribution diagnostics, normality tests, outlier checks, correlations, regression metrics, paired tests, and independent-sample tests across columns or sheets.
 - **Curve Fitting**: Fit analytical models (Linear, Exponential, Gaussian, Peak functions, etc.) with customizable parameters using Levenberg-Marquardt or Trust-Region algorithms.
 - **Custom Fit Models**: Define project-saved fit models from safe NumPy/SciPy expressions and use them in the standard fitting workflow.
 - **Dynamic Plotting**: High-performance multi-axis plotting with Matplotlib, featuring data locators, scaling controls, and visual customization.
 - **Saved Plots**: Store named plot definitions in the workspace so plot series, locators, axes, legends, and sizing can be restored later.
+- **Docked Workspace Layout**: Keep datasets, saved plots, data tools, manual entry, and plot options in dockable panels so the central Data and Plot work areas stay focused.
 - **Project Persistence**: Save and load complete workspaces, including datasets, mathematical formulas, and saved plots using `.jasc` project files.
 
 ## Installation
