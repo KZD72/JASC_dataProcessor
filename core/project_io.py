@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from core.workspace import Workspace
+from core.workspace import ColumnMetadata, Workspace
 from models.fit_functions import CustomFitModel
 
 PROJECT_EXTENSION = ".jasc"
@@ -48,6 +48,11 @@ def save_project(workspace: Workspace, path: str | Path) -> None:
                 "csv_file": csv_name,
                 "source_path": str(dataset.source_path) if dataset.source_path else None,
                 "formulas": dict(dataset.formulas),
+                "column_metadata": {
+                    str(column): entry.to_metadata()
+                    for column, entry in dataset.column_metadata.items()
+                    if not entry.is_empty()
+                },
             })
 
         for plot in workspace.list_plots():
@@ -94,6 +99,13 @@ def load_project(path: str | Path) -> Workspace:
             formulas = entry.get("formulas")
             if isinstance(formulas, dict):
                 dataset.formulas.update(formulas)
+
+            column_metadata = entry.get("column_metadata")
+            if isinstance(column_metadata, dict):
+                dataset.set_column_metadata({
+                    str(column): ColumnMetadata.from_metadata(metadata_entry)
+                    for column, metadata_entry in column_metadata.items()
+                })
 
         for entry in metadata.get("plots", []):
             name = entry.get("name")

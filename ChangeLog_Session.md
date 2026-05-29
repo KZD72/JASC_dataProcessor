@@ -7,7 +7,7 @@
 ## 1. Project State
 - **Current Version**: 0.1.0
 - **Last Updated**: 2026-05-29
-- **Current Phase**: Phase 2A Plot Type Expansion plus Competitive Stage 0 stabilization (pie/donut charts remain the next plot-type subphase after verification)
+- **Current Phase**: Phase 2A Plot Type Expansion plus Competitive Stage 0 stabilization, expanded statistics verification, and interpolation workbench verification (pie/donut charts remain the next plot-type subphase after verification)
 
 ## 2. Completed Tasks
 - [x] Initial project definition, tech stack selection, and requirements gathering.
@@ -202,29 +202,68 @@
 - [x] Reviewed the current application functionality against official Origin/OriginPro and SigmaPlot v16 feature areas.
 - [x] Updated `Roadmap.md` with a current capability baseline, official competitive reference links, an Origin/SigmaPlot-style gap matrix, and a staged competitive implementation roadmap.
 - [x] Added a near-term recommended order that starts with a stabilization/test gate, then completes Phase 2A plotting, then builds workbook metadata, import/export, graph templates, analysis, fitting, automation, reporting, performance, and packaging capabilities.
+- [x] Started Competitive Stage 1 by adding lightweight per-column metadata: role, unit, long name, and comment.
+- [x] Added a Data Editor `Column Metadata...` workflow through the Data menu, Data Inspector, and dataset right-click context menu.
+- [x] Persisted column metadata in `.jasc` project files and included it in Data Editor undo/redo snapshots.
+- [x] Data Editor column headers now expose role/unit/long-name/comment metadata in tooltips alongside formula metadata.
+- [x] Whole-column in-app clipboard copy/paste now preserves column metadata through the existing custom MIME payload.
+- [x] Plot controls and analysis/fitting dialogs now use column roles as hints for default X/Y/Z/error selections where safe.
+- [x] Plot axis labels now use column long names and units when the user leaves labels blank.
+- [x] Column Metadata now shows the real column name as an editable field, so users can rename columns from the metadata table.
+- [x] Double-clicking a Data Editor column header now opens Column Metadata focused on that column.
+- [x] Column renames from the metadata workflow are undoable, carry formulas and metadata to the new name, and retarget active/saved plot column references.
+- [x] Plot Inspector axis label fields now visibly prefill from column long-name/unit metadata instead of applying metadata labels only during render.
+- [x] Axis-label prefills are tracked as automatic values so metadata/series changes can update blank or auto-filled labels without overwriting labels typed manually by the user.
+- [x] Added `math_engine/interpolation.py` for reusable 1D, 2D, and N-D interpolation/prediction operations.
+- [x] Added `Analysis > Interpolation...` and a Data Inspector Interpolation button that create new prediction datasets from the selected sheet.
+- [x] Added `InterpolationDialog` with dimensionality, source coordinate columns, value column, interpolation method, outside-range policy, smoothing, RBF epsilon, query mode, generated range/grid, existing query columns, manual coordinates, and result-sheet controls.
+- [x] Supported 1D interpolation methods: linear, nearest neighbor, cubic spline, PCHIP, Akima, and smoothing spline.
+- [x] Supported 2D interpolation methods: nearest neighbor, linear scattered, cubic spline, piecewise cubic, smooth bivariate spline, and radial basis functions.
+- [x] Supported N-D interpolation methods: nearest neighbor, linear scattered, and radial basis functions.
+- [x] Interpolation outputs now preserve useful column metadata where possible and name prediction columns as `{value_column}_interpolated`.
+- [x] Generated interpolation query ranges/grids are capped at 1,000,000 points and duplicate source coordinates are averaged before interpolation.
+- [x] Added optional companion plots to the Statistics workflow through a new "Create companion plot" checkbox and scope-aware plot-kind selector.
+- [x] Statistics companion plots now support single-column histograms with normal-curve overlays, single-column box/violin plots, z-score/cumulative result-series plots, two-column scatter plots, scatter plus regression line, box/violin comparisons, and Bland-Altman plots.
+- [x] Added `PlotTab.queue_plot_series()` so analysis workflows can hand prebuilt plot queues to the existing editable/savable Plot tab.
+- [x] Updated the advanced-statistics roadmap to prioritize group-aware dialogs and companion plot templates before ANOVA, nonparametric, PCA, clustering, logistic/ROC, survival, and distribution-fitting families.
+- [x] Fixed the SciPy 1.17+ `stats.anderson` FutureWarning by explicitly requesting Anderson-Darling p-values with `method="interpolate"` when supported, while preserving legacy critical-value output for older SciPy versions.
+- [x] Expanded the Statistics workbench with a grouped/factor scope using a numeric value column plus a group column.
+- [x] Added grouped statistics operations: complete grouped report, descriptive summary by group, assumption checks, one-way ANOVA, Kruskal-Wallis, Tukey HSD post-hoc comparisons, and pairwise Mann-Whitney tests with Holm-adjusted p-values.
+- [x] Statistics grouped companion plots now create box or violin plots by group through generated helper datasets.
+- [x] Added a multi-column Statistics scope with selectable columns from one sheet.
+- [x] Added multi-column statistics operations: complete report, per-column descriptive/distribution summary, pairwise Pearson/Spearman/Kendall correlations, covariance values, and standardized PCA summaries.
+- [x] Statistics multi-column companion plots now support selected-column box/violin plots, Pearson correlation heatmaps, and PCA explained-variance bar charts.
 
 
 ## 3. Active Bugs / Known Issues
+- [ ] General interpolation workbench is implemented but still needs compile/import, Qt dialog, numerical smoke, and manual GUI tests once a usable Python/Qt runtime is available.
+- [ ] Statistics companion plot, multi-column, and grouped-statistics support is implemented but still needs compile/import, Qt dialog, numerical, and manual plot smoke tests once a usable Python/Qt runtime is available.
 - [ ] Interpolated 2D-map support is implemented but still needs compile/import, Qt, and manual rendering smoke tests once a usable Python/Qt runtime is available.
-- [ ] Python compile/import and Qt smoke checks were not rerun after the latest Data Editor and interpolated 2D-map changes because `python`/`python3` resolve to Microsoft Store stubs in the current shell and `py` is not installed.
+- [ ] Column metadata support is implemented but still needs compile/import, Qt, save/load, undo/redo, copy/paste, and role-hint smoke tests once a usable Python/Qt runtime is available.
+- [ ] Python compile/import and Qt smoke checks were not rerun after the latest Data Editor, interpolated 2D-map, metadata, interpolation-workbench, and statistics companion-plot changes because `python` resolves to the Microsoft Store launcher and currently fails with "A specified logon session does not exist"; `py` is not installed.
 - [ ] Required analytical-model list mentions arbitrary n-th degree polynomial fitting, but the current fit registry only has linear, quadratic, and cubic polynomial models.
 - [ ] There is no automated test suite or PyInstaller/spec packaging file in the repository yet.
 
 ## 4. Next Steps for Current/New Session (To-Do)
 1. Start Competitive Stage 0 from `Roadmap.md`: install or activate a usable Python runtime, add repeatable smoke tests, and verify the current Data Editor/context-menu and interpolated 2D-map changes.
-2. Manually smoke-test Phase 2A plot types on real datasets: Line, Scatter, Line + Markers, Errorbar, Vertical Bar, Horizontal Bar, Area, Histogram, Box Plot, and Violin Plot, including saved plot save/load and invalid column selections.
-3. Manually smoke-test SciencePlots styling on the live canvas: Science, IEEE, Nature, color cycles, custom tokens, saved plot save/load, and LaTeX disabled/enabled behavior.
-4. Manually smoke-test the Data Editor right-click menu on cells and column headers: Undo, Redo, Copy Values, Paste Values, Copy Column(s), Paste Column(s), paste expansion, and undo/redo after value and column paste.
-5. Manually smoke-test Data Editor copy/paste between imported datasets and Manual Entry, including full-column selections and tab-delimited clipboard fallback from external spreadsheets.
-6. Manually smoke-test Data Inspector append/insert/delete row and column operations, including insertion before the current selection and undo/redo.
-7. Begin plot-type expansion Phase 4: pie and donut charts with label/value column roles, percentage label controls, exploded slice controls, and saved-state persistence.
-8. Manually smoke-test interpolated 2D maps on irregular X/Y/Z datasets: heatmap, contour, filled contour, linear interpolation, cubic spline interpolation, piecewise cubic interpolation, saved plot save/load, dataset rename, and X/Y locator prediction of Z values.
-9. Continue the interpolated 2D-map follow-ups: regular-grid heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, and contour-level controls.
-10. Continue later Phase 2A work in order: candlestick/OHLC plots, then multi-panel/subplot layouts.
-11. Use the new competitive roadmap after Phase 2A/stabilization work: Stage 1 workbook metadata and column roles, Stage 2 Excel/import-export connectors, then graph templates/layout, analysis workbench expansion, advanced fitting, automation/templates, reporting, and performance/packaging.
-12. Add broader edge-case tests for unusual imported data, singular fits, non-monotonic X values, missing values, and project files with many sheets.
-13. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
-14. Write the PyInstaller setup script for building the standalone `.exe`.
+2. Manually smoke-test column metadata: edit roles/units/long names/comments, rename columns from the metadata table, open metadata by double-clicking a column header, undo/redo metadata and rename edits, save/load `.jasc`, delete metadata-bearing columns, copy/paste metadata-bearing columns, and confirm plot/math/fitting defaults honor X/Y/Z/error roles.
+3. Manually smoke-test Plot Inspector metadata labels: select metadata-bearing X/Y/Z columns, add/update/load plots, run derivative/integral/FFT/fit plot shortcuts, and confirm Axes fields show long-name/unit labels while preserving manually typed axis labels.
+4. Manually smoke-test Analysis > Statistics companion plots plus multi-column and grouped operations: auto single-column histogram/normal overlay, box, violin, z-score result series, cumulative result series, two-column scatter, regression line, Bland-Altman, multi-column correlation/PCA outputs and plots, grouped ANOVA/Kruskal/Tukey/Mann-Whitney outputs, and grouped/cross-sheet box/violin helper dataset creation.
+5. Manually smoke-test Analysis > Interpolation: 1D generated ranges with all methods and outside policies, 2D generated grids with linear/cubic/piecewise/RBF methods, N-D existing-column and manual query modes, duplicate source-coordinate averaging, generated-grid cap warnings, metadata propagation, and project save/load.
+6. Manually smoke-test Phase 2A plot types on real datasets: Line, Scatter, Line + Markers, Errorbar, Vertical Bar, Horizontal Bar, Area, Histogram, Box Plot, and Violin Plot, including saved plot save/load and invalid column selections.
+7. Manually smoke-test SciencePlots styling on the live canvas: Science, IEEE, Nature, color cycles, custom tokens, saved plot save/load, and LaTeX disabled/enabled behavior.
+8. Manually smoke-test the Data Editor right-click menu on cells and column headers: Undo, Redo, Copy Values, Paste Values, Copy Column(s), Paste Column(s), paste expansion, and undo/redo after value and column paste.
+9. Manually smoke-test Data Editor copy/paste between imported datasets and Manual Entry, including full-column selections and tab-delimited clipboard fallback from external spreadsheets.
+10. Manually smoke-test Data Inspector append/insert/delete row and column operations, including insertion before the current selection and undo/redo.
+11. Begin plot-type expansion Phase 4: pie and donut charts with label/value column roles, percentage label controls, exploded slice controls, and saved-state persistence.
+12. Start the next advanced-statistics layer: two-way/repeated-measures ANOVA design inputs, ANCOVA planning, clustering result datasets, logistic/ROC workflows, and richer statistical advisor/reporting outputs.
+13. Manually smoke-test interpolated 2D maps on irregular X/Y/Z datasets: heatmap, contour, filled contour, linear interpolation, cubic spline interpolation, piecewise cubic interpolation, saved plot save/load, dataset rename, and X/Y locator prediction of Z values.
+14. Continue the interpolated 2D-map follow-ups: regular-grid heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, and contour-level controls.
+15. Continue later Phase 2A work in order: candlestick/OHLC plots, then multi-panel/subplot layouts.
+16. Use the new competitive roadmap after Phase 2A/stabilization work: finish Stage 1 workbook metadata and column roles, Stage 2 Excel/import-export connectors, then graph templates/layout, analysis workbench expansion, advanced fitting, automation/templates, reporting, and performance/packaging.
+17. Add broader edge-case tests for unusual imported data, singular fits, non-monotonic X values, missing values, and project files with many sheets.
+18. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
+19. Write the PyInstaller setup script for building the standalone `.exe`.
 
 ## 5. Architectural Context Notes
 - File parsing lives in `core/file_io.py`; Qt file selection and dialogs live in the UI layer.
@@ -234,7 +273,26 @@
 - The workspace data editor writes cell edits directly to the selected dataset's DataFrame.
 - The workspace Data Editor supports `Ctrl+C`/`Ctrl+V` tab-delimited clipboard transfer. Pasted blocks grow rows/columns when needed and are captured by the dataset undo stack.
 - The workspace Data Editor context menu is installed on both the table viewport and horizontal header. Right-clicking an unselected cell or column makes it the active target before showing Undo/Redo and value/column clipboard actions.
-- Whole-column copy/paste uses a custom Qt MIME payload, `application/x-jasc-dataframe-columns`, so in-app copies preserve headers. Plain tab-delimited clipboard text can still be pasted as generated `Pasted Column N` columns.
+- Whole-column copy/paste uses a custom Qt MIME payload, `application/x-jasc-dataframe-columns`, so in-app copies preserve headers and column metadata. Plain tab-delimited clipboard text can still be pasted as generated `Pasted Column N` columns.
+- Column metadata is stored per dataset as role, unit, long name, and comment. Supported role keys are `x`, `y`, `z`, `error`, `x_error`, `y_error`, `group`, `label`, and `weight`.
+- Column metadata is persisted in `.jasc` project metadata, participates in Data Editor undo/redo snapshots, and is pruned when columns are deleted.
+- Data Editor column-header tooltips combine column metadata and stored formula text. Plot axis labels prefer long name plus unit when labels are blank.
+- Current role hints are lightweight: PlotTab prefers tagged X/Y/Z/error columns for selectors, while derivative/integral/FFT/curve-fit dialogs use tagged columns as initial defaults.
+- PlotTab now writes metadata-derived axis labels into the Axes controls themselves. The automatic-label tracker updates blank/auto-filled labels when metadata or series choices change but leaves manually edited labels in place.
+- Column rename is currently handled through `ColumnMetadataDialog` rather than a separate rename dialog. `DataFrameTableModel.apply_column_metadata()` updates DataFrame column names, formula keys, and column metadata in one undoable operation.
+- Data Editor horizontal-header double-click opens Column Metadata focused on the clicked column. Rename maps are propagated to active plot series and saved plot definitions through `PlotTab.rename_column_references()` and `Workspace.rename_column_references_in_plots()`.
+- General interpolation logic lives in `math_engine/interpolation.py`; keep SciPy interpolation details there and let the UI pass selected columns, method, parameters, and query points.
+- `InterpolationDialog` supports three query modes: generated range/grid for 1D/2D, existing coordinate columns for 1D/2D/N-D, and manual coordinate rows for 1D/2D/N-D.
+- `MainWindow._run_interpolation()` creates a new workspace dataset rather than editing the source dataset. It propagates coordinate metadata and sets the prediction column metadata from the source value column.
+- Interpolation methods currently include 1D linear/nearest/cubic spline/PCHIP/Akima/smoothing spline; 2D nearest/linear/cubic spline/piecewise cubic/smooth bivariate spline/RBF; and N-D nearest/linear/RBF.
+- Generated interpolation queries are capped at 1,000,000 points to avoid accidental huge result sheets.
+- Statistics companion plots are optional in `StatisticsDialog`. Auto plots currently choose histograms for single report metrics, result-series plots for z-score/cumulative outputs, regression plots for linear regression, Bland-Altman plots for agreement, correlation heatmaps/PCA variance plots for multi-column results, and box plots for independent-sample/grouped comparisons.
+- `MainWindow._queue_statistics_companion_plot()` may create helper datasets for normal-curve overlays, regression lines, Bland-Altman mean/difference data, or cross-sheet comparison columns. These helper datasets are regular workspace datasets and should be tested with save/load.
+- `PlotTab.queue_plot_series()` is the preferred public helper for future analysis workflows that need to replace the current plot queue with prebuilt `PlotSeries` instances.
+- Statistics grouped operations use `StatisticOperation.scope == "group"` and reuse the secondary selector as the group/factor column. The engine expects a numeric primary/value column and a categorical secondary/group column.
+- Statistics multi-column operations use `StatisticOperation.scope == "multi"` and the Statistics dialog multi-select list. The engine expects two or more numeric columns from the primary sheet.
+- Grouped statistics currently include one-way ANOVA, Kruskal-Wallis, Tukey HSD, pairwise Mann-Whitney with Holm-adjusted p-values, Levene/Brown-Forsythe and Bartlett equal-variance checks, and per-group Shapiro-Wilk normality checks.
+- Grouped statistics companion plots create wide helper datasets with one column per group so existing box/violin plot rendering can be reused.
 - Data Editor "Add" row/column actions append to the end; "Insert" row/column actions insert before the first selected row/column, or append when nothing is selected.
 - Export currently writes UTF-8 CSV or tab-delimited TXT without the DataFrame index.
 - Formula expressions expose valid Python-identifier columns directly (`x + y`) and all columns through `col("Column Name")`.

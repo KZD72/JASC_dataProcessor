@@ -6,6 +6,7 @@ from html import escape
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QWidget,
@@ -28,8 +30,14 @@ from PySide6.QtWidgets import (
 )
 
 from core.file_io import ImportOptions
+from core.workspace import COLUMN_ROLE_OPTIONS, ColumnMetadata, column_role_label
 from math_engine.curve_fitting import FIT_METHODS
 from math_engine.calculus import DERIVATIVE_METHODS, INTEGRATION_METHODS, WINDOW_METHODS
+from math_engine.interpolation import (
+    FILL_POLICIES,
+    INTERPOLATION_METHODS,
+    MAX_GENERATED_QUERY_POINTS,
+)
 from math_engine.statistics import STATISTIC_OPERATIONS
 from models.fit_functions import (
     CustomFitModel,
@@ -80,6 +88,129 @@ class ImportOptionsDialog(QDialog):
             delimiter=str(self._delimiter_combo.currentData()),
             has_header=self._header_checkbox.isChecked(),
         )
+
+
+class ColumnMetadataDialog(QDialog):
+    """Edit lightweight role and descriptive metadata for dataset columns."""
+
+    def __init__(
+        self,
+        dataset_name: str,
+        column_names: list[str],
+        column_metadata: dict[str, ColumnMetadata],
+        focus_column: str | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Create a metadata table with one editable row per column."""
+        super().__init__(parent)
+        self.setWindowTitle("Column Metadata")
+        self.setModal(True)
+        self.resize(860, 420)
+        self._column_names = list(column_names)
+
+        self._table = QTableWidget(len(self._column_names), 5)
+        self._table.setHorizontalHeaderLabels(["Column name", "Role", "Unit", "Long name", "Comment"])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+
+        for row, column_name in enumerate(self._column_names):
+            metadata = column_metadata.get(column_name, ColumnMetadata())
+            name_item = QTableWidgetItem(column_name)
+            self._table.setItem(row, 0, name_item)
+
+            role_combo = QComboBox()
+            for role_key, role_label in COLUMN_ROLE_OPTIONS:
+                role_combo.addItem(role_label, role_key)
+            role_index = role_combo.findData(metadata.role)
+            if role_index >= 0:
+                role_combo.setCurrentIndex(role_index)
+            self._table.setCellWidget(row, 1, role_combo)
+
+            self._table.setItem(row, 2, QTableWidgetItem(metadata.unit))
+            self._table.setItem(row, 3, QTableWidgetItem(metadata.long_name))
+            self._table.setItem(row, 4, QTableWidgetItem(metadata.comment))
+
+        hint = QLabel(
+            "Edit the column name here to rename the dataset column. "
+            "Roles are used as hints by plot, fitting, and future analysis dialogs. "
+            "Units and long names appear in table tooltips and can be used for cleaner plot labels."
+        )
+        hint.setWordWrap(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Dataset: {dataset_name}"))
+        layout.addWidget(hint)
+        layout.addWidget(self._table)
+        layout.addWidget(buttons)
+        self._focus_column(focus_column)
+
+    def column_names(self) -> list[str]:
+        """Return edited column names in table order."""
+        return [self._item_text(row, 0) for row in range(len(self._column_names))]
+
+    def column_metadata(self) -> dict[str, ColumnMetadata]:
+        """Return edited non-empty metadata keyed by edited column name."""
+        metadata_by_column: dict[str, ColumnMetadata] = {}
+        edited_names = self.column_names()
+        for row, column_name in enumerate(edited_names):
+            role_widget = self._table.cellWidget(row, 1)
+            role = ""
+            if isinstance(role_widget, QComboBox):
+                role = str(role_widget.currentData() or "")
+
+            metadata = ColumnMetadata(
+                role=role,
+                unit=self._item_text(row, 2),
+                long_name=self._item_text(row, 3),
+                comment=self._item_text(row, 4),
+            )
+            if not metadata.is_empty():
+                metadata_by_column[column_name] = metadata
+        return metadata_by_column
+
+    def accept(self) -> None:
+        """Validate column names, then accept edits."""
+        names = self.column_names()
+        if any(not name for name in names):
+            QMessageBox.warning(self, "Column Metadata", "Column names cannot be blank.")
+            return
+        if len(set(names)) != len(names):
+            QMessageBox.warning(self, "Column Metadata", "Column names must be unique.")
+            return
+
+        for row in range(self._table.rowCount()):
+            role_widget = self._table.cellWidget(row, 1)
+            if isinstance(role_widget, QComboBox):
+                role_widget.setToolTip(column_role_label(str(role_widget.currentData() or "")))
+        super().accept()
+
+    def _focus_column(self, focus_column: str | None) -> None:
+        """Select a column row when the dialog was opened from a header."""
+        if not focus_column:
+            return
+        try:
+            row = self._column_names.index(focus_column)
+        except ValueError:
+            return
+
+        self._table.setCurrentCell(row, 0)
+        item = self._table.item(row, 0)
+        if item is not None:
+            self._table.scrollToItem(item)
+
+    def _item_text(self, row: int, column: int) -> str:
+        """Return stripped text from a metadata table item."""
+        item = self._table.item(row, column)
+        return item.text().strip() if item is not None else ""
 
 
 class ColumnExpressionDialog(QDialog):
@@ -222,6 +353,8 @@ class ColumnMathDialog(QDialog):
         methods: dict[str, str],
         default_target: str,
         include_initial_value: bool = False,
+        default_x_column: str | None = None,
+        default_y_column: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         """Create controls for derivative/integral settings."""
@@ -232,10 +365,13 @@ class ColumnMathDialog(QDialog):
 
         self._x_column_combo = QComboBox()
         self._x_column_combo.addItems(column_names)
+        self._set_combo_text_if_present(self._x_column_combo, default_x_column)
 
         self._y_column_combo = QComboBox()
         self._y_column_combo.addItems(column_names)
-        if len(column_names) > 1:
+        if default_y_column:
+            self._set_combo_text_if_present(self._y_column_combo, default_y_column)
+        elif len(column_names) > 1:
             self._y_column_combo.setCurrentIndex(1)
 
         self._method_combo = QComboBox()
@@ -289,11 +425,27 @@ class ColumnMathDialog(QDialog):
         """Return whether the operation result should be plotted immediately."""
         return self._plot_result_checkbox.isChecked()
 
+    @staticmethod
+    def _set_combo_text_if_present(combo: QComboBox, value: str | None) -> None:
+        """Select a combo item by text when it exists."""
+        if not value:
+            return
+        index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
 
 class FFTDialog(QDialog):
     """Collect settings for FFT operations."""
 
-    def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        column_names: list[str],
+        default_dataset_name: str,
+        default_signal_column: str | None = None,
+        default_x_column: str | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         """Create controls for FFT input, spacing, and output naming."""
         super().__init__(parent)
         self.setWindowTitle("FFT")
@@ -302,13 +454,16 @@ class FFTDialog(QDialog):
 
         self._signal_column_combo = QComboBox()
         self._signal_column_combo.addItems(column_names)
-        if len(column_names) > 1:
+        if default_signal_column:
+            self._set_combo_text_if_present(self._signal_column_combo, default_signal_column)
+        elif len(column_names) > 1:
             self._signal_column_combo.setCurrentIndex(1)
 
         self._x_column_combo = QComboBox()
         self._x_column_combo.addItem("Sample index", None)
         for column_name in column_names:
             self._x_column_combo.addItem(column_name, column_name)
+        self._set_combo_text_if_present(self._x_column_combo, default_x_column)
 
         self._window_combo = QComboBox()
         for window_key, window_label in WINDOW_METHODS.items():
@@ -353,6 +508,15 @@ class FFTDialog(QDialog):
     def plot_result_immediately(self) -> bool:
         """Return whether the FFT magnitude should be plotted immediately."""
         return self._plot_result_checkbox.isChecked()
+
+    @staticmethod
+    def _set_combo_text_if_present(combo: QComboBox, value: str | None) -> None:
+        """Select a combo item by text when it exists."""
+        if not value:
+            return
+        index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
 
 class IFFTDialog(QDialog):
@@ -414,8 +578,470 @@ class IFFTDialog(QDialog):
         return self._plot_result_checkbox.isChecked()
 
 
+class InterpolationDialog(QDialog):
+    """Collect settings for 1D, 2D, and N-D interpolation."""
+
+    def __init__(
+        self,
+        column_names: list[str],
+        default_dataset_name: str,
+        column_ranges: dict[str, tuple[float, float]],
+        default_x_column: str | None = None,
+        default_y_column: str | None = None,
+        default_z_column: str | None = None,
+        default_value_column: str | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build interpolation source, method, query, and output controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Interpolation")
+        self.setModal(True)
+        self.resize(760, 620)
+        self._column_names = list(column_names)
+        self._column_ranges = column_ranges
+        self._default_value_by_mode = {
+            "1d": default_value_column or default_y_column or default_z_column,
+            "2d": default_z_column or default_value_column or default_y_column,
+            "nd": default_z_column or default_value_column or default_y_column,
+        }
+        self._last_mode = "1d"
+
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("1D: x -> value", "1d")
+        self._mode_combo.addItem("2D: x, y -> value", "2d")
+        self._mode_combo.addItem("N-D: coordinates -> value", "nd")
+
+        self._value_column_combo = QComboBox()
+        self._value_column_combo.addItems(self._column_names)
+        self._set_combo_text_if_present(
+            self._value_column_combo,
+            self._default_value_by_mode["1d"],
+        )
+
+        self._x_column_combo = QComboBox()
+        self._x_column_combo.addItems(self._column_names)
+        self._set_combo_text_if_present(self._x_column_combo, default_x_column)
+
+        self._y_column_combo = QComboBox()
+        self._y_column_combo.addItems(self._column_names)
+        self._set_combo_text_if_present(self._y_column_combo, default_y_column)
+
+        self._nd_source_list = self._column_list()
+        self._select_list_columns(
+            self._nd_source_list,
+            [column for column in (default_x_column, default_y_column) if column],
+        )
+
+        self._method_combo = QComboBox()
+        self._fill_policy_combo = QComboBox()
+        for key, label in FILL_POLICIES.items():
+            self._fill_policy_combo.addItem(label, key)
+
+        self._smoothing_spin = QDoubleSpinBox()
+        self._smoothing_spin.setRange(0.0, 1_000_000.0)
+        self._smoothing_spin.setDecimals(6)
+        self._smoothing_spin.setSingleStep(0.1)
+        self._smoothing_spin.setValue(0.0)
+
+        self._epsilon_spin = QDoubleSpinBox()
+        self._epsilon_spin.setRange(0.0, 1_000_000.0)
+        self._epsilon_spin.setDecimals(6)
+        self._epsilon_spin.setSingleStep(0.1)
+        self._epsilon_spin.setSpecialValueText("auto")
+        self._epsilon_spin.setValue(0.0)
+
+        self._query_mode_combo = QComboBox()
+
+        self._x_start_edit = QLineEdit()
+        self._x_end_edit = QLineEdit()
+        self._x_count_spin = QSpinBox()
+        self._x_count_spin.setRange(1, 1_000_000)
+        self._x_count_spin.setValue(200)
+
+        self._y_start_edit = QLineEdit()
+        self._y_end_edit = QLineEdit()
+        self._y_count_spin = QSpinBox()
+        self._y_count_spin.setRange(1, 100_000)
+        self._y_count_spin.setValue(100)
+
+        self._query_x_column_combo = QComboBox()
+        self._query_x_column_combo.addItems(self._column_names)
+        self._set_combo_text_if_present(self._query_x_column_combo, default_x_column)
+
+        self._query_y_column_combo = QComboBox()
+        self._query_y_column_combo.addItems(self._column_names)
+        self._set_combo_text_if_present(self._query_y_column_combo, default_y_column)
+
+        self._nd_query_list = self._column_list()
+        self._select_list_columns(
+            self._nd_query_list,
+            [column for column in (default_x_column, default_y_column) if column],
+        )
+
+        self._manual_points_edit = QPlainTextEdit()
+        self._manual_points_edit.setMinimumHeight(120)
+
+        self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_interpolation")
+
+        source_panel = self._source_panel()
+
+        query_stack = QStackedWidget()
+        query_stack.addWidget(self._generated_query_panel())
+        query_stack.addWidget(self._column_query_panel())
+        query_stack.addWidget(self._manual_query_panel())
+        self._query_stack = query_stack
+
+        form = QFormLayout()
+        form.addRow("Dimension", self._mode_combo)
+        form.addRow("Value column", self._value_column_combo)
+        form.addRow("Source coordinates", source_panel)
+        form.addRow("Method", self._method_combo)
+        form.addRow("Outside range", self._fill_policy_combo)
+        form.addRow("Smoothing", self._smoothing_spin)
+        form.addRow("RBF epsilon", self._epsilon_spin)
+        form.addRow("Query mode", self._query_mode_combo)
+        form.addRow("Query coordinates", query_stack)
+        form.addRow("Result sheet", self._target_dataset_edit)
+
+        hint = QLabel(
+            "Generated 2D queries create a full X/Y grid. N-D interpolation supports existing "
+            "query columns or manual coordinate rows. Duplicate source coordinates are averaged."
+        )
+        hint.setWordWrap(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(hint)
+        layout.addWidget(buttons)
+
+        self._mode_combo.currentIndexChanged.connect(self._update_mode)
+        self._method_combo.currentIndexChanged.connect(self._update_method_parameters)
+        self._query_mode_combo.currentIndexChanged.connect(self._update_query_mode)
+        self._x_column_combo.currentTextChanged.connect(lambda: self._set_range_fields("x"))
+        self._y_column_combo.currentTextChanged.connect(lambda: self._set_range_fields("y"))
+        self._update_mode()
+        self._set_range_fields("x")
+        self._set_range_fields("y")
+
+    def mode(self) -> str:
+        """Return interpolation dimensionality key."""
+        return str(self._mode_combo.currentData())
+
+    def coordinate_columns(self) -> list[str]:
+        """Return selected source coordinate columns in dimensional order."""
+        mode = self.mode()
+        if mode == "1d":
+            return [self._x_column_combo.currentText()]
+        if mode == "2d":
+            return [self._x_column_combo.currentText(), self._y_column_combo.currentText()]
+        return self._selected_list_columns(self._nd_source_list)
+
+    def value_column(self) -> str:
+        """Return the source value column."""
+        return self._value_column_combo.currentText()
+
+    def method_key(self) -> str:
+        """Return selected interpolation method key."""
+        return str(self._method_combo.currentData())
+
+    def fill_policy(self) -> str:
+        """Return selected 1D outside-range policy."""
+        return str(self._fill_policy_combo.currentData() or "nan")
+
+    def smoothing(self) -> float:
+        """Return smoothing parameter for spline/RBF methods."""
+        return self._smoothing_spin.value()
+
+    def epsilon(self) -> float | None:
+        """Return RBF epsilon, or None when disabled."""
+        return self._epsilon_spin.value() if self._epsilon_spin.isEnabled() else None
+
+    def query_mode(self) -> str:
+        """Return selected query input mode."""
+        return str(self._query_mode_combo.currentData())
+
+    def query_columns(self) -> list[str]:
+        """Return query coordinate columns for the existing-column query mode."""
+        mode = self.mode()
+        if mode == "1d":
+            return [self._query_x_column_combo.currentText()]
+        if mode == "2d":
+            return [self._query_x_column_combo.currentText(), self._query_y_column_combo.currentText()]
+        return self._selected_list_columns(self._nd_query_list)
+
+    def generated_ranges(self) -> list[tuple[float, float, int]]:
+        """Return generated coordinate ranges."""
+        ranges = [
+            (
+                self._required_float(self._x_start_edit.text(), "X start"),
+                self._required_float(self._x_end_edit.text(), "X end"),
+                self._x_count_spin.value(),
+            )
+        ]
+        if self.mode() == "2d":
+            ranges.append(
+                (
+                    self._required_float(self._y_start_edit.text(), "Y start"),
+                    self._required_float(self._y_end_edit.text(), "Y end"),
+                    self._y_count_spin.value(),
+                )
+            )
+        return ranges
+
+    def manual_points_text(self) -> str:
+        """Return raw manual query coordinate text."""
+        return self._manual_points_edit.toPlainText()
+
+    def target_dataset_name(self) -> str:
+        """Return requested result dataset name."""
+        return self._target_dataset_edit.text().strip()
+
+    def accept(self) -> None:
+        """Validate the interpolation request before closing."""
+        try:
+            self._validate()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Interpolation", str(exc))
+            return
+        super().accept()
+
+    def _source_panel(self) -> QWidget:
+        """Return source-coordinate controls shared by all modes."""
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("X column", self._x_column_combo)
+        form.addRow("Y column", self._y_column_combo)
+        form.addRow("N-D columns", self._nd_source_list)
+        self._source_x_label = form.labelForField(self._x_column_combo)
+        self._source_y_label = form.labelForField(self._y_column_combo)
+        self._source_nd_label = form.labelForField(self._nd_source_list)
+        return panel
+
+    def _generated_query_panel(self) -> QWidget:
+        """Return generated query range controls."""
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("X range", self._range_row(self._x_start_edit, self._x_end_edit, self._x_count_spin))
+        self._generated_y_row = self._range_row(self._y_start_edit, self._y_end_edit, self._y_count_spin)
+        form.addRow("Y range", self._generated_y_row)
+        self._generated_y_label = form.labelForField(self._generated_y_row)
+        return panel
+
+    def _column_query_panel(self) -> QWidget:
+        """Return query-from-columns controls."""
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Query X", self._query_x_column_combo)
+        form.addRow("Query Y", self._query_y_column_combo)
+        form.addRow("Query N-D columns", self._nd_query_list)
+        self._query_x_label = form.labelForField(self._query_x_column_combo)
+        self._query_y_label = form.labelForField(self._query_y_column_combo)
+        self._query_nd_label = form.labelForField(self._nd_query_list)
+        return panel
+
+    def _manual_query_panel(self) -> QWidget:
+        """Return manual query-coordinate controls."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._manual_points_edit.setPlaceholderText("One query point per line, values separated by spaces, commas, or tabs.")
+        layout.addWidget(self._manual_points_edit)
+        return panel
+
+    def _update_mode(self) -> None:
+        """Refresh mode-specific controls."""
+        mode = self.mode()
+        previous_default = self._default_value_by_mode.get(self._last_mode)
+        new_default = self._default_value_by_mode.get(mode)
+        if new_default and self._value_column_combo.currentText() in {"", previous_default}:
+            self._set_combo_text_if_present(self._value_column_combo, new_default)
+        self._last_mode = mode
+        x_visible = mode in {"1d", "2d"}
+        y_visible = mode == "2d"
+        nd_visible = mode == "nd"
+        self._source_x_label.setVisible(x_visible)
+        self._x_column_combo.setVisible(x_visible)
+        self._source_y_label.setVisible(y_visible)
+        self._y_column_combo.setVisible(y_visible)
+        self._source_nd_label.setVisible(nd_visible)
+        self._nd_source_list.setVisible(nd_visible)
+        self._refresh_methods()
+        self._refresh_query_modes()
+        self._fill_policy_combo.setEnabled(mode == "1d")
+        self._generated_y_label.setVisible(mode == "2d")
+        self._generated_y_row.setVisible(mode == "2d")
+        query_xy_visible = mode in {"1d", "2d"}
+        self._query_x_label.setVisible(query_xy_visible)
+        self._query_x_column_combo.setVisible(query_xy_visible)
+        self._query_y_label.setVisible(mode == "2d")
+        self._query_y_column_combo.setVisible(mode == "2d")
+        self._query_nd_label.setVisible(mode == "nd")
+        self._nd_query_list.setVisible(mode == "nd")
+        self._set_range_fields("x")
+        self._set_range_fields("y")
+
+    def _refresh_methods(self) -> None:
+        """Reload methods for the selected dimensionality."""
+        current = self._method_combo.currentData()
+        methods = INTERPOLATION_METHODS.get(self.mode(), {})
+        self._method_combo.blockSignals(True)
+        self._method_combo.clear()
+        for key, method in methods.items():
+            self._method_combo.addItem(method.label, key)
+        index = self._method_combo.findData(current)
+        if index >= 0:
+            self._method_combo.setCurrentIndex(index)
+        self._method_combo.blockSignals(False)
+        self._update_method_parameters()
+
+    def _refresh_query_modes(self) -> None:
+        """Reload query modes for the selected dimensionality."""
+        current = self._query_mode_combo.currentData()
+        self._query_mode_combo.blockSignals(True)
+        self._query_mode_combo.clear()
+        if self.mode() in {"1d", "2d"}:
+            self._query_mode_combo.addItem("Generated range/grid", "generated")
+        self._query_mode_combo.addItem("From existing columns", "columns")
+        self._query_mode_combo.addItem("Manual coordinates", "manual")
+        index = self._query_mode_combo.findData(current)
+        if index >= 0:
+            self._query_mode_combo.setCurrentIndex(index)
+        self._query_mode_combo.blockSignals(False)
+        self._update_query_mode()
+
+    def _update_query_mode(self) -> None:
+        """Show the controls for the selected query mode."""
+        mode_index = {"generated": 0, "columns": 1, "manual": 2}.get(self.query_mode(), 0)
+        self._query_stack.setCurrentIndex(mode_index)
+
+    def _update_method_parameters(self) -> None:
+        """Enable optional parameter controls only when relevant."""
+        method = self.method_key()
+        uses_smoothing = method in {
+            "smoothing_spline",
+            "smooth_bivariate_spline",
+            "rbf_linear",
+            "rbf_thin_plate",
+            "rbf_cubic",
+            "rbf_gaussian",
+        }
+        self._smoothing_spin.setEnabled(uses_smoothing)
+        self._epsilon_spin.setEnabled(method == "rbf_gaussian")
+        method_info = INTERPOLATION_METHODS.get(self.mode(), {}).get(method)
+        self._method_combo.setToolTip(method_info.description if method_info else "")
+
+    def _validate(self) -> None:
+        """Validate source/query controls."""
+        coordinates = self.coordinate_columns()
+        if any(not column for column in coordinates):
+            raise ValueError("Choose all coordinate columns.")
+        if len(set(coordinates)) != len(coordinates):
+            raise ValueError("Coordinate columns must be unique.")
+        if self.value_column() in coordinates:
+            raise ValueError("The value column must be different from coordinate columns.")
+        if self.mode() == "nd" and len(coordinates) < 2:
+            raise ValueError("N-D interpolation requires at least two coordinate columns.")
+        if self.query_mode() == "columns":
+            query_columns = self.query_columns()
+            if len(query_columns) != len(coordinates) or any(not column for column in query_columns):
+                raise ValueError("Choose one query column for each coordinate dimension.")
+            if len(set(query_columns)) != len(query_columns):
+                raise ValueError("Query coordinate columns must be unique.")
+        elif self.query_mode() == "generated":
+            total_count = 1
+            for _start, _end, count in self.generated_ranges():
+                total_count *= count
+            if total_count > MAX_GENERATED_QUERY_POINTS:
+                raise ValueError(
+                    f"Generated queries are limited to {MAX_GENERATED_QUERY_POINTS:,} points."
+                )
+        elif not self.manual_points_text().strip():
+            raise ValueError("Enter manual query coordinates.")
+
+    def _set_range_fields(self, axis: str) -> None:
+        """Prefill generated query ranges from source column numeric ranges."""
+        if axis == "x":
+            column = self._x_column_combo.currentText()
+            start_edit, end_edit = self._x_start_edit, self._x_end_edit
+        else:
+            column = self._y_column_combo.currentText()
+            start_edit, end_edit = self._y_start_edit, self._y_end_edit
+        value_range = self._column_ranges.get(column)
+        if value_range is None:
+            return
+        start, end = value_range
+        start_edit.setText(f"{start:g}")
+        end_edit.setText(f"{end:g}")
+
+    @staticmethod
+    def _range_row(start_edit: QLineEdit, end_edit: QLineEdit, count_spin: QSpinBox) -> QWidget:
+        """Return a compact generated-range row."""
+        start_edit.setPlaceholderText("start")
+        end_edit.setPlaceholderText("end")
+        start_edit.setMaximumWidth(100)
+        end_edit.setMaximumWidth(100)
+        count_spin.setPrefix("n=")
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(start_edit)
+        layout.addWidget(end_edit)
+        layout.addWidget(count_spin)
+        layout.addStretch(1)
+        return row
+
+    def _column_list(self) -> QListWidget:
+        """Return a multi-select list populated with dataset columns."""
+        widget = QListWidget()
+        widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        widget.setMaximumHeight(120)
+        widget.addItems(self._column_names)
+        return widget
+
+    @staticmethod
+    def _selected_list_columns(widget: QListWidget) -> list[str]:
+        """Return selected list items in visual order."""
+        return [
+            widget.item(row).text()
+            for row in range(widget.count())
+            if widget.item(row).isSelected()
+        ]
+
+    @staticmethod
+    def _select_list_columns(widget: QListWidget, columns: list[str]) -> None:
+        """Select list items whose text appears in columns."""
+        wanted = set(columns)
+        for row in range(widget.count()):
+            item = widget.item(row)
+            item.setSelected(item.text() in wanted)
+
+    @staticmethod
+    def _set_combo_text_if_present(combo: QComboBox, value: str | None) -> None:
+        """Select a combo item by text when present."""
+        if not value:
+            return
+        index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    @staticmethod
+    def _required_float(text: str, label: str) -> float:
+        """Parse a required float."""
+        try:
+            return float(text.strip())
+        except ValueError as exc:
+            raise ValueError(f"{label} must be numeric.") from exc
+
+
 class StatisticsDialog(QDialog):
-    """Collect settings for rich single-column and two-column statistics."""
+    """Collect settings for single, paired, grouped, and multi-column statistics."""
 
     def __init__(
         self,
@@ -440,6 +1066,9 @@ class StatisticsDialog(QDialog):
             self._primary_dataset_combo.setCurrentText(default_dataset_name)
 
         self._primary_column_combo = QComboBox()
+        self._multi_column_list = QListWidget()
+        self._multi_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._multi_column_list.setMinimumHeight(130)
         self._secondary_dataset_combo = QComboBox()
         self._secondary_dataset_combo.addItems(list(dataset_columns.keys()))
         if default_dataset_name in dataset_columns:
@@ -447,6 +1076,9 @@ class StatisticsDialog(QDialog):
 
         self._secondary_column_combo = QComboBox()
         self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_statistics")
+        self._plot_result_checkbox = QCheckBox("Create companion plot")
+        self._plot_result_checkbox.setChecked(True)
+        self._plot_kind_combo = QComboBox()
 
         self._hint_label = QLabel()
         self._hint_label.setWordWrap(True)
@@ -455,10 +1087,17 @@ class StatisticsDialog(QDialog):
         form.addRow("Operation", self._operation_combo)
         form.addRow("Primary sheet", self._primary_dataset_combo)
         form.addRow("Primary column", self._primary_column_combo)
+        form.addRow("Columns", self._multi_column_list)
         form.addRow("Secondary sheet", self._secondary_dataset_combo)
         form.addRow("Secondary column", self._secondary_column_combo)
         form.addRow("Result sheet", self._target_dataset_edit)
+        form.addRow("", self._plot_result_checkbox)
+        form.addRow("Plot", self._plot_kind_combo)
         form.addRow("", self._hint_label)
+        self._primary_column_label = form.labelForField(self._primary_column_combo)
+        self._multi_columns_label = form.labelForField(self._multi_column_list)
+        self._secondary_sheet_label = form.labelForField(self._secondary_dataset_combo)
+        self._secondary_column_label = form.labelForField(self._secondary_column_combo)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -471,6 +1110,7 @@ class StatisticsDialog(QDialog):
         self._operation_combo.currentIndexChanged.connect(self._update_scope)
         self._primary_dataset_combo.currentTextChanged.connect(self._refresh_primary_columns)
         self._secondary_dataset_combo.currentTextChanged.connect(self._refresh_secondary_columns)
+        self._plot_result_checkbox.toggled.connect(self._plot_kind_combo.setEnabled)
 
         self._refresh_primary_columns(self._primary_dataset_combo.currentText())
         self._refresh_secondary_columns(self._secondary_dataset_combo.currentText())
@@ -488,6 +1128,10 @@ class StatisticsDialog(QDialog):
         """Return the selected primary column name."""
         return self._primary_column_combo.currentText()
 
+    def multi_columns(self) -> list[str]:
+        """Return selected source columns for multi-column operations."""
+        return [item.text() for item in self._multi_column_list.selectedItems()]
+
     def secondary_dataset_name(self) -> str:
         """Return the selected secondary dataset name."""
         return self._secondary_dataset_combo.currentText()
@@ -500,14 +1144,27 @@ class StatisticsDialog(QDialog):
         """Return requested statistics result dataset name."""
         return self._target_dataset_edit.text().strip()
 
+    def plot_result_immediately(self) -> bool:
+        """Return whether a companion plot should be created."""
+        return self._plot_result_checkbox.isChecked()
+
+    def statistics_plot_kind(self) -> str:
+        """Return the selected companion plot kind."""
+        return str(self._plot_kind_combo.currentData() or "auto")
+
     def requires_secondary_column(self) -> bool:
-        """Return whether the selected operation compares two columns."""
+        """Return whether the selected operation needs a secondary/group column."""
+        return self.operation_scope() in {"pair", "group"}
+
+    def operation_scope(self) -> str:
+        """Return the selected operation scope key."""
         operation = STATISTIC_OPERATIONS[self.operation_key()]
-        return operation.scope == "pair"
+        return operation.scope
 
     def _refresh_primary_columns(self, dataset_name: str) -> None:
         """Refresh primary column choices for the selected dataset."""
         self._refresh_column_combo(self._primary_column_combo, dataset_name, prefer_second=False)
+        self._refresh_multi_columns(dataset_name)
 
     def _refresh_secondary_columns(self, dataset_name: str) -> None:
         """Refresh secondary column choices for the selected dataset."""
@@ -526,20 +1183,115 @@ class StatisticsDialog(QDialog):
             combo.setCurrentIndex(1)
         combo.blockSignals(False)
 
+    def _refresh_multi_columns(self, dataset_name: str) -> None:
+        """Refresh multi-column operation choices for the selected dataset."""
+        previous = set(self.multi_columns())
+        columns = self._dataset_columns.get(dataset_name, [])
+        selected = previous.intersection(columns) or set(columns)
+        self._multi_column_list.clear()
+        for column in columns:
+            self._multi_column_list.addItem(column)
+            item = self._multi_column_list.item(self._multi_column_list.count() - 1)
+            item.setSelected(column in selected)
+
     def _update_scope(self) -> None:
-        """Enable secondary selectors only for two-column operations."""
-        is_pair = self.requires_secondary_column()
-        self._secondary_dataset_combo.setEnabled(is_pair)
-        self._secondary_column_combo.setEnabled(is_pair)
-        if is_pair:
+        """Refresh controls for single, pair, or grouped operations."""
+        scope = self.operation_scope()
+        is_multi = scope == "multi"
+        uses_secondary = scope in {"pair", "group"}
+        self._primary_column_combo.setVisible(not is_multi)
+        self._primary_column_label.setVisible(not is_multi)
+        self._multi_column_list.setVisible(is_multi)
+        self._multi_columns_label.setVisible(is_multi)
+        self._secondary_dataset_combo.setEnabled(uses_secondary)
+        self._secondary_column_combo.setEnabled(uses_secondary)
+        if scope == "group":
+            self._secondary_sheet_label.setText("Group sheet")
+            self._secondary_column_label.setText("Group column")
+        else:
+            self._secondary_sheet_label.setText("Secondary sheet")
+            self._secondary_column_label.setText("Secondary column")
+        self._refresh_plot_kind_options()
+        if scope == "pair":
             self._hint_label.setText(
                 "Two-column operations align values by row position for paired tests and correlations. "
                 "Independent-sample tests use all numeric values in each selected column."
+            )
+        elif scope == "group":
+            self._hint_label.setText(
+                "Grouped operations use the primary numeric value column and split rows by the selected group/factor column."
+            )
+        elif scope == "multi":
+            self._hint_label.setText(
+                "Multiple-column operations use two or more numeric columns from the primary sheet for summaries, "
+                "correlations, covariance, and PCA."
             )
         else:
             self._hint_label.setText(
                 "Single-column operations use numeric values from the primary column and ignore blanks, text, and infinities."
             )
+
+    def _refresh_plot_kind_options(self) -> None:
+        """Reload companion plot choices for the selected statistics operation."""
+        previous = self._plot_kind_combo.currentData()
+        operation_key = self.operation_key()
+        scope = self.operation_scope()
+        options = [("Auto", "auto")]
+        if scope == "pair":
+            options.extend(
+                [
+                    ("Scatter", "scatter"),
+                    ("Scatter + regression line", "regression"),
+                    ("Box plot comparison", "box"),
+                    ("Violin comparison", "violin"),
+                    ("Bland-Altman", "bland_altman"),
+                ]
+            )
+        elif scope == "group":
+            options.extend(
+                [
+                    ("Box plot by group", "box"),
+                    ("Violin by group", "violin"),
+                ]
+            )
+        elif scope == "multi":
+            options.extend(
+                [
+                    ("Box plot selected columns", "box"),
+                    ("Violin selected columns", "violin"),
+                ]
+            )
+            if operation_key in {"multi_complete", "multi_correlations"}:
+                options.append(("Correlation heatmap", "correlation_heatmap"))
+            if operation_key in {"multi_complete", "multi_pca"}:
+                options.append(("PCA explained variance", "pca_variance"))
+        else:
+            options.extend(
+                [
+                    ("Histogram + normal curve", "histogram"),
+                    ("Box plot", "box"),
+                    ("Violin plot", "violin"),
+                ]
+            )
+            if operation_key in {"single_zscore", "single_cumulative"}:
+                options.append(("Result series", "result_series"))
+
+        self._plot_kind_combo.blockSignals(True)
+        self._plot_kind_combo.clear()
+        for label, key in options:
+            self._plot_kind_combo.addItem(label, key)
+        index = self._plot_kind_combo.findData(previous)
+        if index >= 0:
+            self._plot_kind_combo.setCurrentIndex(index)
+        self._plot_kind_combo.blockSignals(False)
+        self._plot_kind_combo.setEnabled(self._plot_result_checkbox.isChecked())
+
+    def accept(self) -> None:
+        """Validate statistics selections before closing."""
+        if self.operation_scope() == "multi" and len(self.multi_columns()) < 2:
+            QMessageBox.warning(self, "Statistics", "Choose at least two columns for a multiple-column operation.")
+            return
+        super().accept()
 
 
 class CustomFitModelDialog(QDialog):
@@ -799,6 +1551,10 @@ class FitDialog(QDialog):
         column_names: list[str],
         default_dataset_name: str,
         custom_models: list[CustomFitModel] | None = None,
+        default_x_column: str | None = None,
+        default_y_column: str | None = None,
+        default_x_weight_column: str | None = None,
+        default_y_weight_column: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         """Create controls for model selection, optimizer settings, and outputs."""
@@ -810,10 +1566,13 @@ class FitDialog(QDialog):
 
         self._x_column_combo = QComboBox()
         self._x_column_combo.addItems(column_names)
+        self._set_combo_text_if_present(self._x_column_combo, default_x_column)
 
         self._y_column_combo = QComboBox()
         self._y_column_combo.addItems(column_names)
-        if len(column_names) > 1:
+        if default_y_column:
+            self._set_combo_text_if_present(self._y_column_combo, default_y_column)
+        elif len(column_names) > 1:
             self._y_column_combo.setCurrentIndex(1)
 
         self._model_combo = QComboBox()
@@ -839,11 +1598,13 @@ class FitDialog(QDialog):
         self._x_weight_column_combo.addItem("None", None)
         for column_name in column_names:
             self._x_weight_column_combo.addItem(column_name, column_name)
+        self._set_combo_text_if_present(self._x_weight_column_combo, default_x_weight_column)
 
         self._weight_column_combo = QComboBox()
         self._weight_column_combo.addItem("None", None)
         for column_name in column_names:
             self._weight_column_combo.addItem(column_name, column_name)
+        self._set_combo_text_if_present(self._weight_column_combo, default_y_weight_column)
 
         self._weight_mode_combo = QComboBox()
         self._weight_mode_combo.addItem("Sigma / standard deviation", "sigma")
@@ -911,6 +1672,7 @@ class FitDialog(QDialog):
         self._residual_sheet_checkbox.toggled.connect(self._residual_dataset_edit.setEnabled)
         self._x_weight_column_combo.currentTextChanged.connect(self._on_x_weight_changed)
         self._update_parameter_hint()
+        self._on_x_weight_changed()
 
     def _on_x_weight_changed(self) -> None:
         """Lock method to ODR if X errors are provided."""
@@ -922,6 +1684,15 @@ class FitDialog(QDialog):
             self._method_combo.setEnabled(True)
             if self.method() == "odr":
                 self._method_combo.setCurrentText(FIT_METHODS.get("trf", "Trust Region Reflective"))
+
+    @staticmethod
+    def _set_combo_text_if_present(combo: QComboBox, value: str | None) -> None:
+        """Select a combo item by text when it exists."""
+        if not value:
+            return
+        index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     def x_column(self) -> str:
         """Return selected X column."""

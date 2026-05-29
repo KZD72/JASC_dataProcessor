@@ -11,7 +11,7 @@ from pandas.api.types import is_numeric_dtype
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 
 from core.operations import ExpressionResult, apply_column_expression
-from core.workspace import Dataset
+from core.workspace import ColumnMetadata, Dataset, column_role_label, copy_column_metadata
 
 
 @dataclass(slots=True)
@@ -20,12 +20,14 @@ class _DatasetSnapshot:
 
     frame: pd.DataFrame
     formulas: dict[str, str]
+    column_metadata: dict[str, ColumnMetadata]
 
 
 class DataFrameTableModel(QAbstractTableModel):
     """Editable table model that writes changes directly into a workspace dataset."""
 
     history_changed = Signal()
+    columns_renamed = Signal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         """Create an empty model until a workspace dataset is attached."""
@@ -139,16 +141,27 @@ class DataFrameTableModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.DisplayRole,
     ) -> str | None:
-        """Return row/column labels and formula tooltips for Qt headers."""
+        """Return row/column labels and metadata/formula tooltips for Qt headers."""
         if self._dataset is None:
             return None
 
         if role == Qt.ToolTipRole and orientation == Qt.Horizontal:
             column_name = str(self._dataset.frame.columns[section])
+            metadata = self._dataset.column_metadata.get(column_name)
             formula = self._dataset.formulas.get(column_name)
+            lines: list[str] = []
+            if metadata is not None:
+                if metadata.long_name:
+                    lines.append(f"Long name: {metadata.long_name}")
+                if metadata.role:
+                    lines.append(f"Role: {column_role_label(metadata.role)}")
+                if metadata.unit:
+                    lines.append(f"Unit: {metadata.unit}")
+                if metadata.comment:
+                    lines.append(f"Comment: {metadata.comment}")
             if formula:
-                return f"Formula: {formula}"
-            return None
+                lines.append(f"Formula: {formula}")
+            return "\n".join(lines) if lines else None
 
         if role != Qt.DisplayRole:
             return None
@@ -229,6 +242,7 @@ class DataFrameTableModel(QAbstractTableModel):
                 column_name = self._make_unique_column_name(f"Column {len(frame.columns) + 1}")
                 frame[column_name] = pd.NA
                 self._dataset.formulas.pop(column_name, None)
+                self._dataset.column_metadata.pop(column_name, None)
 
             while len(frame) < target_rows:
                 frame.loc[len(frame)] = pd.Series([pd.NA] * len(frame.columns), index=frame.columns)
@@ -253,6 +267,7 @@ class DataFrameTableModel(QAbstractTableModel):
         position: int,
         column_names: list[str],
         rows: list[list[str]],
+        column_metadata: list[ColumnMetadata | dict[str, object] | None] | None = None,
     ) -> list[str]:
         """Insert pasted columns before the requested position and return final names."""
         if self._dataset is None:
@@ -301,6 +316,24 @@ class DataFrameTableModel(QAbstractTableModel):
                     series,
                 )
                 self._dataset.formulas.pop(column_name, None)
+                metadata_entry = (
+                    column_metadata[column_offset]
+                    if column_metadata is not None and column_offset < len(column_metadata)
+                    else None
+                )
+                if isinstance(metadata_entry, ColumnMetadata):
+                    metadata = ColumnMetadata(
+                        role=metadata_entry.role,
+                        unit=metadata_entry.unit,
+                        long_name=metadata_entry.long_name,
+                        comment=metadata_entry.comment,
+                    )
+                else:
+                    metadata = ColumnMetadata.from_metadata(metadata_entry)
+                if metadata.is_empty():
+                    self._dataset.column_metadata.pop(column_name, None)
+                else:
+                    self._dataset.column_metadata[column_name] = metadata
                 inserted_names.append(column_name)
 
             return inserted_names
@@ -325,6 +358,7 @@ class DataFrameTableModel(QAbstractTableModel):
         frame.drop(columns=frame.columns[valid_columns], inplace=True)
         for column_name in deleted_names:
             self._dataset.formulas.pop(column_name, None)
+            self._dataset.column_metadata.pop(column_name, None)
         self.endResetModel()
         self.history_changed.emit()
         return deleted_names
@@ -349,6 +383,7 @@ class DataFrameTableModel(QAbstractTableModel):
         self.beginInsertColumns(QModelIndex(), insert_position, insert_position)
         self._dataset.frame.insert(insert_position, unique_name, pd.NA)
         self._dataset.formulas.pop(unique_name, None)
+        self._dataset.column_metadata.pop(unique_name, None)
         self.endInsertColumns()
         self.history_changed.emit()
         return unique_name
@@ -380,6 +415,58 @@ class DataFrameTableModel(QAbstractTableModel):
         finally:
             self.endResetModel()
             self.history_changed.emit()
+
+    def set_column_metadata(self, metadata: dict[str, ColumnMetadata]) -> None:
+        """Replace metadata for the current dataset with undo/redo support."""
+        if self._dataset is None:
+            raise ValueError("No dataset is selected.")
+
+        self.capture_undo_state()
+        self._dataset.set_column_metadata(metadata)
+        if self.columnCount() > 0:
+            self.headerDataChanged.emit(Qt.Horizontal, 0, self.columnCount() - 1)
+        self.history_changed.emit()
+
+    def apply_column_metadata(
+        self,
+        column_names: list[str],
+        metadata: dict[str, ColumnMetadata],
+    ) -> list[tuple[str, str]]:
+        """Rename columns and replace metadata with undo/redo support."""
+        if self._dataset is None:
+            raise ValueError("No dataset is selected.")
+
+        if len(column_names) != len(self._dataset.frame.columns):
+            raise ValueError("Column metadata edit does not match the current dataset shape.")
+
+        clean_names = [str(name).strip() for name in column_names]
+        if any(not name for name in clean_names):
+            raise ValueError("Column names cannot be blank.")
+        if len(set(clean_names)) != len(clean_names):
+            raise ValueError("Column names must be unique.")
+
+        old_names = [str(column) for column in self._dataset.frame.columns]
+        rename_pairs = [
+            (old_name, new_name)
+            for old_name, new_name in zip(old_names, clean_names)
+            if old_name != new_name
+        ]
+
+        self.capture_undo_state()
+        self.beginResetModel()
+        try:
+            self._dataset.frame.columns = clean_names
+            self._dataset.formulas = {
+                new_name: self._dataset.formulas[old_name]
+                for old_name, new_name in zip(old_names, clean_names)
+                if old_name in self._dataset.formulas
+            }
+            self._dataset.set_column_metadata(metadata)
+        finally:
+            self.endResetModel()
+            self.history_changed.emit()
+
+        return rename_pairs
 
     def _normalize_value(self, column: pd.Series, value: Any) -> object:
         """Coerce edited text to a numeric value when the column supports it."""
@@ -461,16 +548,28 @@ class DataFrameTableModel(QAbstractTableModel):
         return _DatasetSnapshot(
             frame=self._dataset.frame.copy(deep=True),
             formulas=dict(self._dataset.formulas),
+            column_metadata=copy_column_metadata(self._dataset.column_metadata),
         )
 
     def _restore_snapshot(self, snapshot: _DatasetSnapshot) -> None:
         """Replace the current dataset contents with a stored snapshot."""
         if self._dataset is None:
             return
+        old_columns = [str(column) for column in self._dataset.frame.columns]
         self.beginResetModel()
         self._dataset.frame = snapshot.frame.copy(deep=True)
         self._dataset.formulas = dict(snapshot.formulas)
+        self._dataset.column_metadata = copy_column_metadata(snapshot.column_metadata)
         self.endResetModel()
+        new_columns = [str(column) for column in self._dataset.frame.columns]
+        if len(old_columns) == len(new_columns):
+            rename_map = {
+                old_name: new_name
+                for old_name, new_name in zip(old_columns, new_columns)
+                if old_name != new_name
+            }
+            if rename_map:
+                self.columns_renamed.emit(rename_map)
 
     @staticmethod
     def _values_equal(left: object, right: object) -> bool:

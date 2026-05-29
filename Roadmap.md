@@ -7,10 +7,10 @@
 Reviewed on 2026-05-29 against the current repository state and session changelog.
 
 ### Implemented or Started
-- Workspace and project state: multiple Pandas DataFrames, unique dataset names, `.jasc` save/load, saved plots, project-scoped custom fit models, current project path tracking, close project.
-- Data ingestion and editing: CSV/TXT import with delimiter/header options, manual spreadsheet entry, table sizing, fill range, editable Data Editor, add/insert/delete rows and columns, formula metadata, undo/redo history, value clipboard, whole-column clipboard, and right-click context menus.
-- Formulas and transforms: constrained Python-like formula evaluator with curated NumPy/SciPy namespaces, row-scoped or full-column formula application, derivative/integral result columns, FFT/iFFT result sheets.
-- Statistics: descriptive summaries, quantiles, diagnostics, normality tests, outlier checks, z-score/cumulative series, correlations, regression, agreement metrics, paired tests, and independent-sample tests.
+- Workspace and project state: multiple Pandas DataFrames, unique dataset names, `.jasc` save/load, saved plots, project-scoped custom fit models, current project path tracking, close project, and lightweight per-column metadata.
+- Data ingestion and editing: CSV/TXT import with delimiter/header options, manual spreadsheet entry, table sizing, fill range, editable Data Editor, add/insert/delete/rename rows and columns, formula metadata, column roles/units/long names/comments, undo/redo history, value clipboard, whole-column clipboard, and right-click/double-click metadata affordances.
+- Formulas and transforms: constrained Python-like formula evaluator with curated NumPy/SciPy namespaces, row-scoped or full-column formula application, derivative/integral result columns, FFT/iFFT result sheets, and a first general interpolation workbench.
+- Statistics: descriptive summaries, quantiles, diagnostics, normality tests, outlier checks, z-score/cumulative series, correlations, regression, agreement metrics, paired tests, independent-sample tests, multi-column summaries/correlations/covariance/PCA, grouped one-way analyses, post-hoc comparisons, and optional companion plots.
 - Curve fitting: built-in analytical models, custom expression models, parameter guesses/bounds/fixed parameters, weighting/error columns, ODR for X/Y uncertainties, confidence bands, residual sheets, fit reports, and immediate fit overlay plots.
 - Plotting: Matplotlib canvas and toolbar, saved plot definitions, multi-series XY plots, right Y axis, axis ranges/scales, locators, SciencePlots styles, line/scatter/line+markers/errorbar, bar/barh/area/histogram, box/violin, and early interpolated 2D maps.
 - Interpolated 2D maps: X/Y/Z coordinate roles, heatmap/contour/filled contour rendering, linear/cubic-spline/piecewise-cubic interpolation, grid resolution, saved state, dataset rename support, and X/Y locator prediction of Z values.
@@ -19,7 +19,7 @@ Reviewed on 2026-05-29 against the current repository state and session changelo
 ### Known Baseline Gaps
 - Python and Qt smoke tests could not be rerun in the current Codex shell because no usable Python launcher is available.
 - No automated regression test suite or packaging/spec file exists yet.
-- The app has project-level datasets but not Origin/SigmaPlot-style workbooks with rich column metadata, matrix sheets, notes, reports, or folders.
+- The app has project-level datasets and a first lightweight column-metadata layer, but not full Origin/SigmaPlot-style workbooks with matrix sheets, notes, reports, folders, cell comments, dependency graphs, or rich worksheet formatting.
 - Import/export is narrow compared with current commercial tools.
 - Plotting is strong for core 2D scientific charts but lacks broad template/layout/page/report workflows, many specialized graph families, and true 3D graphing.
 - Analysis operations exist but are mostly individual dialogs, not reusable recalculating operation graphs/templates.
@@ -76,7 +76,9 @@ The benchmark products emphasize:
 ### Phase 3: Basic Math and Signal Processing
 - Add menu options for Calculus (Derivative, Integral). (complete)
 - Add menu options for FFT and iFFT. (complete)
-- Add a statistics workbench for descriptive, distribution, correlation, regression, paired-test, and independent-test reports across columns and sheets. (complete)
+- Add a general interpolation workbench for 1D, 2D, and N-D prediction datasets. (initial implementation complete)
+- Add a statistics workbench for descriptive, distribution, correlation, regression, paired-test, independent-test, multi-column, and grouped/factor reports across columns and sheets. (complete)
+- Add optional companion plots for statistics outputs, including distribution, comparison, scatter/regression, Bland-Altman, and result-series plots. (initial implementation complete)
 - Ensure results from these operations can be saved as new columns in the workspace or plotted immediately. (complete)
 
 ### Phase 4: Curve Fitting Engine
@@ -95,13 +97,13 @@ The benchmark products emphasize:
 
 | Area | Current JASC Status | Gap Versus Origin/SigmaPlot-Level Tools |
 | --- | --- | --- |
-| Data model | Multiple DataFrames with formulas and saved metadata | No workbook/sheet hierarchy, column long names/units/comments, column role system, matrix sheets, notes/reports, project folders, cell comments, or protected data |
+| Data model | Multiple DataFrames with formulas and lightweight column metadata | No full workbook/sheet hierarchy, matrix sheets, notes/reports, project folders, cell comments, dataset-level metadata, rich formatting, or protected data |
 | Import/connectors | CSV/TXT with options; CSV/TXT export | Missing Excel multi-sheet/ranges, JSON/XML/HTML, HDF5/NetCDF/MATLAB, binary/instrument formats, ODBC/SQL, drag/drop, re-import, periodic refresh, import themes, and batch import |
 | Data preparation | Formula columns, row/column operations, clipboard, some statistics outputs | Missing sort/filter/query, data filters, pivot/group/aggregate, stack/unstack, join/merge, reshape, split text/flash fill, missing-value workflows, date/time parsing tools, duplicate handling, and data reduction |
 | Graphing breadth | Core 2D, distribution plots, early 2D maps, SciencePlots styles | Missing pie/donut, density families, grouped/categorical charts, polar/radar/ternary, waterfall, 3D scatter/surface/mesh/bars, specialized scientific diagrams, map overlays, images, and graph object editing |
 | Graph layout | Single canvas with saved plot queue and right Y axis | Missing page layout manager, multi-panel/multi-layer graph pages, linked axes, inset graphs, graph templates/themes, object manager, annotation tools, direct labels, graph galleries, and plot cloning |
-| Analysis | Calculus, FFT/iFFT, statistics workbench | Missing smoothing workbench, filters, baseline correction, peak detection/integration, convolution/correlation, STFT, wavelets, 2D FFT, interpolation/resampling tools, ROI/gadget-style analysis, and analysis chains |
-| Statistics | Useful first-pass reports and tests | Missing full ANOVA/ANCOVA/MANOVA families, nonparametric families, PCA/clustering, survival/reliability, SPC/control charts, DOE, power/sample-size, ROC, probability/distribution fitting, and guided statistical advisor workflows |
+| Analysis | Calculus, FFT/iFFT, 1D/2D/N-D interpolation, statistics workbench | Missing smoothing workbench, filters, baseline correction, peak detection/integration, convolution/correlation, STFT, wavelets, 2D FFT, resampling workflows, ROI/gadget-style analysis, and analysis chains |
+| Statistics | Useful first-pass reports, multi-column correlations/covariance/PCA summaries, grouped one-way analyses, post-hoc comparisons, and companion plots | Missing two-way/repeated-measures ANOVA, ANCOVA/MANOVA families, broader nonparametric families, clustering, survival/reliability, SPC/control charts, DOE, power/sample-size, ROC, probability/distribution fitting, and guided statistical advisor workflows |
 | Fitting | Nonlinear fits, ODR, custom models, weights, residuals, confidence bands | Missing global fitting with shared/local parameters, dynamic initial-guess search, robust model ranking, arbitrary polynomial degree UI, prediction bands, peak deconvolution, surface fitting, implicit fitting UI, constraints by expression, and batch fitting |
 | Automation | Saved plots, saved projects, formula metadata | Missing operation history graph, automatic/manual recalculation locks, templates for analysis and graphing, repeat-last-operation, batch processing, macro recorder, scripting console/API, plugins, and command log |
 | Reporting/export | Dataset export and Matplotlib toolbar save | Missing report editor, PDF/Word/PowerPoint export workflows, SVG/PDF/EPS/EMF export presets, journal export profiles, graph page export, HTML/web reports, and project-wide slideshow/export |
@@ -122,7 +124,7 @@ Tasks:
 
 Acceptance criteria:
 - A new agent can run one command to verify core non-GUI logic and one command to verify Qt smoke flows.
-- Current Data Editor context-menu work and interpolated 2D-map work are tested.
+- Current Data Editor context-menu work, interpolated 2D-map work, and general interpolation workbench are tested.
 - Known runtime blocker is removed from `ChangeLog_Session.md`.
 
 ### Competitive Stage 1: Metadata-Rich Workbook Model
@@ -131,7 +133,7 @@ Purpose: build the data foundation needed for Origin/SigmaPlot-like workflows.
 
 Tasks:
 - Introduce dataset metadata: long name, units, comments, source file, import timestamp, role hints, and protected/read-only flags.
-- Add column metadata: long name, units, comments, semantic role (`X`, `Y`, `Z`, `Y error`, `X error`, `label`, `group`, `weight`), and formatting hints.
+- Add column metadata: long name, units, comments, semantic role (`X`, `Y`, `Z`, `Y error`, `X error`, `label`, `group`, `weight`), and formatting hints. (foundation started: column rename plus role/unit/long-name/comment editing, project persistence, undo/redo, column-copy preservation, table tooltips, plot-axis labels, plot-reference retargeting, and plot/math/fitting default column hints)
 - Add optional project folders/groups so datasets, plots, reports, and analysis outputs can be organized.
 - Add notes/report items to the workspace model, even if the first UI is simple text.
 - Persist metadata and project structure in `.jasc` with backward-compatible loading.
@@ -200,7 +202,7 @@ Tasks:
 - Add filtering tools: Butterworth, Chebyshev, elliptic, Bessel, FIR/IIR design, band-pass/stop/high/low, and frequency response preview.
 - Add baseline correction and subtraction methods for spectra and chromatograms.
 - Add peak detection, peak area/height/FWHM tables, integration regions, and multi-peak summaries.
-- Add interpolation/resampling tools for 1D and 2D data, including extrapolation controls.
+- Add interpolation/resampling tools for 1D and 2D data, including extrapolation controls. (foundation started: `Analysis > Interpolation` creates 1D, 2D, and N-D prediction datasets with generated, column-based, or manual query coordinates)
 - Add signal tools: convolution, cross-correlation, autocorrelation, Hilbert transform, STFT, wavelet transforms, and 2D FFT.
 - Add ROI/gadget-style analysis on plots, starting with rectangular range selection that outputs statistics and optional fitted summaries.
 
@@ -213,9 +215,11 @@ Acceptance criteria:
 Purpose: approach SigmaPlot/OriginPro statistical coverage in practical phases.
 
 Tasks:
-- Add one-way/two-way/repeated-measures ANOVA, ANCOVA, MANOVA where feasible, and multiple comparison procedures.
+- Add statistics companion plot templates for every statistical family, including assumptions, residuals, confidence intervals, and comparison summaries. (foundation started with optional histogram/box/violin/scatter/regression/Bland-Altman/result-series plots)
+- Introduce group-aware statistics dialogs that can use one value column plus one group/factor column, not only one/two selected numeric columns. (initial implementation complete)
+- Add one-way/two-way/repeated-measures ANOVA, ANCOVA, MANOVA where feasible, and multiple comparison procedures. (one-way ANOVA, Kruskal-Wallis, Tukey HSD, and pairwise Mann-Whitney foundation complete)
 - Add nonparametric alternatives and assumption checks with guided recommendations.
-- Add PCA, clustering, logistic regression, ROC curves, survival/reliability analysis, and distribution fitting.
+- Add clustering, logistic regression, ROC curves, survival/reliability analysis, and distribution fitting. (PCA summary foundation complete)
 - Add SPC/control charts and process capability reports.
 - Add power/sample-size calculators.
 - Add report templates with plain-language assumptions, warnings, and interpretation notes.

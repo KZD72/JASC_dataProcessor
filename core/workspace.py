@@ -11,6 +11,57 @@ import pandas as pd
 from models.fit_functions import CustomFitModel
 
 
+COLUMN_ROLE_LABELS: dict[str, str] = {
+    "": "None",
+    "x": "X",
+    "y": "Y",
+    "z": "Z",
+    "error": "Error",
+    "x_error": "X error",
+    "y_error": "Y error",
+    "group": "Group",
+    "label": "Label",
+    "weight": "Weight",
+}
+COLUMN_ROLE_OPTIONS: tuple[tuple[str, str], ...] = tuple(COLUMN_ROLE_LABELS.items())
+
+
+@dataclass(slots=True)
+class ColumnMetadata:
+    """User-editable metadata associated with one dataset column."""
+
+    role: str = ""
+    unit: str = ""
+    long_name: str = ""
+    comment: str = ""
+
+    def is_empty(self) -> bool:
+        """Return whether no meaningful metadata is stored."""
+        return not any((self.role, self.unit, self.long_name, self.comment))
+
+    def to_metadata(self) -> dict[str, str]:
+        """Return JSON-friendly metadata."""
+        return {
+            "role": self.role,
+            "unit": self.unit,
+            "long_name": self.long_name,
+            "comment": self.comment,
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: object) -> "ColumnMetadata":
+        """Create column metadata from a project file entry."""
+        if not isinstance(metadata, dict):
+            return cls()
+        role = normalize_column_role(str(metadata.get("role", "") or ""))
+        return cls(
+            role=role,
+            unit=str(metadata.get("unit", "") or "").strip(),
+            long_name=str(metadata.get("long_name", "") or "").strip(),
+            comment=str(metadata.get("comment", "") or "").strip(),
+        )
+
+
 @dataclass(slots=True)
 class Dataset:
     """A named DataFrame plus optional source metadata."""
@@ -19,6 +70,39 @@ class Dataset:
     frame: pd.DataFrame
     source_path: Path | None = None
     formulas: dict[str, str] = field(default_factory=dict)
+    column_metadata: dict[str, ColumnMetadata] = field(default_factory=dict)
+
+    def metadata_for_column(self, column_name: str) -> ColumnMetadata:
+        """Return metadata for a column, creating an empty record if needed."""
+        key = str(column_name)
+        metadata = self.column_metadata.get(key)
+        if metadata is None:
+            metadata = ColumnMetadata()
+            self.column_metadata[key] = metadata
+        return metadata
+
+    def set_column_metadata(self, metadata: dict[str, ColumnMetadata]) -> None:
+        """Replace metadata, keeping only entries for existing columns."""
+        existing = {str(column) for column in self.frame.columns}
+        self.column_metadata = {
+            str(column): ColumnMetadata(
+                role=normalize_column_role(entry.role),
+                unit=entry.unit.strip(),
+                long_name=entry.long_name.strip(),
+                comment=entry.comment.strip(),
+            )
+            for column, entry in metadata.items()
+            if str(column) in existing and not entry.is_empty()
+        }
+
+    def prune_column_metadata(self) -> None:
+        """Drop metadata entries for columns no longer present in the DataFrame."""
+        existing = {str(column) for column in self.frame.columns}
+        self.column_metadata = {
+            str(column): metadata
+            for column, metadata in self.column_metadata.items()
+            if str(column) in existing and not metadata.is_empty()
+        }
 
 
 @dataclass(slots=True)
@@ -198,3 +282,87 @@ class Workspace:
                     series["y_dataset"] = new_name
                 if series.get("z_dataset") == old_name:
                     series["z_dataset"] = new_name
+
+    def rename_column_references_in_plots(
+        self,
+        dataset_name: str,
+        rename_map: dict[str, str],
+    ) -> None:
+        """Update saved plot series when referenced columns are renamed."""
+        if not rename_map:
+            return
+
+        for saved_plot in self._plots.values():
+            series_list = saved_plot.state.get("series")
+            if not isinstance(series_list, list):
+                continue
+            for series in series_list:
+                if not isinstance(series, dict):
+                    continue
+                if series.get("x_dataset") == dataset_name:
+                    self._rename_series_column(series, "x_column", rename_map)
+                    self._rename_series_column(series, "x_err_column", rename_map)
+                if series.get("y_dataset") == dataset_name:
+                    self._rename_series_column(series, "y_column", rename_map)
+                    self._rename_series_column(series, "y_err_column", rename_map)
+                    self._rename_series_column(series, "lower_column", rename_map)
+                    self._rename_series_column(series, "upper_column", rename_map)
+                    distribution_columns = series.get("distribution_columns")
+                    if isinstance(distribution_columns, list):
+                        series["distribution_columns"] = [
+                            rename_map.get(str(column), str(column))
+                            for column in distribution_columns
+                        ]
+                    elif isinstance(distribution_columns, tuple):
+                        series["distribution_columns"] = tuple(
+                            rename_map.get(str(column), str(column))
+                            for column in distribution_columns
+                        )
+                if series.get("z_dataset") == dataset_name:
+                    self._rename_series_column(series, "z_column", rename_map)
+
+    @staticmethod
+    def _rename_series_column(
+        series: dict[str, object],
+        key: str,
+        rename_map: dict[str, str],
+    ) -> None:
+        """Rename one saved-series column field if it exists in a rename map."""
+        value = series.get(key)
+        if isinstance(value, str) and value in rename_map:
+            series[key] = rename_map[value]
+
+
+def normalize_column_role(role: str) -> str:
+    """Return a supported column role key, accepting a few display aliases."""
+    clean = role.strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "none": "",
+        "": "",
+        "xerror": "x_error",
+        "x_err": "x_error",
+        "yerror": "y_error",
+        "y_err": "y_error",
+        "err": "error",
+        "sigma": "error",
+    }
+    clean = aliases.get(clean, clean)
+    return clean if clean in COLUMN_ROLE_LABELS else ""
+
+
+def column_role_label(role: str) -> str:
+    """Return a user-facing label for a column role key."""
+    return COLUMN_ROLE_LABELS.get(normalize_column_role(role), "None")
+
+
+def copy_column_metadata(metadata: dict[str, ColumnMetadata]) -> dict[str, ColumnMetadata]:
+    """Return a deep-enough copy of column metadata values."""
+    return {
+        str(column): ColumnMetadata(
+            role=entry.role,
+            unit=entry.unit,
+            long_name=entry.long_name,
+            comment=entry.comment,
+        )
+        for column, entry in metadata.items()
+    }

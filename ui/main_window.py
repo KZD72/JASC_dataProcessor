@@ -8,6 +8,7 @@ import re
 from io import StringIO
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from PySide6.QtCore import (
     QByteArray,
@@ -42,7 +43,7 @@ from PySide6.QtWidgets import (
 from core import project_io
 from core.file_io import export_tabular_file, read_tabular_file
 from core.operations import ExpressionError
-from core.workspace import Dataset, Workspace
+from core.workspace import ColumnMetadata, Dataset, Workspace
 from math_engine.calculus import (
     DERIVATIVE_METHODS,
     INTEGRATION_METHODS,
@@ -53,20 +54,33 @@ from math_engine.calculus import (
     integral_column,
 )
 from math_engine.curve_fitting import fit_curve
-from math_engine.statistics import run_statistical_analysis
+from math_engine.interpolation import (
+    generated_query_points,
+    interpolate_dataset,
+    query_points_from_columns,
+    query_points_from_text,
+)
+from math_engine.statistics import (
+    STATISTIC_OPERATIONS,
+    run_multicolumn_statistical_analysis,
+    run_statistical_analysis,
+)
 from ui.data_table import DataTableWidget
 from ui.dataframe_model import DataFrameTableModel
 from ui.dialogs import (
     ColumnExpressionDialog,
     ColumnMathDialog,
+    ColumnMetadataDialog,
     CustomFitModelsDialog,
     FFTDialog,
     FitDialog,
     FitReportDialog,
     IFFTDialog,
     ImportOptionsDialog,
+    InterpolationDialog,
     StatisticsDialog,
 )
+from ui.plot_canvas import PlotSeries
 from ui.plot_tab import PlotTab
 
 
@@ -101,6 +115,7 @@ class MainWindow(QMainWindow):
 
         self._dataset_model = DataFrameTableModel(self)
         self._dataset_model.history_changed.connect(self._handle_dataset_history_changed)
+        self._dataset_model.columns_renamed.connect(self._handle_dataset_columns_renamed)
         self._dataset_table = QTableView()
         self._dataset_table.setModel(self._dataset_model)
         self._dataset_table.setAlternatingRowColors(True)
@@ -219,6 +234,8 @@ class MainWindow(QMainWindow):
         self._editor_remove_button.clicked.connect(self._delete_current_dataset)
         self._editor_export_button = QPushButton("Export")
         self._editor_export_button.clicked.connect(self._export_current_dataset)
+        self._editor_metadata_button = QPushButton("Column Metadata")
+        self._editor_metadata_button.clicked.connect(self._edit_column_metadata)
 
         layout = QVBoxLayout(panel)
         layout.addWidget(self._dataset_summary)
@@ -226,7 +243,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(self._button_row(self._editor_delete_rows_button, self._editor_delete_columns_button))
         layout.addLayout(self._button_row(self._editor_add_column_button, self._editor_insert_column_button))
         layout.addLayout(self._button_row(self._editor_rename_button, self._editor_remove_button))
-        layout.addWidget(self._editor_export_button)
+        layout.addLayout(self._button_row(self._editor_export_button, self._editor_metadata_button))
         layout.addStretch(1)
         return panel
 
@@ -239,6 +256,8 @@ class MainWindow(QMainWindow):
         derivative_button.clicked.connect(self._run_derivative)
         integral_button = QPushButton("Integral")
         integral_button.clicked.connect(self._run_integral)
+        interpolation_button = QPushButton("Interpolation")
+        interpolation_button.clicked.connect(self._run_interpolation)
         fft_button = QPushButton("FFT")
         fft_button.clicked.connect(self._run_fft)
         ifft_button = QPushButton("Inverse FFT")
@@ -254,6 +273,7 @@ class MainWindow(QMainWindow):
             formula_button,
             derivative_button,
             integral_button,
+            interpolation_button,
             fft_button,
             ifft_button,
             statistics_button,
@@ -264,6 +284,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Column Math"))
         layout.addWidget(formula_button)
         layout.addLayout(self._button_row(derivative_button, integral_button))
+        layout.addWidget(interpolation_button)
         layout.addWidget(QLabel("Signal"))
         layout.addLayout(self._button_row(fft_button, ifft_button))
         layout.addWidget(QLabel("Statistics and Fitting"))
@@ -302,6 +323,9 @@ class MainWindow(QMainWindow):
         self._dataset_table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self._dataset_table.horizontalHeader().customContextMenuRequested.connect(
             self._show_dataset_header_context_menu
+        )
+        self._dataset_table.horizontalHeader().sectionDoubleClicked.connect(
+            self._edit_column_metadata_for_column
         )
 
     def _build_dataset_editor(self) -> QWidget:
@@ -409,6 +433,11 @@ class MainWindow(QMainWindow):
         insert_row_action = data_menu.addAction("&Insert Row")
         insert_row_action.triggered.connect(self._insert_empty_row)
 
+        data_menu.addSeparator()
+
+        column_metadata_action = data_menu.addAction("Column &Metadata...")
+        column_metadata_action.triggered.connect(self._edit_column_metadata)
+
         apply_formula_action = data_menu.addAction("&Apply Formula...")
         apply_formula_action.setShortcut("Ctrl+Shift+F")
         apply_formula_action.triggered.connect(self._apply_column_formula)
@@ -419,6 +448,9 @@ class MainWindow(QMainWindow):
 
         integral_action = analysis_menu.addAction("&Integral...")
         integral_action.triggered.connect(self._run_integral)
+
+        interpolation_action = analysis_menu.addAction("Inter&polation...")
+        interpolation_action.triggered.connect(self._run_interpolation)
 
         fft_action = analysis_menu.addAction("&FFT...")
         fft_action.triggered.connect(self._run_fft)
@@ -473,9 +505,11 @@ class MainWindow(QMainWindow):
         self._delete_dataset_action = delete_dataset_action
         self._add_column_action = add_column_action
         self._insert_column_action = insert_column_action
+        self._column_metadata_action = column_metadata_action
         self._apply_formula_action = apply_formula_action
         self._derivative_action = derivative_action
         self._integral_action = integral_action
+        self._interpolation_action = interpolation_action
         self._fft_action = fft_action
         self._ifft_action = ifft_action
         self._statistics_action = statistics_action
@@ -784,6 +818,72 @@ class MainWindow(QMainWindow):
             f"Inserted column '{final_name}' in {dataset.name}"
         )
 
+    def _edit_column_metadata(self, focus_column: str | int | None = None) -> None:
+        """Open the column metadata editor for the selected dataset."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(
+                self,
+                "Column Metadata",
+                "Select a dataset before editing column metadata.",
+            )
+            return
+
+        focus_column_name: str | None = None
+        if isinstance(focus_column, bool):
+            focus_column_name = None
+        elif isinstance(focus_column, int):
+            if 0 <= focus_column < len(dataset.frame.columns):
+                focus_column_name = str(dataset.frame.columns[focus_column])
+        elif isinstance(focus_column, str):
+            focus_column_name = focus_column
+
+        dialog = ColumnMetadataDialog(
+            dataset_name=dataset.name,
+            column_names=[str(column) for column in dataset.frame.columns],
+            column_metadata=dataset.column_metadata,
+            focus_column=focus_column_name,
+            parent=self,
+        )
+        if dialog.exec() != ColumnMetadataDialog.Accepted:
+            return
+
+        try:
+            renamed_columns = self._dataset_model.apply_column_metadata(
+                column_names=dialog.column_names(),
+                metadata=dialog.column_metadata(),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Column Metadata Failed", str(exc))
+            return
+
+        rename_map = dict(renamed_columns)
+        if rename_map:
+            self._workspace.rename_column_references_in_plots(dataset.name, rename_map)
+            self._plot_tab_widget.rename_column_references(dataset.name, rename_map)
+        else:
+            self._plot_tab_widget.refresh_controls(dataset.name)
+
+        selected_column = (
+            rename_map.get(focus_column_name, focus_column_name)
+            if focus_column_name is not None
+            else None
+        )
+        if selected_column:
+            self._select_column(selected_column)
+
+        self._dataset_table.resizeColumnsToContents()
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self._update_dataset_summary()
+        rename_text = f", renamed {len(renamed_columns)} column(s)" if renamed_columns else ""
+        self.statusBar().showMessage(
+            f"Updated metadata for {len(dataset.column_metadata)} column(s) in {dataset.name}{rename_text}"
+        )
+
+    def _edit_column_metadata_for_column(self, column_index: int) -> None:
+        """Open column metadata focused on the double-clicked header column."""
+        self._edit_column_metadata(column_index)
+
     def _add_empty_row(self) -> None:
         """Append an empty row to the selected dataset."""
         dataset = self._current_dataset()
@@ -866,6 +966,8 @@ class MainWindow(QMainWindow):
             column_names=[str(column) for column in dataset.frame.columns],
             methods=DERIVATIVE_METHODS,
             default_target="Derivative",
+            default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
+            default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
             parent=self,
         )
         if dialog.exec() != ColumnMathDialog.Accepted:
@@ -912,6 +1014,8 @@ class MainWindow(QMainWindow):
             methods=INTEGRATION_METHODS,
             default_target="Integral",
             include_initial_value=True,
+            default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
+            default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
             parent=self,
         )
         if dialog.exec() != ColumnMathDialog.Accepted:
@@ -954,6 +1058,75 @@ class MainWindow(QMainWindow):
             f"Integral saved to '{result.column_name}' ({result.values_written} values)"
         )
 
+    def _run_interpolation(self) -> None:
+        """Run the interpolation workflow and create a prediction dataset."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(self, "Interpolation", "Select a dataset before interpolating.")
+            return
+
+        default_x = self._preferred_dataset_column(dataset, ("x",), fallback_index=0)
+        default_y = self._preferred_dataset_column(dataset, ("y",), fallback_index=1)
+        default_z = self._preferred_dataset_column(dataset, ("z",), fallback_index=2)
+        dialog = InterpolationDialog(
+            column_names=[str(column) for column in dataset.frame.columns],
+            default_dataset_name=dataset.name,
+            column_ranges=self._numeric_column_ranges(dataset),
+            default_x_column=default_x,
+            default_y_column=default_y,
+            default_z_column=default_z,
+            default_value_column=default_y,
+            parent=self,
+        )
+        if dialog.exec() != InterpolationDialog.Accepted:
+            return
+
+        try:
+            if dialog.query_mode() == "generated":
+                query_points = generated_query_points(
+                    dialog.generated_ranges(),
+                    mesh=dialog.mode() == "2d",
+                )
+            elif dialog.query_mode() == "columns":
+                query_points = query_points_from_columns(dataset.frame, dialog.query_columns())
+            else:
+                query_points = query_points_from_text(
+                    dialog.manual_points_text(),
+                    dimension=len(dialog.coordinate_columns()),
+                )
+
+            result_frame = interpolate_dataset(
+                dataset.frame,
+                coordinate_columns=dialog.coordinate_columns(),
+                value_column=dialog.value_column(),
+                query_points=query_points,
+                method=dialog.method_key(),
+                fill_policy=dialog.fill_policy(),
+                smoothing=dialog.smoothing(),
+                epsilon=dialog.epsilon(),
+            )
+            result_dataset = self._workspace.add_dataset(
+                dialog.target_dataset_name() or f"{dataset.name}_interpolation",
+                result_frame,
+            )
+            self._apply_interpolation_metadata(
+                source_dataset=dataset,
+                result_dataset=result_dataset,
+                coordinate_columns=dialog.coordinate_columns(),
+                value_column=dialog.value_column(),
+            )
+        except MathOperationError as exc:
+            QMessageBox.warning(self, "Interpolation Failed", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Interpolation Failed", str(exc))
+            return
+
+        self._refresh_dataset_list(result_dataset.name)
+        self.statusBar().showMessage(
+            f"Interpolation saved as '{result_dataset.name}' ({len(result_dataset.frame)} row(s))"
+        )
+
     def _run_fft(self) -> None:
         """Run the FFT workflow and create a frequency-domain dataset."""
         dataset = self._current_dataset()
@@ -964,6 +1137,8 @@ class MainWindow(QMainWindow):
         dialog = FFTDialog(
             column_names=[str(column) for column in dataset.frame.columns],
             default_dataset_name=dataset.name,
+            default_signal_column=self._preferred_dataset_column(dataset, ("y", "z"), fallback_index=1),
+            default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
             parent=self,
         )
         if dialog.exec() != FFTDialog.Accepted:
@@ -1072,25 +1247,40 @@ class MainWindow(QMainWindow):
         if dialog.exec() != StatisticsDialog.Accepted:
             return
 
+        secondary_dataset = None
+        secondary_column = ""
+        multi_columns: list[str] = []
         try:
             primary_dataset = self._workspace.get_dataset(dialog.primary_dataset_name())
             primary_column = dialog.primary_column()
-            secondary_series = None
-            secondary_label = ""
-            if dialog.requires_secondary_column():
-                secondary_dataset = self._workspace.get_dataset(dialog.secondary_dataset_name())
-                secondary_column = dialog.secondary_column()
-                secondary_series = secondary_dataset.frame[secondary_column]
-                secondary_label = f"{secondary_dataset.name}: {secondary_column}"
+            if dialog.operation_scope() == "multi":
+                multi_columns = dialog.multi_columns()
+                column_labels = {
+                    column: self._statistics_column_label(primary_dataset, column)
+                    for column in multi_columns
+                }
+                result_frame = run_multicolumn_statistical_analysis(
+                    frame=primary_dataset.frame[multi_columns],
+                    column_labels=column_labels,
+                    operation_key=dialog.operation_key(),
+                )
+            else:
+                secondary_series = None
+                secondary_label = ""
+                if dialog.requires_secondary_column():
+                    secondary_dataset = self._workspace.get_dataset(dialog.secondary_dataset_name())
+                    secondary_column = dialog.secondary_column()
+                    secondary_series = secondary_dataset.frame[secondary_column]
+                    secondary_label = f"{secondary_dataset.name}: {secondary_column}"
 
-            primary_series = primary_dataset.frame[primary_column]
-            result_frame = run_statistical_analysis(
-                primary=primary_series,
-                primary_label=f"{primary_dataset.name}: {primary_column}",
-                operation_key=dialog.operation_key(),
-                secondary=secondary_series,
-                secondary_label=secondary_label,
-            )
+                primary_series = primary_dataset.frame[primary_column]
+                result_frame = run_statistical_analysis(
+                    primary=primary_series,
+                    primary_label=f"{primary_dataset.name}: {primary_column}",
+                    operation_key=dialog.operation_key(),
+                    secondary=secondary_series,
+                    secondary_label=secondary_label,
+                )
             result_dataset = self._workspace.add_dataset(
                 dialog.target_dataset_name() or f"{primary_dataset.name}_statistics",
                 result_frame,
@@ -1106,9 +1296,638 @@ class MainWindow(QMainWindow):
             return
 
         self._refresh_dataset_list(result_dataset.name)
+        if dialog.plot_result_immediately():
+            try:
+                self._queue_statistics_companion_plot(
+                    primary_dataset=primary_dataset,
+                    primary_column=primary_column,
+                    secondary_dataset=secondary_dataset,
+                    secondary_column=secondary_column,
+                    result_dataset=result_dataset,
+                    operation_key=dialog.operation_key(),
+                    plot_kind=dialog.statistics_plot_kind(),
+                    multi_columns=multi_columns,
+                )
+                self._refresh_dataset_list(result_dataset.name)
+                self._tabs.setCurrentWidget(self._plot_tab_widget)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Statistics Plot",
+                    f"Statistics results were saved, but the companion plot could not be created:\n{exc}",
+                )
         self.statusBar().showMessage(
             f"Statistics saved as '{result_dataset.name}' ({len(result_dataset.frame)} rows)"
         )
+
+    def _queue_statistics_companion_plot(
+        self,
+        primary_dataset: Dataset,
+        primary_column: str,
+        secondary_dataset: Dataset | None,
+        secondary_column: str,
+        result_dataset: Dataset,
+        operation_key: str,
+        plot_kind: str,
+        multi_columns: list[str] | None = None,
+    ) -> None:
+        """Create an editable plot queue for a statistics result."""
+        operation_scope = STATISTIC_OPERATIONS[operation_key].scope
+        resolved_kind = self._resolve_statistics_plot_kind(
+            operation_key,
+            plot_kind,
+            operation_scope=operation_scope,
+        )
+        operation_label = STATISTIC_OPERATIONS[operation_key].label
+        title = f"Statistics: {operation_label}"
+        primary_label = self._statistics_column_label(primary_dataset, primary_column)
+
+        if operation_scope == "multi":
+            selected_columns = multi_columns or []
+            if len(selected_columns) < 2:
+                raise ValueError("Choose at least two columns for multi-column statistics plots.")
+            if resolved_kind in {"box", "violin"}:
+                self._plot_tab_widget.queue_plot_series(
+                    [
+                        PlotSeries(
+                            x_dataset=primary_dataset.name,
+                            x_column="",
+                            y_dataset=primary_dataset.name,
+                            y_column=selected_columns[0],
+                            plot_type=resolved_kind,
+                            color="tab:blue",
+                            fill_alpha=0.35,
+                            distribution_columns=tuple(selected_columns),
+                            distribution_show_mean=True,
+                            distribution_show_median=True,
+                            distribution_show_outliers=True,
+                        )
+                    ],
+                    title=title,
+                    x_label="Column",
+                    y_label="Value",
+                    selected_dataset_name=primary_dataset.name,
+                )
+                return
+            if resolved_kind == "correlation_heatmap":
+                heatmap_dataset = self._statistics_correlation_heatmap_dataset(
+                    primary_dataset,
+                    selected_columns,
+                    result_dataset.name,
+                )
+                self._plot_tab_widget.queue_plot_series(
+                    [
+                        PlotSeries(
+                            x_dataset=heatmap_dataset.name,
+                            x_column="column_index",
+                            y_dataset=heatmap_dataset.name,
+                            y_column="row_index",
+                            z_dataset=heatmap_dataset.name,
+                            z_column="pearson_r",
+                            plot_type="heatmap",
+                            color="tab:blue",
+                            interpolation_method="linear",
+                            grid_resolution=max(40, min(160, len(selected_columns) * 24)),
+                        )
+                    ],
+                    title=f"Correlation Heatmap: {primary_dataset.name}",
+                    x_label="Column index",
+                    y_label="Column index",
+                    selected_dataset_name=heatmap_dataset.name,
+                )
+                return
+            if resolved_kind == "pca_variance":
+                pca_dataset = self._statistics_pca_variance_dataset(result_dataset)
+                self._plot_tab_widget.queue_plot_series(
+                    [
+                        PlotSeries(
+                            x_dataset=pca_dataset.name,
+                            x_column="component",
+                            y_dataset=pca_dataset.name,
+                            y_column="explained_variance_ratio",
+                            plot_type="bar",
+                            color="tab:green",
+                            fill_alpha=0.55,
+                            custom_label="Explained variance ratio",
+                        )
+                    ],
+                    title=f"PCA Explained Variance: {primary_dataset.name}",
+                    x_label="Principal component",
+                    y_label="Explained variance ratio",
+                    selected_dataset_name=pca_dataset.name,
+                )
+                return
+            raise ValueError("Unsupported multi-column statistics companion plot.")
+
+        if operation_scope == "group":
+            if secondary_dataset is None or not secondary_column:
+                raise ValueError("Choose a group column for grouped statistics plots.")
+            if resolved_kind not in {"box", "violin"}:
+                raise ValueError("Grouped statistics companion plots support box or violin plots.")
+            group_plot_dataset = self._statistics_group_distribution_dataset(
+                primary_dataset,
+                primary_column,
+                secondary_dataset,
+                secondary_column,
+                result_dataset.name,
+            )
+            distribution_columns = tuple(str(column) for column in group_plot_dataset.frame.columns)
+            self._plot_tab_widget.queue_plot_series(
+                [
+                    PlotSeries(
+                        x_dataset=group_plot_dataset.name,
+                        x_column="",
+                        y_dataset=group_plot_dataset.name,
+                        y_column=distribution_columns[0],
+                        plot_type=resolved_kind,
+                        color="tab:blue",
+                        fill_alpha=0.35,
+                        distribution_columns=distribution_columns,
+                        distribution_show_mean=True,
+                        distribution_show_median=True,
+                        distribution_show_outliers=True,
+                    )
+                ],
+                title=title,
+                x_label="Group",
+                y_label=primary_label,
+                selected_dataset_name=group_plot_dataset.name,
+            )
+            return
+
+        if resolved_kind == "result_series":
+            result_column = "z_score" if operation_key == "single_zscore" else "cumulative_mean"
+            if "row_index" not in result_dataset.frame.columns or result_column not in result_dataset.frame.columns:
+                raise ValueError("This statistics result does not contain a plottable result series.")
+            self._plot_tab_widget.queue_plot_series(
+                [
+                    PlotSeries(
+                        x_dataset=result_dataset.name,
+                        x_column="row_index",
+                        y_dataset=result_dataset.name,
+                        y_column=result_column,
+                        plot_type="line",
+                        color="tab:blue",
+                        line_style="-",
+                        marker="",
+                        custom_label=result_column,
+                    )
+                ],
+                title=title,
+                x_label="Row index",
+                y_label=result_column.replace("_", " ").title(),
+                selected_dataset_name=result_dataset.name,
+            )
+            return
+
+        if resolved_kind == "histogram":
+            series = [
+                PlotSeries(
+                    x_dataset=primary_dataset.name,
+                    x_column="",
+                    y_dataset=primary_dataset.name,
+                    y_column=primary_column,
+                    plot_type="histogram",
+                    color="tab:blue",
+                    fill_alpha=0.35,
+                    histogram_bins=30,
+                    histogram_density=True,
+                    custom_label=primary_label,
+                )
+            ]
+            normal_dataset = self._statistics_normal_curve_dataset(primary_dataset, primary_column)
+            if normal_dataset is not None:
+                series.append(
+                    PlotSeries(
+                        x_dataset=normal_dataset.name,
+                        x_column="value",
+                        y_dataset=normal_dataset.name,
+                        y_column="normal_density",
+                        plot_type="line",
+                        color="tab:red",
+                        line_style="-",
+                        marker="",
+                        custom_label="Normal curve",
+                    )
+                )
+            self._plot_tab_widget.queue_plot_series(
+                series,
+                title=title,
+                x_label=primary_label,
+                y_label="Density",
+                selected_dataset_name=primary_dataset.name,
+            )
+            return
+
+        if resolved_kind in {"box", "violin"}:
+            plot_dataset = primary_dataset
+            distribution_columns = (primary_column,)
+            if secondary_dataset is not None and secondary_column:
+                plot_dataset = self._statistics_comparison_dataset(
+                    primary_dataset,
+                    primary_column,
+                    secondary_dataset,
+                    secondary_column,
+                    result_dataset.name,
+                )
+                distribution_columns = tuple(str(column) for column in plot_dataset.frame.columns)
+            self._plot_tab_widget.queue_plot_series(
+                [
+                    PlotSeries(
+                        x_dataset=plot_dataset.name,
+                        x_column="",
+                        y_dataset=plot_dataset.name,
+                        y_column=distribution_columns[0],
+                        plot_type=resolved_kind,
+                        color="tab:blue",
+                        fill_alpha=0.35,
+                        distribution_columns=distribution_columns,
+                        distribution_show_mean=True,
+                        distribution_show_median=True,
+                        distribution_show_outliers=True,
+                    )
+                ],
+                title=title,
+                x_label="Column",
+                y_label="Value",
+                selected_dataset_name=plot_dataset.name,
+            )
+            return
+
+        if secondary_dataset is None or not secondary_column:
+            raise ValueError("Choose a two-column statistics operation for this plot type.")
+
+        secondary_label = self._statistics_column_label(secondary_dataset, secondary_column)
+        if resolved_kind == "bland_altman":
+            bland_dataset = self._statistics_bland_altman_dataset(
+                primary_dataset,
+                primary_column,
+                secondary_dataset,
+                secondary_column,
+                result_dataset.name,
+            )
+            self._plot_tab_widget.queue_plot_series(
+                [
+                    PlotSeries(
+                        x_dataset=bland_dataset.name,
+                        x_column="mean",
+                        y_dataset=bland_dataset.name,
+                        y_column="difference",
+                        plot_type="scatter",
+                        color="tab:purple",
+                        line_style="",
+                        marker="o",
+                        custom_label="Difference vs mean",
+                    )
+                ],
+                title=f"Bland-Altman: {primary_label} vs {secondary_label}",
+                x_label="Mean of paired values",
+                y_label="Primary - secondary",
+                selected_dataset_name=bland_dataset.name,
+            )
+            return
+
+        series = [
+            PlotSeries(
+                x_dataset=primary_dataset.name,
+                x_column=primary_column,
+                y_dataset=secondary_dataset.name,
+                y_column=secondary_column,
+                plot_type="scatter",
+                color="tab:blue",
+                line_style="",
+                marker="o",
+                custom_label=f"{secondary_label} vs {primary_label}",
+            )
+        ]
+        selected_dataset_name = primary_dataset.name
+        if resolved_kind == "regression":
+            regression_dataset = self._statistics_regression_line_dataset(
+                primary_dataset,
+                primary_column,
+                secondary_dataset,
+                secondary_column,
+                result_dataset,
+            )
+            series.append(
+                PlotSeries(
+                    x_dataset=regression_dataset.name,
+                    x_column="x",
+                    y_dataset=regression_dataset.name,
+                    y_column="fit",
+                    plot_type="line",
+                    color="tab:red",
+                    line_style="-",
+                    marker="",
+                    custom_label="Regression line",
+                )
+            )
+            selected_dataset_name = regression_dataset.name
+        self._plot_tab_widget.queue_plot_series(
+            series,
+            title=title,
+            x_label=primary_label,
+            y_label=secondary_label,
+            selected_dataset_name=selected_dataset_name,
+        )
+
+    @staticmethod
+    def _resolve_statistics_plot_kind(
+        operation_key: str,
+        plot_kind: str,
+        operation_scope: str,
+    ) -> str:
+        """Return a concrete companion plot kind for a statistics operation."""
+        if plot_kind != "auto":
+            return plot_kind
+        if operation_scope == "group":
+            return "box"
+        if operation_scope == "multi":
+            if operation_key == "multi_pca":
+                return "pca_variance"
+            if operation_key in {"multi_complete", "multi_correlations"}:
+                return "correlation_heatmap"
+            return "box"
+        if operation_scope == "single":
+            if operation_key in {"single_zscore", "single_cumulative"}:
+                return "result_series"
+            return "histogram"
+        if operation_key == "pair_bland_altman":
+            return "bland_altman"
+        if operation_key == "pair_linear_regression":
+            return "regression"
+        if operation_key in {"pair_welch_ttest", "pair_mann_whitney", "pair_ks", "pair_variance_tests"}:
+            return "box"
+        return "scatter"
+
+    def _statistics_normal_curve_dataset(self, dataset: Dataset, column: str) -> Dataset | None:
+        """Create a normal PDF overlay dataset for a histogram when possible."""
+        values = self._statistics_numeric_values(dataset, column)
+        if len(values) < 2:
+            return None
+        mean = float(values.mean())
+        std = float(values.std(ddof=1))
+        if not np.isfinite(std) or std <= 0:
+            return None
+        x_min = float(values.min())
+        x_max = float(values.max())
+        if x_min == x_max:
+            return None
+        x_values = np.linspace(x_min, x_max, 200)
+        density = np.exp(-0.5 * ((x_values - mean) / std) ** 2) / (std * np.sqrt(2 * np.pi))
+        return self._workspace.add_dataset(
+            f"{dataset.name}_{column}_normal_curve",
+            pd.DataFrame({"value": x_values, "normal_density": density}),
+        )
+
+    def _statistics_comparison_dataset(
+        self,
+        primary_dataset: Dataset,
+        primary_column: str,
+        secondary_dataset: Dataset,
+        secondary_column: str,
+        result_name: str,
+    ) -> Dataset:
+        """Create a two-column dataset suitable for box/violin comparisons."""
+        primary_values = self._statistics_numeric_values(primary_dataset, primary_column).reset_index(drop=True)
+        secondary_values = self._statistics_numeric_values(secondary_dataset, secondary_column).reset_index(drop=True)
+        row_count = max(len(primary_values), len(secondary_values))
+        primary_label = self._statistics_column_label(primary_dataset, primary_column)
+        secondary_label = self._statistics_column_label(secondary_dataset, secondary_column)
+        if primary_label == secondary_label:
+            secondary_label = f"{secondary_label} 2"
+        frame = pd.DataFrame(
+            {
+                primary_label: primary_values.reindex(range(row_count)),
+                secondary_label: secondary_values.reindex(range(row_count)),
+            }
+        )
+        return self._workspace.add_dataset(f"{result_name}_plot_data", frame)
+
+    def _statistics_group_distribution_dataset(
+        self,
+        value_dataset: Dataset,
+        value_column: str,
+        group_dataset: Dataset,
+        group_column: str,
+        result_name: str,
+    ) -> Dataset:
+        """Create a wide dataset with one numeric column per group."""
+        values = self._statistics_numeric_series(value_dataset, value_column)
+        if group_column not in group_dataset.frame.columns:
+            raise ValueError(f"Column '{group_column}' is no longer available.")
+        groups = group_dataset.frame[group_column].reset_index(drop=True)
+        paired = pd.DataFrame(
+            {
+                "value": values.reset_index(drop=True),
+                "group": groups,
+            }
+        ).dropna(subset=["value", "group"])
+        paired["group"] = paired["group"].astype(str).str.strip()
+        paired = paired[paired["group"] != ""]
+        if paired.empty:
+            raise ValueError("No complete numeric/group rows are available for the grouped plot.")
+
+        grouped_values: dict[str, pd.Series] = {}
+        for group_name, group_frame in paired.groupby("group", sort=True):
+            column_name = self._unique_plot_data_column(str(group_name), grouped_values)
+            grouped_values[column_name] = group_frame["value"].astype(float).reset_index(drop=True)
+        if len(grouped_values) < 2:
+            raise ValueError("Grouped plots require at least two groups.")
+
+        row_count = max(len(values) for values in grouped_values.values())
+        frame = pd.DataFrame(
+            {
+                column_name: values.reindex(range(row_count))
+                for column_name, values in grouped_values.items()
+            }
+        )
+        return self._workspace.add_dataset(f"{result_name}_group_plot_data", frame)
+
+    @staticmethod
+    def _unique_plot_data_column(base_name: str, columns: dict[str, pd.Series]) -> str:
+        """Return a unique column name for generated plot-helper datasets."""
+        clean_name = base_name.strip() or "Group"
+        if clean_name not in columns:
+            return clean_name
+        suffix = 2
+        while f"{clean_name} {suffix}" in columns:
+            suffix += 1
+        return f"{clean_name} {suffix}"
+
+    def _statistics_correlation_heatmap_dataset(
+        self,
+        dataset: Dataset,
+        columns: list[str],
+        result_name: str,
+    ) -> Dataset:
+        """Create X/Y/Z helper data for a Pearson correlation heatmap."""
+        numeric = pd.DataFrame(
+            {
+                column: self._statistics_numeric_series(dataset, column)
+                for column in columns
+            }
+        )
+        correlation = numeric.corr(method="pearson", min_periods=2)
+        rows: list[dict[str, object]] = []
+        has_off_diagonal_value = False
+        for row_index, row_column in enumerate(columns):
+            for column_index, column in enumerate(columns):
+                value = correlation.loc[row_column, column]
+                if pd.isna(value):
+                    continue
+                if row_index != column_index:
+                    has_off_diagonal_value = True
+                rows.append(
+                    {
+                        "column_index": float(column_index),
+                        "row_index": float(row_index),
+                        "pearson_r": float(value),
+                        "column": column,
+                        "row": row_column,
+                    }
+                )
+        if not rows or not has_off_diagonal_value:
+            raise ValueError("Correlation heatmap requires at least two aligned numeric values.")
+        return self._workspace.add_dataset(
+            f"{result_name}_correlation_heatmap",
+            pd.DataFrame(rows),
+        )
+
+    def _statistics_pca_variance_dataset(self, result_dataset: Dataset) -> Dataset:
+        """Create component/variance helper data from a PCA statistics result."""
+        required_columns = {"metric", "value"}
+        if not required_columns.issubset(result_dataset.frame.columns):
+            raise ValueError("PCA variance plot requires a statistics result with metric and value columns.")
+
+        rows: list[dict[str, float]] = []
+        for _index, row in result_dataset.frame.iterrows():
+            metric = str(row.get("metric", ""))
+            match = re.fullmatch(r"pc(\d+)_explained_variance_ratio", metric)
+            if match is None:
+                continue
+            value = pd.to_numeric(pd.Series([row.get("value")]), errors="coerce").iloc[0]
+            if pd.isna(value):
+                continue
+            rows.append(
+                {
+                    "component": float(match.group(1)),
+                    "explained_variance_ratio": float(value),
+                }
+            )
+        if not rows:
+            raise ValueError("This statistics result does not contain PCA explained-variance rows.")
+        return self._workspace.add_dataset(
+            f"{result_dataset.name}_pca_variance",
+            pd.DataFrame(rows),
+        )
+
+    def _statistics_bland_altman_dataset(
+        self,
+        primary_dataset: Dataset,
+        primary_column: str,
+        secondary_dataset: Dataset,
+        secondary_column: str,
+        result_name: str,
+    ) -> Dataset:
+        """Create paired mean/difference data for a Bland-Altman companion plot."""
+        paired = self._statistics_aligned_pair(
+            primary_dataset,
+            primary_column,
+            secondary_dataset,
+            secondary_column,
+            minimum_points=2,
+        )
+        mean_values = paired.mean(axis=1)
+        difference_values = paired["primary"] - paired["secondary"]
+        frame = pd.DataFrame(
+            {
+                "mean": mean_values.to_numpy(dtype=float),
+                "difference": difference_values.to_numpy(dtype=float),
+            }
+        )
+        return self._workspace.add_dataset(f"{result_name}_bland_altman", frame)
+
+    def _statistics_regression_line_dataset(
+        self,
+        primary_dataset: Dataset,
+        primary_column: str,
+        secondary_dataset: Dataset,
+        secondary_column: str,
+        result_dataset: Dataset,
+    ) -> Dataset:
+        """Create an OLS regression line dataset from aligned numeric pairs."""
+        paired = self._statistics_aligned_pair(
+            primary_dataset,
+            primary_column,
+            secondary_dataset,
+            secondary_column,
+            minimum_points=2,
+        )
+        x_min = float(paired["primary"].min())
+        x_max = float(paired["primary"].max())
+        if x_min == x_max:
+            raise ValueError("Regression companion plot needs non-constant primary X values.")
+        slope, intercept = np.polyfit(
+            paired["primary"].to_numpy(dtype=float),
+            paired["secondary"].to_numpy(dtype=float),
+            1,
+        )
+        x_values = np.linspace(x_min, x_max, 200)
+        frame = pd.DataFrame({"x": x_values, "fit": slope * x_values + intercept})
+        return self._workspace.add_dataset(f"{result_dataset.name}_regression_line", frame)
+
+    @staticmethod
+    def _statistics_numeric_values(dataset: Dataset, column: str) -> pd.Series:
+        """Return finite numeric values for one dataset column."""
+        if column not in dataset.frame.columns:
+            raise ValueError(f"Column '{column}' is no longer available.")
+        values = pd.to_numeric(dataset.frame[column], errors="coerce")
+        values = values[
+            values.notna()
+            & (values != float("inf"))
+            & (values != float("-inf"))
+        ]
+        if values.empty:
+            raise ValueError(f"{dataset.name}: {column} has no numeric values to plot.")
+        return values.astype(float)
+
+    def _statistics_aligned_pair(
+        self,
+        primary_dataset: Dataset,
+        primary_column: str,
+        secondary_dataset: Dataset,
+        secondary_column: str,
+        minimum_points: int,
+    ) -> pd.DataFrame:
+        """Return row-position-aligned numeric values for two columns."""
+        primary_values = self._statistics_numeric_series(primary_dataset, primary_column)
+        secondary_values = self._statistics_numeric_series(secondary_dataset, secondary_column)
+        paired = pd.DataFrame(
+            {
+                "primary": primary_values.reset_index(drop=True),
+                "secondary": secondary_values.reset_index(drop=True),
+            }
+        ).dropna()
+        if len(paired) < minimum_points:
+            raise ValueError(f"Need at least {minimum_points} aligned numeric pair(s) to plot this statistic.")
+        return paired
+
+    @staticmethod
+    def _statistics_numeric_series(dataset: Dataset, column: str) -> pd.Series:
+        """Return a numeric series preserving blanks as NaN for alignment."""
+        if column not in dataset.frame.columns:
+            raise ValueError(f"Column '{column}' is no longer available.")
+        return pd.to_numeric(dataset.frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    @staticmethod
+    def _statistics_column_label(dataset: Dataset, column: str) -> str:
+        """Return a compact label for statistics companion plots."""
+        metadata = dataset.column_metadata.get(column)
+        label = metadata.long_name if metadata is not None and metadata.long_name else column
+        if metadata is not None and metadata.unit:
+            label = f"{label} ({metadata.unit})"
+        return f"{dataset.name}: {label}"
 
     def _manage_custom_fit_models(self) -> None:
         """Open the project custom fit model manager."""
@@ -1135,6 +1954,10 @@ class MainWindow(QMainWindow):
             column_names=[str(column) for column in dataset.frame.columns],
             default_dataset_name=dataset.name,
             custom_models=self._workspace.list_custom_fit_models(),
+            default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
+            default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
+            default_x_weight_column=self._preferred_dataset_column(dataset, ("x_error",), fallback_index=None),
+            default_y_weight_column=self._preferred_dataset_column(dataset, ("y_error", "error"), fallback_index=None),
             parent=self,
         )
         if dialog.exec() != FitDialog.Accepted:
@@ -1366,6 +2189,9 @@ class MainWindow(QMainWindow):
         paste_columns_action.setEnabled(
             has_dataset and self._clipboard_has_dataset_columns()
         )
+        menu.addSeparator()
+        metadata_action = menu.addAction("Column Metadata...")
+        metadata_action.setEnabled(has_dataset)
 
         action = menu.exec(global_pos)
         if action == undo_action:
@@ -1380,6 +2206,8 @@ class MainWindow(QMainWindow):
             self._copy_dataset_columns()
         elif action == paste_columns_action:
             self._paste_dataset_columns(context_column)
+        elif action == metadata_action:
+            self._edit_column_metadata()
 
     def _prepare_dataset_context_cell(self, index: QModelIndex) -> None:
         """Make an unselected right-clicked cell the active selection."""
@@ -1505,7 +2333,13 @@ class MainWindow(QMainWindow):
         writer.writerow(column_names)
         writer.writerows(rows)
 
-        payload = {"headers": column_names, "rows": rows}
+        metadata_payload = [
+            dataset.column_metadata[column_name].to_metadata()
+            if column_name in dataset.column_metadata
+            else {}
+            for column_name in column_names
+        ]
+        payload = {"headers": column_names, "rows": rows, "metadata": metadata_payload}
         mime_data = QMimeData()
         mime_data.setText(output.getvalue().rstrip("\n"))
         mime_data.setData(
@@ -1523,7 +2357,7 @@ class MainWindow(QMainWindow):
         if dataset is None:
             return
 
-        column_names, rows = self._clipboard_dataset_columns()
+        column_names, rows, column_metadata = self._clipboard_dataset_columns()
         if not column_names and not rows:
             return
 
@@ -1543,6 +2377,7 @@ class MainWindow(QMainWindow):
                 position=insert_position,
                 column_names=column_names,
                 rows=rows,
+                column_metadata=column_metadata,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Paste Columns Failed", str(exc))
@@ -1561,10 +2396,10 @@ class MainWindow(QMainWindow):
 
     def _clipboard_has_dataset_columns(self) -> bool:
         """Return whether the clipboard can be pasted as one or more columns."""
-        column_names, rows = self._clipboard_dataset_columns()
+        column_names, rows, _metadata = self._clipboard_dataset_columns()
         return bool(column_names or rows)
 
-    def _clipboard_dataset_columns(self) -> tuple[list[str], list[list[str]]]:
+    def _clipboard_dataset_columns(self) -> tuple[list[str], list[list[str]], list[ColumnMetadata | None]]:
         """Return clipboard content as column headers and row values."""
         mime_data = QApplication.clipboard().mimeData()
         if mime_data is not None and mime_data.hasFormat(_DATASET_COLUMNS_MIME):
@@ -1578,9 +2413,11 @@ class MainWindow(QMainWindow):
             if isinstance(payload, dict):
                 headers = payload.get("headers", [])
                 rows = payload.get("rows", [])
+                metadata_entries = payload.get("metadata", [])
             else:
                 headers = []
                 rows = []
+                metadata_entries = []
 
             if isinstance(headers, list) and isinstance(rows, list):
                 column_names = [str(header) for header in headers]
@@ -1590,16 +2427,21 @@ class MainWindow(QMainWindow):
                         parsed_rows.append(
                             ["" if value is None else str(value) for value in row]
                         )
+                parsed_metadata: list[ColumnMetadata | None] = []
+                if isinstance(metadata_entries, list):
+                    for entry in metadata_entries:
+                        metadata = ColumnMetadata.from_metadata(entry)
+                        parsed_metadata.append(None if metadata.is_empty() else metadata)
                 if column_names or parsed_rows:
-                    return column_names, parsed_rows
+                    return column_names, parsed_rows, parsed_metadata
 
         rows = self._parse_clipboard_text(QApplication.clipboard().text())
         if not rows:
-            return [], []
+            return [], [], []
 
         column_count = max((len(row) for row in rows), default=0)
         column_names = [f"Pasted Column {index + 1}" for index in range(column_count)]
-        return column_names, rows
+        return column_names, rows, []
 
     def _parse_clipboard_text(self, text: str) -> list[list[str]]:
         """Parse tab-delimited clipboard text into rows and cells."""
@@ -1701,10 +2543,20 @@ class MainWindow(QMainWindow):
         if not has_dataset:
             self._dataset_summary.setText("No dataset selected")
         else:
+            dataset.prune_column_metadata()
             formula_count = len(dataset.formulas)
             formula_text = f", {formula_count} formula column(s)" if formula_count else ""
+            metadata_count = len(dataset.column_metadata)
+            role_count = sum(1 for entry in dataset.column_metadata.values() if entry.role)
+            metadata_bits: list[str] = []
+            if metadata_count:
+                metadata_bits.append(f"{metadata_count} metadata column(s)")
+            if role_count:
+                metadata_bits.append(f"{role_count} role(s)")
+            metadata_text = f", {', '.join(metadata_bits)}" if metadata_bits else ""
             self._dataset_summary.setText(
-                f"{dataset.name}: {len(dataset.frame)} rows, {len(dataset.frame.columns)} columns{formula_text}"
+                f"{dataset.name}: {len(dataset.frame)} rows, "
+                f"{len(dataset.frame.columns)} columns{formula_text}{metadata_text}"
             )
 
         self._export_action.setEnabled(has_dataset)
@@ -1715,10 +2567,12 @@ class MainWindow(QMainWindow):
         self._add_column_action.setEnabled(has_dataset)
         self._add_row_action.setEnabled(has_dataset)
         self._insert_column_action.setEnabled(has_dataset)
+        self._column_metadata_action.setEnabled(has_dataset)
         self._insert_row_action.setEnabled(has_dataset)
         self._apply_formula_action.setEnabled(has_dataset)
         self._derivative_action.setEnabled(has_dataset)
         self._integral_action.setEnabled(has_dataset)
+        self._interpolation_action.setEnabled(has_dataset)
         self._fft_action.setEnabled(has_dataset)
         self._ifft_action.setEnabled(has_dataset)
         self._statistics_action.setEnabled(has_dataset)
@@ -1734,6 +2588,7 @@ class MainWindow(QMainWindow):
         self._editor_rename_button.setEnabled(has_dataset)
         self._editor_remove_button.setEnabled(has_dataset)
         self._editor_export_button.setEnabled(has_dataset)
+        self._editor_metadata_button.setEnabled(has_dataset)
         for button in getattr(self, "_analysis_buttons", []):
             button.setEnabled(has_dataset)
         self._undo_action.setEnabled(self._dataset_model.can_undo())
@@ -1751,6 +2606,14 @@ class MainWindow(QMainWindow):
             self._plot_tab_widget.refresh_controls(dataset.name)
         if hasattr(self, "_undo_action"):
             self._update_dataset_summary()
+
+    def _handle_dataset_columns_renamed(self, rename_map: dict[str, str]) -> None:
+        """Retarget plots after undo/redo restores renamed dataset columns."""
+        dataset = self._dataset_model.dataset
+        if dataset is None or not rename_map:
+            return
+        self._workspace.rename_column_references_in_plots(dataset.name, rename_map)
+        self._plot_tab_widget.rename_column_references(dataset.name, rename_map)
 
     def _undo_dataset_edit(self) -> None:
         """Undo the most recent editable dataset operation."""
@@ -1861,6 +2724,75 @@ class MainWindow(QMainWindow):
         if len(selected_columns) == 1:
             return str(dataset.frame.columns[selected_columns[0]])
         return "Result"
+
+    @staticmethod
+    def _preferred_dataset_column(
+        dataset: Dataset,
+        roles: tuple[str, ...],
+        fallback_index: int | None = 0,
+    ) -> str | None:
+        """Return the first column tagged with a role, then an optional fallback position."""
+        wanted = set(roles)
+        for column in dataset.frame.columns:
+            column_name = str(column)
+            metadata = dataset.column_metadata.get(column_name)
+            if metadata is not None and metadata.role in wanted:
+                return column_name
+
+        if fallback_index is None:
+            return None
+        if 0 <= fallback_index < len(dataset.frame.columns):
+            return str(dataset.frame.columns[fallback_index])
+        return None
+
+    @staticmethod
+    def _numeric_column_ranges(dataset: Dataset) -> dict[str, tuple[float, float]]:
+        """Return finite numeric min/max ranges for dataset columns."""
+        ranges: dict[str, tuple[float, float]] = {}
+        for column in dataset.frame.columns:
+            column_name = str(column)
+            values = pd.to_numeric(dataset.frame[column], errors="coerce")
+            values = values[
+                values.notna()
+                & (values != float("inf"))
+                & (values != float("-inf"))
+            ]
+            if values.empty:
+                continue
+            ranges[column_name] = (float(values.min()), float(values.max()))
+        return ranges
+
+    @staticmethod
+    def _apply_interpolation_metadata(
+        source_dataset: Dataset,
+        result_dataset: Dataset,
+        coordinate_columns: list[str],
+        value_column: str,
+    ) -> None:
+        """Copy useful source metadata onto interpolation result columns."""
+        for column_name in coordinate_columns:
+            if column_name not in result_dataset.frame.columns:
+                continue
+            source_metadata = source_dataset.column_metadata.get(column_name)
+            if source_metadata is None:
+                continue
+            result_dataset.column_metadata[column_name] = ColumnMetadata(
+                role=source_metadata.role,
+                unit=source_metadata.unit,
+                long_name=source_metadata.long_name,
+                comment=source_metadata.comment,
+            )
+
+        prediction_column = f"{value_column}_interpolated"
+        if prediction_column not in result_dataset.frame.columns:
+            return
+        value_metadata = source_dataset.column_metadata.get(value_column, ColumnMetadata())
+        result_dataset.column_metadata[prediction_column] = ColumnMetadata(
+            role=value_metadata.role or ("y" if len(coordinate_columns) == 1 else "z"),
+            unit=value_metadata.unit,
+            long_name=f"Interpolated {value_metadata.long_name or value_column}",
+            comment=value_metadata.comment,
+        )
 
     def _selected_dataset_columns(self) -> list[int]:
         """Return sorted column indexes touched by the table selection."""

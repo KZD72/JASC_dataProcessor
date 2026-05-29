@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
@@ -89,6 +89,7 @@ class PlotTab(QWidget):
         self._external_options = external_options
         self._plot_series: list[PlotSeries] = []
         self._plot_locators: list[PlotLocator] = []
+        self._auto_axis_labels: dict[str, str] = {"x": "", "y": "", "right_y": ""}
         self._plot_canvas = PlotCanvas()
         self._build_ui()
 
@@ -117,13 +118,14 @@ class PlotTab(QWidget):
         self._set_combo_items(self._x_dataset_combo, names, selected_dataset)
         self._set_combo_items(self._y_dataset_combo, names, selected_dataset)
         self._set_combo_items(self._z_dataset_combo, names, selected_dataset)
-        self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
-        self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo)
-        self._update_column_combo(self._y_dataset_combo, self._y_column_combo)
-        self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
-        self._update_column_combo(self._z_dataset_combo, self._z_column_combo)
+        self._update_column_combo(self._x_dataset_combo, self._x_column_combo, ("x",))
+        self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo, ("x_error", "error"))
+        self._update_column_combo(self._y_dataset_combo, self._y_column_combo, ("y",))
+        self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo, ("y_error", "error"))
+        self._update_column_combo(self._z_dataset_combo, self._z_column_combo, ("z",))
         self._update_distribution_columns_list()
         self._set_controls_enabled(bool(names))
+        self._prefill_axis_labels_from_plot_context()
 
     def has_plot_series(self) -> bool:
         """Return whether the plot tab has a restorable plot definition."""
@@ -132,6 +134,55 @@ class PlotTab(QWidget):
     def set_active_plot_name(self, name: str | None) -> None:
         """Update the plot header with the active saved plot name."""
         self._active_plot_label.setText(name or "Unsaved plot")
+
+    def rename_column_references(self, dataset_name: str, rename_map: dict[str, str]) -> None:
+        """Update queued series when a dataset column is renamed."""
+        if not rename_map:
+            return
+
+        changed = False
+        updated_series: list[PlotSeries] = []
+        for series in self._plot_series:
+            updates: dict[str, object] = {}
+            if series.x_dataset == dataset_name:
+                updates["x_column"] = rename_map.get(series.x_column, series.x_column)
+                updates["x_err_column"] = rename_map.get(series.x_err_column, series.x_err_column)
+            if series.y_dataset == dataset_name:
+                updates["y_column"] = rename_map.get(series.y_column, series.y_column)
+                updates["y_err_column"] = rename_map.get(series.y_err_column, series.y_err_column)
+                updates["lower_column"] = rename_map.get(series.lower_column, series.lower_column)
+                updates["upper_column"] = rename_map.get(series.upper_column, series.upper_column)
+                updates["distribution_columns"] = tuple(
+                    rename_map.get(column, column)
+                    for column in series.distribution_columns
+                )
+            if series.z_dataset == dataset_name:
+                updates["z_column"] = rename_map.get(series.z_column, series.z_column)
+
+            clean_updates = {
+                key: value
+                for key, value in updates.items()
+                if getattr(series, key) != value
+            }
+            if clean_updates:
+                updated_series.append(replace(series, **clean_updates))
+                changed = True
+            else:
+                updated_series.append(series)
+
+        if not changed:
+            return
+
+        selected_row = self._selected_series_row()
+        self._plot_series = updated_series
+        self._refresh_series_list()
+        self._refresh_locator_series_combo()
+        self.refresh_controls(dataset_name)
+        if selected_row is not None and 0 <= selected_row < len(self._plot_series):
+            self._series_list.setCurrentRow(selected_row)
+            self._load_series_controls(self._plot_series[selected_row])
+        if self._plot_series:
+            self._render_plot(silent_if_empty=True)
 
     def set_plot_actions_enabled(self, can_save: bool, can_load: bool, can_remove: bool) -> None:
         """Set enabled state for plot-level header actions."""
@@ -212,6 +263,7 @@ class PlotTab(QWidget):
         self._refresh_locator_series_combo()
         self.refresh_controls()
         self._select_first_series_for_editing()
+        self._prefill_axis_labels_from_plot_context()
         self._render_plot(silent_if_empty=True)
 
     def queue_fit_plot(
@@ -269,9 +321,10 @@ class PlotTab(QWidget):
         self._locator_list.clear()
         self._refresh_locator_series_combo()
         self._title_edit.setText(f"{model_name} fit")
-        self._x_label_edit.setText(x_column)
-        self._y_label_edit.setText(y_column)
+        self._set_axis_label_text("x", self._column_axis_label(source_dataset.name, x_column))
+        self._set_axis_label_text("y", self._column_axis_label(source_dataset.name, y_column))
         self._right_y_label_edit.setText("Residual" if residual_dataset is not None and show_residuals else "")
+        self._auto_axis_labels["right_y"] = self._right_y_label_edit.text().strip()
         self.refresh_controls(fit_dataset.name)
         self._select_first_series_for_editing()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
@@ -316,9 +369,9 @@ class PlotTab(QWidget):
         self._locator_list.clear()
         self._refresh_locator_series_combo()
         self._title_edit.setText(title)
-        self._x_label_edit.setText(x_column)
-        self._y_label_edit.setText(source_column)
-        self._right_y_label_edit.setText(result_column)
+        self._set_axis_label_text("x", self._column_axis_label(dataset.name, x_column))
+        self._set_axis_label_text("y", self._column_axis_label(dataset.name, source_column))
+        self._set_axis_label_text("right_y", self._column_axis_label(dataset.name, result_column))
         self.refresh_controls(dataset.name)
         self._select_first_series_for_editing()
         self._render_plot(silent_if_empty=True)
@@ -350,11 +403,33 @@ class PlotTab(QWidget):
         self._locator_list.clear()
         self._refresh_locator_series_combo()
         self._title_edit.setText(title)
-        self._x_label_edit.setText(x_column)
-        self._y_label_edit.setText(y_column)
-        self._right_y_label_edit.clear()
+        self._prefill_axis_labels_for_series(self._plot_series[0], force=True)
         self.refresh_controls(dataset.name)
         self._select_first_series_for_editing()
+        self._render_plot(silent_if_empty=True)
+
+    def queue_plot_series(
+        self,
+        series: list[PlotSeries],
+        title: str,
+        x_label: str = "",
+        y_label: str = "",
+        right_y_label: str = "",
+        selected_dataset_name: str | None = None,
+    ) -> None:
+        """Replace the plot queue with prebuilt series and axis labels."""
+        self._plot_series = list(series)
+        self._plot_locators.clear()
+        self._refresh_series_list()
+        self._locator_list.clear()
+        self._refresh_locator_series_combo()
+        self._title_edit.setText(title)
+        self._set_axis_label_text("x", x_label)
+        self._set_axis_label_text("y", y_label)
+        self._set_axis_label_text("right_y", right_y_label)
+        self.refresh_controls(selected_dataset_name)
+        self._select_first_series_for_editing()
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self._render_plot(silent_if_empty=True)
 
     # -- UI construction ----------------------------------------------------
@@ -688,26 +763,35 @@ class PlotTab(QWidget):
             layout.addWidget(self._plot_splitter)
 
         self._x_dataset_combo.currentTextChanged.connect(
-            lambda: self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
+            lambda: self._update_column_combo(self._x_dataset_combo, self._x_column_combo, ("x",))
         )
         self._x_dataset_combo.currentTextChanged.connect(
-            lambda: self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo)
+            lambda: self._update_error_column_combo(
+                self._x_dataset_combo,
+                self._x_err_column_combo,
+                ("x_error", "error"),
+            )
         )
         self._y_dataset_combo.currentTextChanged.connect(
-            lambda: self._update_column_combo(self._y_dataset_combo, self._y_column_combo)
+            lambda: self._update_column_combo(self._y_dataset_combo, self._y_column_combo, ("y",))
         )
         self._y_dataset_combo.currentTextChanged.connect(
-            lambda: self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
+            lambda: self._update_error_column_combo(
+                self._y_dataset_combo,
+                self._y_err_column_combo,
+                ("y_error", "error"),
+            )
         )
         self._y_dataset_combo.currentTextChanged.connect(self._update_distribution_columns_list)
         self._z_dataset_combo.currentTextChanged.connect(
-            lambda: self._update_column_combo(self._z_dataset_combo, self._z_column_combo)
+            lambda: self._update_column_combo(self._z_dataset_combo, self._z_column_combo, ("z",))
         )
         self._plot_type_combo.currentIndexChanged.connect(self._apply_plot_type_defaults)
         self._style_preset_combo.currentIndexChanged.connect(self._render_plot_if_possible)
         self._style_cycle_combo.currentIndexChanged.connect(self._render_plot_if_possible)
         self._style_latex_checkbox.toggled.connect(self._render_plot_if_possible)
         self._style_custom_edit.editingFinished.connect(self._render_plot_if_possible)
+        self._connect_axis_label_prefill_signals()
         self._update_plot_type_option_visibility()
         self.refresh_controls()
 
@@ -799,17 +883,53 @@ class PlotTab(QWidget):
             label_widget = form.labelForField(field)
         self._series_rows[key] = (label_widget, field)
 
-    def _update_column_combo(self, ds_combo: QComboBox, col_combo: QComboBox) -> None:
+    def _connect_axis_label_prefill_signals(self) -> None:
+        """Refresh axis-label suggestions when series controls change."""
+        for combo in (
+            self._plot_type_combo,
+            self._x_dataset_combo,
+            self._x_column_combo,
+            self._y_dataset_combo,
+            self._y_column_combo,
+            self._z_dataset_combo,
+            self._z_column_combo,
+            self._y_axis_combo,
+        ):
+            combo.currentIndexChanged.connect(
+                lambda _index=0: self._prefill_axis_labels_from_plot_context()
+            )
+            combo.currentTextChanged.connect(
+                lambda _text="": self._prefill_axis_labels_from_plot_context()
+            )
+        self._histogram_density_checkbox.toggled.connect(
+            lambda _checked=False: self._prefill_axis_labels_from_plot_context()
+        )
+        self._distribution_columns_list.itemSelectionChanged.connect(
+            self._prefill_axis_labels_from_plot_context
+        )
+
+    def _update_column_combo(
+        self,
+        ds_combo: QComboBox,
+        col_combo: QComboBox,
+        preferred_roles: tuple[str, ...] = (),
+    ) -> None:
         """Refresh a column combo from the dataset currently selected beside it."""
         name = ds_combo.currentText()
         cols: list[str] = []
+        preferred: str | None = None
         if name:
             try:
                 ds = self._workspace.get_dataset(name)
                 cols = [str(c) for c in ds.frame.columns]
+                current = col_combo.currentText()
+                if current and current in cols:
+                    preferred = current
+                else:
+                    preferred = self._preferred_column_for_roles(ds, preferred_roles)
             except KeyError:
                 pass
-        self._set_combo_items(col_combo, cols)
+        self._set_combo_items(col_combo, cols, preferred)
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
 
     def _update_distribution_columns_list(self) -> None:
@@ -841,17 +961,42 @@ class PlotTab(QWidget):
         self._distribution_columns_list.blockSignals(False)
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
 
-    def _update_error_column_combo(self, ds_combo: QComboBox, col_combo: QComboBox) -> None:
+    def _update_error_column_combo(
+        self,
+        ds_combo: QComboBox,
+        col_combo: QComboBox,
+        preferred_roles: tuple[str, ...] = (),
+    ) -> None:
         """Refresh an error column combo, allowing a blank 'no error' selection."""
         name = ds_combo.currentText()
         cols: list[str] = [""]
+        preferred: str | None = None
         if name:
             try:
                 ds = self._workspace.get_dataset(name)
-                cols.extend([str(c) for c in ds.frame.columns])
+                dataset_columns = [str(c) for c in ds.frame.columns]
+                cols.extend(dataset_columns)
+                current = col_combo.currentText()
+                if current and current in cols:
+                    preferred = current
+                else:
+                    preferred = self._preferred_column_for_roles(ds, preferred_roles)
             except KeyError:
                 pass
-        self._set_combo_items(col_combo, cols)
+        self._set_combo_items(col_combo, cols, preferred)
+
+    @staticmethod
+    def _preferred_column_for_roles(dataset: Dataset, roles: tuple[str, ...]) -> str | None:
+        """Return the first column tagged with any preferred role."""
+        if not roles:
+            return None
+        wanted = set(roles)
+        for column in dataset.frame.columns:
+            column_name = str(column)
+            metadata = dataset.column_metadata.get(column_name)
+            if metadata is not None and metadata.role in wanted:
+                return column_name
+        return None
 
     @staticmethod
     def _set_combo_items(combo: QComboBox, items: list[str], preferred: str | None = None) -> None:
@@ -991,6 +1136,7 @@ class PlotTab(QWidget):
         self._set_combo_data(self._style_cycle_combo, str(state.get("plot_style_cycle", "")))
         self._style_latex_checkbox.setChecked(bool(state.get("plot_style_use_latex", False)))
         self._style_custom_edit.setText(self._setting_text(state, "plot_style_custom"))
+        self._auto_axis_labels = {"x": "", "y": "", "right_y": ""}
 
     @staticmethod
     def _setting_text(state: dict[str, object], key: str) -> str:
@@ -1397,6 +1543,98 @@ class PlotTab(QWidget):
         for i, loc in enumerate(self._plot_locators):
             self._locator_list.addItem(self._locator_text(loc, by_idx.get(i)))
 
+    # -- axis label prefill -------------------------------------------------
+
+    def _prefill_axis_labels_from_plot_context(self) -> None:
+        """Fill blank/auto axis-label fields from metadata-visible plot context."""
+        if len(self._plot_series) == 1:
+            self._prefill_axis_labels_for_series(self._plot_series[0])
+        elif not self._plot_series and self._workspace.dataset_names():
+            self._prefill_axis_labels_for_series(self._series_from_controls())
+
+    def _prefill_axis_labels_for_series(
+        self,
+        series: PlotSeries,
+        force: bool = False,
+    ) -> None:
+        """Fill axis labels from one series without overwriting manual edits."""
+        x_label, y_label, right_y_label = self._suggested_axis_labels_for_series(series)
+        self._set_axis_label_if_auto("x", x_label, force=force)
+        self._set_axis_label_if_auto("y", y_label, force=force)
+        self._set_axis_label_if_auto("right_y", right_y_label, force=force)
+
+    def _suggested_axis_labels_for_series(self, series: PlotSeries) -> tuple[str, str, str]:
+        """Return X, left-Y, and right-Y axis labels suggested by metadata."""
+        x_label = ""
+        y_label = ""
+        right_y_label = ""
+
+        if series.plot_type == "histogram":
+            x_label = self._column_axis_label(series.y_dataset, series.y_column)
+            y_label = "Density" if series.histogram_density else "Count"
+        elif series.plot_type in {"box", "violin"}:
+            x_label = "Column"
+            y_label = "Value"
+        elif series.plot_type in _SURFACE_PLOT_TYPES:
+            x_label = self._column_axis_label(series.x_dataset, series.x_column)
+            y_label = self._column_axis_label(series.y_dataset, series.y_column)
+        elif series.plot_type == "barh":
+            x_label = self._column_axis_label(series.y_dataset, series.y_column)
+            y_label = self._column_axis_label(series.x_dataset, series.x_column)
+        else:
+            x_label = self._column_axis_label(series.x_dataset, series.x_column)
+            if series.y_axis == "right":
+                right_y_label = self._column_axis_label(series.y_dataset, series.y_column)
+            else:
+                y_label = self._column_axis_label(series.y_dataset, series.y_column)
+
+        return x_label, y_label, right_y_label
+
+    def _set_axis_label_text(self, key: str, text: str) -> None:
+        """Force an axis-label field and remember it as an automatic label."""
+        edit = self._axis_label_edit(key)
+        edit.setText(text)
+        edit.setPlaceholderText(text)
+        self._auto_axis_labels[key] = text.strip()
+
+    def _set_axis_label_if_auto(
+        self,
+        key: str,
+        suggested_text: str,
+        force: bool = False,
+    ) -> None:
+        """Set an axis label only when the field is blank or still auto-filled."""
+        edit = self._axis_label_edit(key)
+        suggested = suggested_text.strip()
+        current = edit.text().strip()
+        previous_auto = self._auto_axis_labels.get(key, "")
+        edit.setPlaceholderText(suggested)
+
+        if force:
+            edit.setText(suggested)
+            self._auto_axis_labels[key] = suggested
+            return
+
+        if not suggested:
+            if previous_auto and current == previous_auto:
+                edit.clear()
+            self._auto_axis_labels[key] = ""
+            return
+
+        if not current or current == previous_auto:
+            edit.setText(suggested)
+        self._auto_axis_labels[key] = suggested
+
+    def _axis_label_edit(self, key: str) -> QLineEdit:
+        """Return the QLineEdit backing an axis label key."""
+        if key == "x":
+            return self._x_label_edit
+        if key == "y":
+            return self._y_label_edit
+        if key == "right_y":
+            return self._right_y_label_edit
+        raise KeyError(f"Unknown axis label key: {key}")
+
     # -- rendering ----------------------------------------------------------
 
     def _render_plot_if_possible(self) -> None:
@@ -1413,32 +1651,33 @@ class PlotTab(QWidget):
                 QMessageBox.information(self, "Plot", "Add at least one series before plotting.")
             return
 
+        self._prefill_axis_labels_from_plot_context()
         x_label = self._x_label_edit.text().strip()
         y_label = self._y_label_edit.text().strip()
         ry_label = self._right_y_label_edit.text().strip()
         if len(self._plot_series) == 1:
             s0 = self._plot_series[0]
             if s0.plot_type == "histogram":
-                x_label = x_label or s0.y_column
+                x_label = x_label or self._column_axis_label(s0.y_dataset, s0.y_column)
                 y_label = y_label or ("Density" if s0.histogram_density else "Count")
             elif s0.plot_type in {"box", "violin"}:
                 x_label = x_label or "Column"
                 y_label = y_label or "Value"
             elif s0.plot_type in _SURFACE_PLOT_TYPES:
-                x_label = x_label or s0.x_column
-                y_label = y_label or s0.y_column
+                x_label = x_label or self._column_axis_label(s0.x_dataset, s0.x_column)
+                y_label = y_label or self._column_axis_label(s0.y_dataset, s0.y_column)
             elif s0.plot_type == "barh":
-                x_label = x_label or s0.y_column
-                y_label = y_label or s0.x_column
+                x_label = x_label or self._column_axis_label(s0.y_dataset, s0.y_column)
+                y_label = y_label or self._column_axis_label(s0.x_dataset, s0.x_column)
             else:
-                x_label = x_label or s0.x_column
+                x_label = x_label or self._column_axis_label(s0.x_dataset, s0.x_column)
             non_y_axis_types = {"histogram", "barh", "box", "violin"} | _SURFACE_PLOT_TYPES
             if s0.plot_type in non_y_axis_types:
                 pass
             elif s0.y_axis == "right":
-                ry_label = ry_label or s0.y_column
+                ry_label = ry_label or self._column_axis_label(s0.y_dataset, s0.y_column)
             else:
-                y_label = y_label or s0.y_column
+                y_label = y_label or self._column_axis_label(s0.y_dataset, s0.y_column)
 
         inputs, errors = self._plot_inputs()
         if errors:
@@ -1470,6 +1709,23 @@ class PlotTab(QWidget):
             self.status_message.emit(f"Plotted {result.plotted_count} series")
 
         self.plot_rendered.emit()
+
+    def _column_axis_label(self, dataset_name: str, column_name: str) -> str:
+        """Return a plot label using long-name/unit metadata when available."""
+        label = column_name
+        try:
+            dataset = self._workspace.get_dataset(dataset_name)
+        except KeyError:
+            return label
+
+        metadata = dataset.column_metadata.get(column_name)
+        if metadata is None:
+            return label
+        if metadata.long_name:
+            label = metadata.long_name
+        if metadata.unit:
+            label = f"{label} ({metadata.unit})"
+        return label
 
     # -- label helpers (bug fix: reads from series data, not combo state) ---
 
