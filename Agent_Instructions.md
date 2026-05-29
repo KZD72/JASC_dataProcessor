@@ -43,4 +43,15 @@ Implement a robust fitting module using `scipy.optimize.curve_fit`. The UI must 
 - **Type Hinting**: Use Python type hints for all function signatures.
 - **Error Handling**: Use `try/except` blocks to handle malformed data, failed curve fits (`OptimizeWarning`), or unreadable files gracefully. Use PySide6 `QMessageBox` to inform the user of errors without crashing.
 - **Documentation**: Write clear docstrings for complex math operations.
-- **Session Continuity**: Always refer to `ChangeLog_Session.md` before starting new tasks, and update it before ending your response.
+- **Session Continuity**: Always refer to `ChangeLog_Session.md` and `Roadmap.md` before starting new tasks, and update the changelog before ending your response.
+
+## 4. Current Handoff Notes
+- Current roadmap focus is Phase 2A Plot Type Expansion plus the newly added Origin/SigmaPlot competitive roadmap. Start with Competitive Stage 0 stabilization before large new feature families.
+- The competitive roadmap in `Roadmap.md` was added after reviewing official Origin/OriginPro and SigmaPlot v16 feature areas on 2026-05-29. If those comparisons are updated later, re-check official vendor pages and refresh the source links in `Roadmap.md`.
+- Phase 2A subphase 4 (pie/donut charts with label/value roles, percentage controls, exploded slice controls, and saved-state persistence) remains the next plot-type implementation target after verification.
+- Longer-term competitive direction is now staged as: stabilization/test harness, workbook metadata and column roles, import/export connectors, data-prep workbench, graph templates/layout, analysis expansion, advanced statistics, global/peak/surface fitting, recalculation/templates/batch processing, reporting/export, and performance/packaging/plugins.
+- New 2D-map request: Phase 2A subphase 5 foundation has started with Interpolated Heatmap, Contour, and Filled Contour plot types from X/Y/Z coordinate columns.
+- Interpolated 2D maps expose linear, cubic spline, and piecewise cubic interpolation; coordinate locators accept X and Y inputs and report predicted Z/value results. Remaining follow-ups include regular-grid heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, and contour-level controls.
+- The Data Editor now has a right-click context menu on cells and horizontal column headers. Keep Undo/Redo, value copy/paste, and whole-column copy/paste wired through the existing `DataFrameTableModel` history so `Ctrl+Z`/`Ctrl+Y` remains consistent.
+- Whole-column copy/paste uses the custom Qt MIME type `application/x-jasc-dataframe-columns` to preserve headers for in-app copies, with tab-delimited text fallback for external spreadsheet clipboard data.
+- A usable Python interpreter is not currently available in the Codex shell; `python`/`python3` resolve to Microsoft Store stubs and `py` is not installed. Re-run compile/import and Qt smoke checks once Python is activated or installed.

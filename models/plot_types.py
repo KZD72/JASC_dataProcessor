@@ -55,6 +55,31 @@ PLOT_TYPES: dict[str, PlotType] = {
         label="Histogram",
         description="Distribution plot from the selected Y/value column.",
     ),
+    "box": PlotType(
+        key="box",
+        label="Box Plot",
+        description="Distribution comparison across one or more numeric columns.",
+    ),
+    "violin": PlotType(
+        key="violin",
+        label="Violin Plot",
+        description="Kernel-density distribution comparison across one or more numeric columns.",
+    ),
+    "heatmap": PlotType(
+        key="heatmap",
+        label="Interpolated Heatmap",
+        description="2D X/Y/Z coordinate map interpolated onto a regular grid.",
+    ),
+    "contour": PlotType(
+        key="contour",
+        label="Contour",
+        description="Interpolated 2D contour lines from X/Y/Z coordinate data.",
+    ),
+    "contourf": PlotType(
+        key="contourf",
+        label="Filled Contour",
+        description="Interpolated filled contour map from X/Y/Z coordinate data.",
+    ),
 }
 
 

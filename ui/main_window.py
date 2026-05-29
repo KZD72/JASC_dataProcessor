@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import re
+from io import StringIO
 from pathlib import Path
 
 import pandas as pd
-from PySide6.QtCore import QModelIndex, Qt
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import (
+    QByteArray,
+    QItemSelection,
+    QItemSelectionModel,
+    QModelIndex,
+    QMimeData,
+    Qt,
+)
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDockWidget,
     QFileDialog,
     QHBoxLayout,
@@ -59,6 +70,9 @@ from ui.dialogs import (
 from ui.plot_tab import PlotTab
 
 
+_DATASET_COLUMNS_MIME = "application/x-jasc-dataframe-columns"
+
+
 class MainWindow(QMainWindow):
     """Primary application shell for data ingestion, editing, and plotting workflows."""
 
@@ -94,6 +108,8 @@ class MainWindow(QMainWindow):
         self._dataset_table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self._dataset_table.setSortingEnabled(False)
         self._dataset_table.doubleClicked.connect(self._edit_dataset_cell)
+        self._install_dataset_clipboard_shortcuts()
+        self._install_dataset_context_menu()
         self._dataset_summary = QLabel("No dataset selected")
 
         # Plot state moved to PlotTab
@@ -187,8 +203,12 @@ class MainWindow(QMainWindow):
 
         self._editor_add_row_button = QPushButton("Add Row")
         self._editor_add_row_button.clicked.connect(self._add_empty_row)
+        self._editor_insert_row_button = QPushButton("Insert Row")
+        self._editor_insert_row_button.clicked.connect(self._insert_empty_row)
         self._editor_add_column_button = QPushButton("Add Column")
         self._editor_add_column_button.clicked.connect(self._add_empty_column)
+        self._editor_insert_column_button = QPushButton("Insert Column")
+        self._editor_insert_column_button.clicked.connect(self._insert_empty_column)
         self._editor_delete_rows_button = QPushButton("Delete Rows")
         self._editor_delete_rows_button.clicked.connect(self._delete_selected_rows)
         self._editor_delete_columns_button = QPushButton("Delete Columns")
@@ -202,8 +222,9 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout(panel)
         layout.addWidget(self._dataset_summary)
-        layout.addLayout(self._button_row(self._editor_add_row_button, self._editor_delete_rows_button))
-        layout.addLayout(self._button_row(self._editor_add_column_button, self._editor_delete_columns_button))
+        layout.addLayout(self._button_row(self._editor_add_row_button, self._editor_insert_row_button))
+        layout.addLayout(self._button_row(self._editor_delete_rows_button, self._editor_delete_columns_button))
+        layout.addLayout(self._button_row(self._editor_add_column_button, self._editor_insert_column_button))
         layout.addLayout(self._button_row(self._editor_rename_button, self._editor_remove_button))
         layout.addWidget(self._editor_export_button)
         layout.addStretch(1)
@@ -261,6 +282,27 @@ class MainWindow(QMainWindow):
         row.addWidget(left_button)
         row.addWidget(right_button)
         return row
+
+    def _install_dataset_clipboard_shortcuts(self) -> None:
+        """Bind spreadsheet-style copy/paste shortcuts for the dataset editor."""
+        self._dataset_copy_shortcut = QShortcut(QKeySequence.Copy, self._dataset_table)
+        self._dataset_copy_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._dataset_copy_shortcut.activated.connect(self._copy_dataset_selection)
+
+        self._dataset_paste_shortcut = QShortcut(QKeySequence.Paste, self._dataset_table)
+        self._dataset_paste_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._dataset_paste_shortcut.activated.connect(self._paste_dataset_clipboard)
+
+    def _install_dataset_context_menu(self) -> None:
+        """Bind right-click menus for dataset value and column editing."""
+        self._dataset_table.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self._dataset_table.viewport().customContextMenuRequested.connect(
+            self._show_dataset_table_context_menu
+        )
+        self._dataset_table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self._dataset_table.horizontalHeader().customContextMenuRequested.connect(
+            self._show_dataset_header_context_menu
+        )
 
     def _build_dataset_editor(self) -> QWidget:
         """Build the central dataset table editor."""
@@ -358,8 +400,14 @@ class MainWindow(QMainWindow):
         add_column_action = data_menu.addAction("&Add Column...")
         add_column_action.triggered.connect(self._add_empty_column)
 
+        insert_column_action = data_menu.addAction("&Insert Column...")
+        insert_column_action.triggered.connect(self._insert_empty_column)
+
         add_row_action = data_menu.addAction("Add &Row")
         add_row_action.triggered.connect(self._add_empty_row)
+
+        insert_row_action = data_menu.addAction("&Insert Row")
+        insert_row_action.triggered.connect(self._insert_empty_row)
 
         apply_formula_action = data_menu.addAction("&Apply Formula...")
         apply_formula_action.setShortcut("Ctrl+Shift+F")
@@ -424,6 +472,7 @@ class MainWindow(QMainWindow):
         self._rename_dataset_action = rename_dataset_action
         self._delete_dataset_action = delete_dataset_action
         self._add_column_action = add_column_action
+        self._insert_column_action = insert_column_action
         self._apply_formula_action = apply_formula_action
         self._derivative_action = derivative_action
         self._integral_action = integral_action
@@ -437,6 +486,7 @@ class MainWindow(QMainWindow):
         self._load_plot_action = load_plot_action
         self._delete_plot_action = delete_plot_action
         self._add_row_action = add_row_action
+        self._insert_row_action = insert_row_action
         self._show_sidebar_action = show_sidebar_action
         self._show_workspace_action = show_workspace_action
         self._show_plots_action = show_plots_action
@@ -703,6 +753,37 @@ class MainWindow(QMainWindow):
         self._select_column(final_name)
         self.statusBar().showMessage(f"Added column '{final_name}' to {dataset.name}")
 
+    def _insert_empty_column(self) -> None:
+        """Prompt for and insert an empty column before the current selection."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(self, "Insert Column", "Select a dataset before inserting a column.")
+            return
+
+        selected_columns = self._selected_dataset_columns()
+        insert_position = selected_columns[0] if selected_columns else len(dataset.frame.columns)
+        column_name, accepted = QInputDialog.getText(
+            self,
+            "Insert Column",
+            "Column name",
+            text="New Column",
+        )
+        if not accepted:
+            return
+
+        try:
+            final_name = self._dataset_model.insert_empty_column(insert_position, column_name)
+        except Exception as exc:
+            QMessageBox.critical(self, "Insert Column Failed", str(exc))
+            return
+
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self._update_dataset_summary()
+        self._select_column(final_name)
+        self.statusBar().showMessage(
+            f"Inserted column '{final_name}' in {dataset.name}"
+        )
+
     def _add_empty_row(self) -> None:
         """Append an empty row to the selected dataset."""
         dataset = self._current_dataset()
@@ -710,9 +791,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Add Row", "Select a dataset before adding a row.")
             return
 
+        insert_position = len(dataset.frame)
         self._dataset_model.add_row()
         self._update_dataset_summary()
+        if len(dataset.frame.columns) > 0:
+            self._select_dataset_range(insert_position, 0, 1, len(dataset.frame.columns))
         self.statusBar().showMessage(f"Added empty row to {dataset.name}")
+
+    def _insert_empty_row(self) -> None:
+        """Insert an empty row before the current row selection."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(self, "Insert Row", "Select a dataset before inserting a row.")
+            return
+
+        selected_rows = self._selected_dataset_rows()
+        insert_position = selected_rows[0] if selected_rows else len(dataset.frame)
+        inserted_row = self._dataset_model.insert_row(insert_position)
+        self._update_dataset_summary()
+        if inserted_row >= 0 and len(dataset.frame.columns) > 0:
+            self._select_dataset_range(inserted_row, 0, 1, len(dataset.frame.columns))
+        self.statusBar().showMessage(f"Inserted empty row in {dataset.name}")
 
     def _apply_column_formula(self) -> None:
         """Apply a safe expression to all or selected rows in a column."""
@@ -1217,6 +1316,359 @@ class MainWindow(QMainWindow):
         """Start editing the double-clicked table cell."""
         self._dataset_table.edit(index)
 
+    def _show_dataset_table_context_menu(self, pos) -> None:
+        """Show edit actions for the dataset table body."""
+        index = self._dataset_table.indexAt(pos)
+        self._prepare_dataset_context_cell(index)
+        context_column = index.column() if index.isValid() else None
+        self._show_dataset_editor_context_menu(
+            self._dataset_table.viewport().mapToGlobal(pos),
+            context_column,
+        )
+
+    def _show_dataset_header_context_menu(self, pos) -> None:
+        """Show edit actions for the dataset table header."""
+        header = self._dataset_table.horizontalHeader()
+        column_index = header.logicalIndexAt(pos)
+        if column_index >= 0:
+            self._prepare_dataset_context_column(column_index)
+        context_column = column_index if column_index >= 0 else None
+        self._show_dataset_editor_context_menu(header.mapToGlobal(pos), context_column)
+
+    def _show_dataset_editor_context_menu(
+        self,
+        global_pos,
+        context_column: int | None = None,
+    ) -> None:
+        """Show undo/redo and clipboard actions for the dataset editor."""
+        dataset = self._current_dataset()
+        has_dataset = dataset is not None
+        has_selection = bool(self._selected_dataset_indexes())
+        has_columns = bool(self._selected_dataset_columns())
+        has_clipboard_text = bool(
+            self._parse_clipboard_text(QApplication.clipboard().text())
+        )
+
+        menu = QMenu(self)
+        undo_action = menu.addAction("Undo")
+        undo_action.setEnabled(self._dataset_model.can_undo())
+        redo_action = menu.addAction("Redo")
+        redo_action.setEnabled(self._dataset_model.can_redo())
+        menu.addSeparator()
+        copy_values_action = menu.addAction("Copy Values")
+        copy_values_action.setEnabled(has_dataset and has_selection)
+        paste_values_action = menu.addAction("Paste Values")
+        paste_values_action.setEnabled(has_dataset and has_clipboard_text)
+        menu.addSeparator()
+        copy_columns_action = menu.addAction("Copy Column(s)")
+        copy_columns_action.setEnabled(has_dataset and has_columns)
+        paste_columns_action = menu.addAction("Paste Column(s)")
+        paste_columns_action.setEnabled(
+            has_dataset and self._clipboard_has_dataset_columns()
+        )
+
+        action = menu.exec(global_pos)
+        if action == undo_action:
+            self._undo_dataset_edit()
+        elif action == redo_action:
+            self._redo_dataset_edit()
+        elif action == copy_values_action:
+            self._copy_dataset_selection()
+        elif action == paste_values_action:
+            self._paste_dataset_clipboard()
+        elif action == copy_columns_action:
+            self._copy_dataset_columns()
+        elif action == paste_columns_action:
+            self._paste_dataset_columns(context_column)
+
+    def _prepare_dataset_context_cell(self, index: QModelIndex) -> None:
+        """Make an unselected right-clicked cell the active selection."""
+        if not index.isValid():
+            return
+
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None or selection_model.isSelected(index):
+            return
+
+        self._dataset_table.setCurrentIndex(index)
+        selection_model.select(index, QItemSelectionModel.ClearAndSelect)
+
+    def _prepare_dataset_context_column(self, column_index: int) -> None:
+        """Make an unselected right-clicked header column the active selection."""
+        selected_columns = self._selected_dataset_columns()
+        if column_index in selected_columns:
+            return
+
+        self._dataset_table.clearSelection()
+        self._dataset_table.selectColumn(column_index)
+        if self._dataset_model.rowCount() > 0:
+            self._dataset_table.setCurrentIndex(
+                self._dataset_model.index(0, column_index)
+            )
+
+    def _copy_dataset_selection(self) -> None:
+        """Copy selected dataset cells as tab-delimited clipboard text."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            return
+
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None:
+            return
+
+        selected_indexes = selection_model.selectedIndexes()
+        if not selected_indexes:
+            return
+
+        selected_cells = {(index.row(), index.column()) for index in selected_indexes}
+        min_row = min(row for row, _column in selected_cells)
+        max_row = max(row for row, _column in selected_cells)
+        min_column = min(column for _row, column in selected_cells)
+        max_column = max(column for _row, column in selected_cells)
+
+        output = StringIO()
+        writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+        for row_index in range(min_row, max_row + 1):
+            row_values: list[str] = []
+            for column_index in range(min_column, max_column + 1):
+                if (row_index, column_index) not in selected_cells:
+                    row_values.append("")
+                    continue
+                value = dataset.frame.iat[row_index, column_index]
+                row_values.append("" if pd.isna(value) else str(value))
+            writer.writerow(row_values)
+
+        QApplication.clipboard().setText(output.getvalue().rstrip("\n"))
+        self.statusBar().showMessage(
+            f"Copied {len(selected_cells)} cell(s) from {dataset.name}"
+        )
+
+    def _paste_dataset_clipboard(self) -> None:
+        """Paste tab-delimited clipboard text into the selected dataset editor cell."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            return
+
+        rows = self._parse_clipboard_text(QApplication.clipboard().text())
+        if not rows:
+            return
+
+        current_index = self._dataset_table.currentIndex()
+        start_row = current_index.row() if current_index.isValid() else 0
+        start_column = current_index.column() if current_index.isValid() else 0
+
+        try:
+            pasted_rows, pasted_columns = self._dataset_model.paste_block(
+                start_row=start_row,
+                start_column=start_column,
+                rows=rows,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Paste Failed", str(exc))
+            return
+
+        self._dataset_table.resizeColumnsToContents()
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self._update_dataset_summary()
+        if pasted_rows and pasted_columns:
+            self._select_dataset_range(
+                start_row=max(start_row, 0),
+                start_column=max(start_column, 0),
+                row_count=pasted_rows,
+                column_count=pasted_columns,
+            )
+            self.statusBar().showMessage(
+                f"Pasted {pasted_rows} row(s) x {pasted_columns} column(s) into {dataset.name}"
+            )
+
+    def _copy_dataset_columns(self) -> None:
+        """Copy complete selected dataset columns, including their headers."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            return
+
+        selected_columns = self._selected_dataset_columns()
+        if not selected_columns:
+            return
+
+        column_names = [str(dataset.frame.columns[column]) for column in selected_columns]
+        rows: list[list[str]] = []
+        for row_index in range(len(dataset.frame)):
+            row_values: list[str] = []
+            for column_index in selected_columns:
+                value = dataset.frame.iat[row_index, column_index]
+                row_values.append("" if pd.isna(value) else str(value))
+            rows.append(row_values)
+
+        output = StringIO()
+        writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+        writer.writerow(column_names)
+        writer.writerows(rows)
+
+        payload = {"headers": column_names, "rows": rows}
+        mime_data = QMimeData()
+        mime_data.setText(output.getvalue().rstrip("\n"))
+        mime_data.setData(
+            _DATASET_COLUMNS_MIME,
+            QByteArray(json.dumps(payload).encode("utf-8")),
+        )
+        QApplication.clipboard().setMimeData(mime_data)
+        self.statusBar().showMessage(
+            f"Copied {len(selected_columns)} column(s) from {dataset.name}"
+        )
+
+    def _paste_dataset_columns(self, preferred_position: int | None = None) -> None:
+        """Paste clipboard data as new whole columns before the current column."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            return
+
+        column_names, rows = self._clipboard_dataset_columns()
+        if not column_names and not rows:
+            return
+
+        selected_columns = self._selected_dataset_columns()
+        current_index = self._dataset_table.currentIndex()
+        if selected_columns:
+            insert_position = selected_columns[0]
+        elif preferred_position is not None:
+            insert_position = preferred_position
+        elif current_index.isValid():
+            insert_position = current_index.column()
+        else:
+            insert_position = len(dataset.frame.columns)
+
+        try:
+            inserted_columns = self._dataset_model.insert_columns(
+                position=insert_position,
+                column_names=column_names,
+                rows=rows,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Paste Columns Failed", str(exc))
+            return
+
+        if not inserted_columns:
+            return
+
+        self._dataset_table.resizeColumnsToContents()
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self._update_dataset_summary()
+        self._select_dataset_column_range(insert_position, len(inserted_columns))
+        self.statusBar().showMessage(
+            f"Pasted {len(inserted_columns)} column(s) into {dataset.name}"
+        )
+
+    def _clipboard_has_dataset_columns(self) -> bool:
+        """Return whether the clipboard can be pasted as one or more columns."""
+        column_names, rows = self._clipboard_dataset_columns()
+        return bool(column_names or rows)
+
+    def _clipboard_dataset_columns(self) -> tuple[list[str], list[list[str]]]:
+        """Return clipboard content as column headers and row values."""
+        mime_data = QApplication.clipboard().mimeData()
+        if mime_data is not None and mime_data.hasFormat(_DATASET_COLUMNS_MIME):
+            try:
+                payload = json.loads(
+                    bytes(mime_data.data(_DATASET_COLUMNS_MIME)).decode("utf-8")
+                )
+            except (TypeError, UnicodeDecodeError, ValueError):
+                payload = {}
+
+            if isinstance(payload, dict):
+                headers = payload.get("headers", [])
+                rows = payload.get("rows", [])
+            else:
+                headers = []
+                rows = []
+
+            if isinstance(headers, list) and isinstance(rows, list):
+                column_names = [str(header) for header in headers]
+                parsed_rows: list[list[str]] = []
+                for row in rows:
+                    if isinstance(row, list):
+                        parsed_rows.append(
+                            ["" if value is None else str(value) for value in row]
+                        )
+                if column_names or parsed_rows:
+                    return column_names, parsed_rows
+
+        rows = self._parse_clipboard_text(QApplication.clipboard().text())
+        if not rows:
+            return [], []
+
+        column_count = max((len(row) for row in rows), default=0)
+        column_names = [f"Pasted Column {index + 1}" for index in range(column_count)]
+        return column_names, rows
+
+    def _parse_clipboard_text(self, text: str) -> list[list[str]]:
+        """Parse tab-delimited clipboard text into rows and cells."""
+        cleaned_text = text.rstrip("\r\n")
+        if not cleaned_text:
+            return []
+
+        reader = csv.reader(StringIO(cleaned_text), delimiter="\t")
+        return [row for row in reader]
+
+    def _select_dataset_range(
+        self,
+        start_row: int,
+        start_column: int,
+        row_count: int,
+        column_count: int,
+    ) -> None:
+        """Select a rectangular range in the dataset editor."""
+        if row_count <= 0 or column_count <= 0:
+            return
+
+        self._dataset_table.clearSelection()
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None:
+            return
+
+        top_left = self._dataset_model.index(start_row, start_column)
+        bottom_right = self._dataset_model.index(
+            start_row + row_count - 1,
+            start_column + column_count - 1,
+        )
+        if not top_left.isValid() or not bottom_right.isValid():
+            return
+
+        self._dataset_table.setCurrentIndex(top_left)
+        selection = QItemSelection(top_left, bottom_right)
+        selection_model.select(selection, QItemSelectionModel.ClearAndSelect)
+
+    def _select_dataset_column_range(self, start_column: int, column_count: int) -> None:
+        """Select contiguous columns in the dataset editor."""
+        if column_count <= 0 or self._dataset_model.rowCount() <= 0:
+            return
+
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None:
+            return
+
+        self._dataset_table.clearSelection()
+        end_column = min(start_column + column_count, self._dataset_model.columnCount())
+        for offset, column_index in enumerate(range(start_column, end_column)):
+            top_left = self._dataset_model.index(0, column_index)
+            bottom_right = self._dataset_model.index(
+                self._dataset_model.rowCount() - 1,
+                column_index,
+            )
+            if not top_left.isValid() or not bottom_right.isValid():
+                continue
+
+            command = (
+                QItemSelectionModel.ClearAndSelect
+                if offset == 0
+                else QItemSelectionModel.Select
+            )
+            selection_model.select(QItemSelection(top_left, bottom_right), command)
+
+        first_index = self._dataset_model.index(0, start_column)
+        if first_index.isValid():
+            self._dataset_table.setCurrentIndex(first_index)
+
     def _current_dataset(self) -> Dataset | None:
         """Return the dataset currently selected in the sidebar."""
         current_item = self._dataset_list.currentItem()
@@ -1228,13 +1680,17 @@ class MainWindow(QMainWindow):
         except KeyError:
             return None
 
-    def _selected_dataset_rows(self) -> list[int]:
-        """Return sorted row indexes touched by the table selection."""
+    def _selected_dataset_indexes(self) -> list[QModelIndex]:
+        """Return selected dataset table indexes."""
         selection_model = self._dataset_table.selectionModel()
         if selection_model is None:
             return []
 
-        return sorted({index.row() for index in selection_model.selectedIndexes()})
+        return selection_model.selectedIndexes()
+
+    def _selected_dataset_rows(self) -> list[int]:
+        """Return sorted row indexes touched by the table selection."""
+        return sorted({index.row() for index in self._selected_dataset_indexes()})
 
     def _update_dataset_summary(self) -> None:
         """Update dataset summary text and action enabled states."""
@@ -1258,6 +1714,8 @@ class MainWindow(QMainWindow):
         self._delete_dataset_action.setEnabled(has_dataset)
         self._add_column_action.setEnabled(has_dataset)
         self._add_row_action.setEnabled(has_dataset)
+        self._insert_column_action.setEnabled(has_dataset)
+        self._insert_row_action.setEnabled(has_dataset)
         self._apply_formula_action.setEnabled(has_dataset)
         self._derivative_action.setEnabled(has_dataset)
         self._integral_action.setEnabled(has_dataset)
@@ -1268,7 +1726,9 @@ class MainWindow(QMainWindow):
         self._rename_dataset_button.setEnabled(has_dataset)
         self._remove_dataset_button.setEnabled(has_dataset)
         self._editor_add_row_button.setEnabled(has_dataset)
+        self._editor_insert_row_button.setEnabled(has_dataset)
         self._editor_add_column_button.setEnabled(has_dataset)
+        self._editor_insert_column_button.setEnabled(has_dataset)
         self._editor_delete_rows_button.setEnabled(has_dataset)
         self._editor_delete_columns_button.setEnabled(has_dataset)
         self._editor_rename_button.setEnabled(has_dataset)
@@ -1404,11 +1864,7 @@ class MainWindow(QMainWindow):
 
     def _selected_dataset_columns(self) -> list[int]:
         """Return sorted column indexes touched by the table selection."""
-        selection_model = self._dataset_table.selectionModel()
-        if selection_model is None:
-            return []
-
-        return sorted({index.column() for index in selection_model.selectedIndexes()})
+        return sorted({index.column() for index in self._selected_dataset_indexes()})
 
     def _select_column(self, column_name: str) -> None:
         """Select a named column in the data editor if it exists."""

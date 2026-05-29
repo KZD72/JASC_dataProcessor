@@ -6,8 +6,8 @@
 
 ## 1. Project State
 - **Current Version**: 0.1.0
-- **Last Updated**: 2026-05-18
-- **Current Phase**: Phase 5 (Polish & Packaging)
+- **Last Updated**: 2026-05-29
+- **Current Phase**: Phase 2A Plot Type Expansion plus Competitive Stage 0 stabilization (pie/donut charts remain the next plot-type subphase after verification)
 
 ## 2. Completed Tasks
 - [x] Initial project definition, tech stack selection, and requirements gathering.
@@ -182,21 +182,49 @@
 - [x] Continued plot-type expansion with X/Y-compatible reporting plots: vertical bar, horizontal bar, area/fill, and histogram.
 - [x] Added saved per-series plot options for bar width, fill alpha, histogram bin count, histogram density, and cumulative histogram mode, with Plot Inspector controls shown only for relevant plot types.
 - [x] Reworked the Plot Inspector Series tab so each plot type hides non-applicable controls and relabels column-role fields where needed, e.g. Histogram uses Value dataset/column and hides line, marker, axis, and error controls.
+- [x] Completed plot-type expansion Phase 3 by adding Box Plot and Violin Plot to the plot-type registry.
+- [x] Added Plot Inspector multi-column capture for distribution plots, including a value-column multi-select list and mean, median, and outlier/extrema toggles.
+- [x] Added Matplotlib boxplot and violinplot rendering paths with saved per-series distribution-column and display-option persistence.
+- [x] Updated plot labels and queued-series summaries so box/violin distribution plots use categorical column labels instead of X/Y column wording.
+- [x] Added `SciencePlots` to runtime requirements for journal-style Matplotlib rendering.
+- [x] Added Plot Inspector style controls for SciencePlots presets, color cycles, LaTeX/no-LaTeX mode, and custom comma-separated style tokens.
+- [x] Saved plot definitions now persist selected plot style settings, and the live canvas re-renders inside a Matplotlib style context so the selected style is visible immediately.
+- [x] Added Data Editor clipboard shortcuts: `Ctrl+C` copies selected workspace cells as tab-delimited text, and `Ctrl+V` pastes tab-delimited blocks at the active cell.
+- [x] Data Editor paste now expands rows/columns as needed, clears stale formula metadata on overwritten columns, and participates in the existing `Ctrl+Z`/`Ctrl+Y` undo/redo history.
+- [x] Added Data Inspector and Data menu actions for inserting rows and columns before the current selection, with undo/redo support through the existing dataset history.
+- [x] Added a Data Editor right-click context menu on cells and column headers with Undo, Redo, Copy Values, Paste Values, Copy Column(s), and Paste Column(s).
+- [x] Added whole-column copy/paste through a custom Qt clipboard MIME payload that preserves column headers, inserts new columns before the selected/current column, and participates in undo/redo history.
+- [x] Documented the interpolated 2D-map implementation plan: X/Y/Z coordinate-column plots, linear/cubic-spline/piecewise-cubic interpolation, and coordinate locators that predict Z values from X/Y inputs.
+- [x] Started interpolated 2D-map implementation with new Interpolated Heatmap, Contour, and Filled Contour plot types.
+- [x] Added Plot Inspector X/Y/Z role controls, interpolation method selection, grid resolution, and saved-state fields for interpolated 2D maps.
+- [x] Added 2D map rendering paths in `PlotCanvas` using SciPy linear, cubic-spline, and piecewise-cubic interpolation onto a regular grid.
+- [x] Extended plot locators so 2D map series can accept X/Y coordinates and report predicted Z values on the rendered map.
+- [x] Reviewed the current application functionality against official Origin/OriginPro and SigmaPlot v16 feature areas.
+- [x] Updated `Roadmap.md` with a current capability baseline, official competitive reference links, an Origin/SigmaPlot-style gap matrix, and a staged competitive implementation roadmap.
+- [x] Added a near-term recommended order that starts with a stabilization/test gate, then completes Phase 2A plotting, then builds workbook metadata, import/export, graph templates, analysis, fitting, automation, reporting, performance, and packaging capabilities.
 
 
 ## 3. Active Bugs / Known Issues
-- [ ] Current development sessions could not rerun Python compile or smoke checks because `python.exe` fails to start and `py` is not installed in the current shell.
-- [ ] `git` is not available in the current shell, so worktree status could not be checked.
+- [ ] Interpolated 2D-map support is implemented but still needs compile/import, Qt, and manual rendering smoke tests once a usable Python/Qt runtime is available.
+- [ ] Python compile/import and Qt smoke checks were not rerun after the latest Data Editor and interpolated 2D-map changes because `python`/`python3` resolve to Microsoft Store stubs in the current shell and `py` is not installed.
 - [ ] Required analytical-model list mentions arbitrary n-th degree polynomial fitting, but the current fit registry only has linear, quadratic, and cubic polynomial models.
 - [ ] There is no automated test suite or PyInstaller/spec packaging file in the repository yet.
 
 ## 4. Next Steps for Current/New Session (To-Do)
-1. Install or activate usable `python` and `git` commands, then rerun the documented smoke checks and capture real worktree status.
-2. Run `python main.py` in a normal desktop session and manually test project open/save, dataset rename/delete, selected-column deletion, derivative, integral, FFT, iFFT, curve fitting bounds/fixed/weights/confidence bands/residuals, custom fit model creation/use/persistence, and plot series editing on real datasets.
-3. Begin Phase 5 polish: tighten spacing/text in the larger dialogs, review menu/toolbar ordering, and standardize button labels.
-4. Add broader edge-case tests for unusual imported data, singular fits, non-monotonic X values, missing values, and project files with many sheets.
-5. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
-6. Write the PyInstaller setup script for building the standalone `.exe`.
+1. Start Competitive Stage 0 from `Roadmap.md`: install or activate a usable Python runtime, add repeatable smoke tests, and verify the current Data Editor/context-menu and interpolated 2D-map changes.
+2. Manually smoke-test Phase 2A plot types on real datasets: Line, Scatter, Line + Markers, Errorbar, Vertical Bar, Horizontal Bar, Area, Histogram, Box Plot, and Violin Plot, including saved plot save/load and invalid column selections.
+3. Manually smoke-test SciencePlots styling on the live canvas: Science, IEEE, Nature, color cycles, custom tokens, saved plot save/load, and LaTeX disabled/enabled behavior.
+4. Manually smoke-test the Data Editor right-click menu on cells and column headers: Undo, Redo, Copy Values, Paste Values, Copy Column(s), Paste Column(s), paste expansion, and undo/redo after value and column paste.
+5. Manually smoke-test Data Editor copy/paste between imported datasets and Manual Entry, including full-column selections and tab-delimited clipboard fallback from external spreadsheets.
+6. Manually smoke-test Data Inspector append/insert/delete row and column operations, including insertion before the current selection and undo/redo.
+7. Begin plot-type expansion Phase 4: pie and donut charts with label/value column roles, percentage label controls, exploded slice controls, and saved-state persistence.
+8. Manually smoke-test interpolated 2D maps on irregular X/Y/Z datasets: heatmap, contour, filled contour, linear interpolation, cubic spline interpolation, piecewise cubic interpolation, saved plot save/load, dataset rename, and X/Y locator prediction of Z values.
+9. Continue the interpolated 2D-map follow-ups: regular-grid heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, and contour-level controls.
+10. Continue later Phase 2A work in order: candlestick/OHLC plots, then multi-panel/subplot layouts.
+11. Use the new competitive roadmap after Phase 2A/stabilization work: Stage 1 workbook metadata and column roles, Stage 2 Excel/import-export connectors, then graph templates/layout, analysis workbench expansion, advanced fitting, automation/templates, reporting, and performance/packaging.
+12. Add broader edge-case tests for unusual imported data, singular fits, non-monotonic X values, missing values, and project files with many sheets.
+13. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
+14. Write the PyInstaller setup script for building the standalone `.exe`.
 
 ## 5. Architectural Context Notes
 - File parsing lives in `core/file_io.py`; Qt file selection and dialogs live in the UI layer.
@@ -204,6 +232,10 @@
 - Manual entry converts columns to numeric dtype only when every non-empty value in that column is numeric.
 - Manual entry clipboard paste starts at the active cell and expands the table as needed.
 - The workspace data editor writes cell edits directly to the selected dataset's DataFrame.
+- The workspace Data Editor supports `Ctrl+C`/`Ctrl+V` tab-delimited clipboard transfer. Pasted blocks grow rows/columns when needed and are captured by the dataset undo stack.
+- The workspace Data Editor context menu is installed on both the table viewport and horizontal header. Right-clicking an unselected cell or column makes it the active target before showing Undo/Redo and value/column clipboard actions.
+- Whole-column copy/paste uses a custom Qt MIME payload, `application/x-jasc-dataframe-columns`, so in-app copies preserve headers. Plain tab-delimited clipboard text can still be pasted as generated `Pasted Column N` columns.
+- Data Editor "Add" row/column actions append to the end; "Insert" row/column actions insert before the first selected row/column, or append when nothing is selected.
 - Export currently writes UTF-8 CSV or tab-delimited TXT without the DataFrame index.
 - Formula expressions expose valid Python-identifier columns directly (`x + y`) and all columns through `col("Column Name")`.
 - Formula expressions include common NumPy functions/constants such as `sin`, `log`, `sqrt`, `where`, `pi`, and `np.pi`; arbitrary imports, attribute access, and statements are intentionally blocked.
@@ -214,6 +246,12 @@
 - Plotting UI and plot state live in `ui/plot_tab.py`; rendering primitives live in `ui/plot_canvas.py`.
 - Saved plot definitions live in `Workspace` as JSON-friendly state dictionaries and are serialized in `.jasc` project metadata under `plots`.
 - Cross-dataset plots currently align X/Y data by row order and truncate to the shorter column length before dropping non-numeric/blank points.
+- SciencePlots styles are configured from the Plot Inspector Axes tab and passed to `PlotCanvas.plot_series()` as style names. The canvas rebuilds its axes inside `matplotlib.style.context(...)` so styles affect live rendering, not only saved plot metadata.
+- SciencePlots LaTeX rendering is disabled by default by appending `no-latex` whenever a SciencePlots preset is used and "Use LaTeX text" is unchecked.
+- Box and violin plots use the selected Y/data dataset plus a saved `distribution_columns` list instead of X/Y column pairing. Their saved per-series options include mean, median, and outlier/extrema toggles.
+- Interpolated 2D maps should use explicit X coordinate, Y coordinate, and Z/value column roles. Saved plot state should keep these roles plus interpolation method, grid resolution, and locator X/Y coordinates.
+- The current interpolated 2D-map implementation renders irregular X/Y/Z point clouds as heatmap, contour, or filled contour by interpolating onto a regular grid in `PlotCanvas`.
+- Interpolated 2D-map dataset references include `x_dataset`, `y_dataset`, and `z_dataset`; workspace dataset renames update all three saved-plot references.
 - Right-axis plotting is controlled per queued series; moving an already queued series currently means removing it and adding it again with the desired axis.
 - Plot ranges are optional blank min/max fields; blank entries leave that side auto-scaled.
 - Plot locators perform piecewise linear interpolation on the plotted numeric data after X/Y log-scale filtering and mark the computed point on the correct axis.

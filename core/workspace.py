@@ -196,3 +196,5 @@ class Workspace:
                     series["x_dataset"] = new_name
                 if series.get("y_dataset") == old_name:
                     series["y_dataset"] = new_name
+                if series.get("z_dataset") == old_name:
+                    series["z_dataset"] = new_name

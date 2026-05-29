@@ -185,14 +185,128 @@ class DataFrameTableModel(QAbstractTableModel):
         if self._dataset is None:
             return
 
+        self.insert_row(len(self._dataset.frame))
+
+    def insert_row(self, position: int) -> int:
+        """Insert an empty row before the requested row position and return its index."""
+        if self._dataset is None:
+            return -1
+
+        insert_position = max(0, min(position, len(self._dataset.frame)))
         self.capture_undo_state()
-        insert_position = len(self._dataset.frame)
         self.beginInsertRows(QModelIndex(), insert_position, insert_position)
-        # Append a row of NAs
-        new_row = pd.Series([pd.NA] * len(self._dataset.frame.columns), index=self._dataset.frame.columns)
-        self._dataset.frame.loc[insert_position] = new_row
+        upper = self._dataset.frame.iloc[:insert_position]
+        lower = self._dataset.frame.iloc[insert_position:]
+        new_row = pd.DataFrame(
+            [[pd.NA] * len(self._dataset.frame.columns)],
+            columns=self._dataset.frame.columns,
+        )
+        self._dataset.frame = pd.concat([upper, new_row, lower], ignore_index=True)
         self.endInsertRows()
         self.history_changed.emit()
+        return insert_position
+
+    def paste_block(self, start_row: int, start_column: int, rows: list[list[str]]) -> tuple[int, int]:
+        """Paste a rectangular text block into the dataset, growing rows/columns as needed."""
+        if self._dataset is None or not rows:
+            return (0, 0)
+
+        normalized_start_row = max(start_row, 0)
+        normalized_start_column = max(start_column, 0)
+        row_count = len(rows)
+        column_count = max((len(row) for row in rows), default=0)
+        if column_count == 0:
+            return (0, 0)
+
+        self.capture_undo_state()
+        self.beginResetModel()
+        try:
+            frame = self._dataset.frame
+            target_rows = normalized_start_row + row_count
+            target_columns = normalized_start_column + column_count
+
+            while len(frame.columns) < target_columns:
+                column_name = self._make_unique_column_name(f"Column {len(frame.columns) + 1}")
+                frame[column_name] = pd.NA
+                self._dataset.formulas.pop(column_name, None)
+
+            while len(frame) < target_rows:
+                frame.loc[len(frame)] = pd.Series([pd.NA] * len(frame.columns), index=frame.columns)
+
+            for row_offset, row_values in enumerate(rows):
+                for column_offset, value in enumerate(row_values):
+                    target_column = normalized_start_column + column_offset
+                    column_name = frame.columns[target_column]
+                    self._dataset.formulas.pop(str(column_name), None)
+                    normalized_value = self._normalize_value(frame[column_name], value)
+                    if not self._value_fits_column(frame[column_name], normalized_value):
+                        frame[column_name] = frame[column_name].astype("object")
+                    frame.iat[normalized_start_row + row_offset, target_column] = normalized_value
+
+            return (row_count, column_count)
+        finally:
+            self.endResetModel()
+            self.history_changed.emit()
+
+    def insert_columns(
+        self,
+        position: int,
+        column_names: list[str],
+        rows: list[list[str]],
+    ) -> list[str]:
+        """Insert pasted columns before the requested position and return final names."""
+        if self._dataset is None:
+            raise ValueError("No dataset is selected.")
+
+        column_count = max(
+            len(column_names),
+            max((len(row) for row in rows), default=0),
+        )
+        if column_count == 0:
+            return []
+
+        insert_position = max(0, min(position, len(self._dataset.frame.columns)))
+
+        self.capture_undo_state()
+        self.beginResetModel()
+        try:
+            frame = self._dataset.frame
+            target_row_count = max(len(frame), len(rows))
+            if len(frame) < target_row_count:
+                additional_rows = pd.DataFrame(
+                    [[pd.NA] * len(frame.columns)] * (target_row_count - len(frame)),
+                    columns=frame.columns,
+                )
+                self._dataset.frame = pd.concat(
+                    [frame.reset_index(drop=True), additional_rows],
+                    ignore_index=True,
+                )
+                frame = self._dataset.frame
+
+            inserted_names: list[str] = []
+            for column_offset in range(column_count):
+                requested_name = (
+                    str(column_names[column_offset]).strip()
+                    if column_offset < len(column_names)
+                    else ""
+                )
+                base_name = requested_name or f"Pasted Column {column_offset + 1}"
+                column_name = self._make_unique_column_name(base_name)
+                values = self._pasted_column_values(rows, column_offset, target_row_count)
+                series = self._series_from_pasted_values(values)
+                series.index = frame.index
+                frame.insert(
+                    insert_position + column_offset,
+                    column_name,
+                    series,
+                )
+                self._dataset.formulas.pop(column_name, None)
+                inserted_names.append(column_name)
+
+            return inserted_names
+        finally:
+            self.endResetModel()
+            self.history_changed.emit()
 
     def delete_columns(self, columns: list[int]) -> list[str]:
         """Delete column positions from the current dataset and return removed names."""
@@ -220,13 +334,20 @@ class DataFrameTableModel(QAbstractTableModel):
         if self._dataset is None:
             raise ValueError("No dataset is selected.")
 
+        return self.insert_empty_column(len(self._dataset.frame.columns), column_name)
+
+    def insert_empty_column(self, position: int, column_name: str) -> str:
+        """Insert an empty column before the requested position and return its final name."""
+        if self._dataset is None:
+            raise ValueError("No dataset is selected.")
+
         clean_name = column_name.strip() or "New Column"
         unique_name = self._make_unique_column_name(clean_name)
-        insert_position = len(self._dataset.frame.columns)
+        insert_position = max(0, min(position, len(self._dataset.frame.columns)))
 
         self.capture_undo_state()
         self.beginInsertColumns(QModelIndex(), insert_position, insert_position)
-        self._dataset.frame[unique_name] = pd.NA
+        self._dataset.frame.insert(insert_position, unique_name, pd.NA)
         self._dataset.formulas.pop(unique_name, None)
         self.endInsertColumns()
         self.history_changed.emit()
@@ -296,6 +417,42 @@ class DataFrameTableModel(QAbstractTableModel):
         while f"{base_name} ({counter})" in existing_names:
             counter += 1
         return f"{base_name} ({counter})"
+
+    def _pasted_column_values(
+        self,
+        rows: list[list[str]],
+        column_offset: int,
+        target_row_count: int,
+    ) -> list[object]:
+        """Return one pasted column padded to the dataset row count."""
+        values: list[object] = []
+        for row_index in range(target_row_count):
+            if row_index < len(rows) and column_offset < len(rows[row_index]):
+                values.append(rows[row_index][column_offset])
+            else:
+                values.append(pd.NA)
+        return values
+
+    def _series_from_pasted_values(self, values: list[object]) -> pd.Series:
+        """Build a Series from clipboard text, preserving numeric columns when possible."""
+        normalized_values: list[object] = []
+        for value in values:
+            if pd.isna(value):
+                normalized_values.append(pd.NA)
+                continue
+
+            text = str(value).strip()
+            normalized_values.append(pd.NA if text == "" else text)
+
+        series = pd.Series(normalized_values, dtype="object")
+        non_empty = series.dropna()
+        if non_empty.empty:
+            return series
+
+        converted = pd.to_numeric(non_empty, errors="coerce")
+        if not converted.isna().any():
+            return pd.to_numeric(series, errors="coerce")
+        return series
 
     def _snapshot(self) -> _DatasetSnapshot:
         """Return a deep copy of the current dataset edit state."""

@@ -6,6 +6,7 @@ from dataclasses import asdict, fields
 
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 
 from core.workspace import Dataset, Workspace
 from models.plot_types import PLOT_TYPES, plot_type_label
-from ui.plot_canvas import LocatedPoint, PlotCanvas, PlotLocator, PlotSeries
+from ui.plot_canvas import SCIENCEPLOTS_AVAILABLE, LocatedPoint, PlotCanvas, PlotLocator, PlotSeries
 
 _LINE_LABELS: dict[str, str] = {
     "-": "Solid", "--": "Dashed", ":": "Dotted", "-.": "Dash-dot", "": "None",
@@ -40,6 +41,27 @@ _COLOR_LABELS: dict[str, str] = {
     "": "Auto", "tab:blue": "Blue", "tab:orange": "Orange",
     "tab:green": "Green", "tab:red": "Red", "tab:purple": "Purple",
     "black": "Black",
+}
+_PLOT_STYLE_PRESETS: list[tuple[str, str]] = [
+    ("Matplotlib default", ""),
+    ("Science", "science"),
+    ("IEEE", "science,ieee"),
+    ("Nature", "science,nature"),
+    ("Notebook", "science,notebook"),
+]
+_PLOT_STYLE_CYCLES: list[tuple[str, str]] = [
+    ("Default", ""),
+    ("Bright", "bright"),
+    ("High visibility", "high-vis"),
+]
+_SCIENCEPLOTS_STYLE_NAMES = {
+    "science", "ieee", "nature", "notebook", "bright", "high-vis", "no-latex",
+}
+_SURFACE_PLOT_TYPES = {"heatmap", "contour", "contourf"}
+_INTERPOLATION_LABELS: dict[str, str] = {
+    "linear": "Linear",
+    "cubic_spline": "Cubic spline",
+    "piecewise_cubic": "Piecewise cubic",
 }
 _PLOT_SERIES_FIELDS = {field.name for field in fields(PlotSeries)}
 _PLOT_LOCATOR_FIELDS = {field.name for field in fields(PlotLocator)}
@@ -94,10 +116,13 @@ class PlotTab(QWidget):
         names = self._workspace.dataset_names()
         self._set_combo_items(self._x_dataset_combo, names, selected_dataset)
         self._set_combo_items(self._y_dataset_combo, names, selected_dataset)
+        self._set_combo_items(self._z_dataset_combo, names, selected_dataset)
         self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
         self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo)
         self._update_column_combo(self._y_dataset_combo, self._y_column_combo)
         self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
+        self._update_column_combo(self._z_dataset_combo, self._z_column_combo)
+        self._update_distribution_columns_list()
         self._set_controls_enabled(bool(names))
 
     def has_plot_series(self) -> bool:
@@ -148,6 +173,10 @@ class PlotTab(QWidget):
                 "legend_position": self._legend_pos_combo.currentText(),
                 "figure_width": self._width_spin.value(),
                 "figure_height": self._height_spin.value(),
+                "plot_style_preset": str(self._style_preset_combo.currentData() or ""),
+                "plot_style_cycle": str(self._style_cycle_combo.currentData() or ""),
+                "plot_style_use_latex": self._style_latex_checkbox.isChecked(),
+                "plot_style_custom": self._style_custom_edit.text(),
             },
         }
 
@@ -338,6 +367,8 @@ class PlotTab(QWidget):
         self._y_dataset_combo = QComboBox()
         self._y_column_combo = QComboBox()
         self._y_err_column_combo = QComboBox()
+        self._z_dataset_combo = QComboBox()
+        self._z_column_combo = QComboBox()
 
         self._plot_type_combo = QComboBox()
         for plot_type in PLOT_TYPES.values():
@@ -391,6 +422,27 @@ class PlotTab(QWidget):
         self._histogram_density_checkbox = QCheckBox("Density")
         self._histogram_cumulative_checkbox = QCheckBox("Cumulative")
 
+        self._distribution_columns_list = QListWidget()
+        self._distribution_columns_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._distribution_columns_list.setMaximumHeight(130)
+        self._distribution_columns_list.itemSelectionChanged.connect(
+            lambda: self._set_controls_enabled(bool(self._workspace.dataset_names()))
+        )
+        self._distribution_mean_checkbox = QCheckBox("Mean")
+        self._distribution_median_checkbox = QCheckBox("Median")
+        self._distribution_median_checkbox.setChecked(True)
+        self._distribution_outliers_checkbox = QCheckBox("Outliers/extrema")
+        self._distribution_outliers_checkbox.setChecked(True)
+
+        self._interpolation_method_combo = QComboBox()
+        self._interpolation_method_combo.addItem("Linear", "linear")
+        self._interpolation_method_combo.addItem("Cubic spline", "cubic_spline")
+        self._interpolation_method_combo.addItem("Piecewise cubic", "piecewise_cubic")
+
+        self._surface_resolution_spin = QSpinBox()
+        self._surface_resolution_spin.setRange(10, 500)
+        self._surface_resolution_spin.setValue(120)
+
         self._title_edit = QLineEdit()
         self._x_label_edit = QLineEdit()
         self._y_label_edit = QLineEdit()
@@ -410,12 +462,27 @@ class PlotTab(QWidget):
         self._right_y_min_edit = QLineEdit()
         self._right_y_max_edit = QLineEdit()
 
+        self._style_preset_combo = QComboBox()
+        for label, data in _PLOT_STYLE_PRESETS:
+            self._style_preset_combo.addItem(label, data)
+
+        self._style_cycle_combo = QComboBox()
+        for label, data in _PLOT_STYLE_CYCLES:
+            self._style_cycle_combo.addItem(label, data)
+
+        self._style_latex_checkbox = QCheckBox("Use LaTeX text")
+        self._style_latex_checkbox.setChecked(False)
+        self._style_custom_edit = QLineEdit()
+        self._style_custom_edit.setPlaceholderText("e.g. science,nature,no-latex,bright")
+
         self._grid_checkbox = QCheckBox("Grid")
         self._grid_checkbox.setChecked(True)
 
         self._locator_series_combo = QComboBox()
         self._locator_x_edit = QLineEdit()
         self._locator_x_edit.setPlaceholderText("X value")
+        self._locator_y_edit = QLineEdit()
+        self._locator_y_edit.setPlaceholderText("Y coordinate")
 
         self._locator_marker_combo = QComboBox()
         for label, data in [("Circle","o"), ("Square","s"), ("Triangle","^"),
@@ -501,12 +568,17 @@ class PlotTab(QWidget):
         self._bar_options_panel = self._build_bar_options_panel()
         self._fill_options_panel = self._build_fill_options_panel()
         self._histogram_options_panel = self._build_histogram_options_panel()
+        self._distribution_options_panel = self._build_distribution_options_panel()
+        self._surface_options_panel = self._build_surface_options_panel()
         self._add_series_row(sf, "plot_type", "Plot type", self._plot_type_combo)
         self._add_series_row(sf, "x_dataset", "X dataset", self._x_dataset_combo)
         self._add_series_row(sf, "x_column", "X column", self._x_column_combo)
         self._add_series_row(sf, "x_error", "X error", self._x_err_column_combo)
         self._add_series_row(sf, "y_dataset", "Y dataset", self._y_dataset_combo)
         self._add_series_row(sf, "y_column", "Y column", self._y_column_combo)
+        self._add_series_row(sf, "z_dataset", "Z dataset", self._z_dataset_combo)
+        self._add_series_row(sf, "z_column", "Z column", self._z_column_combo)
+        self._add_series_row(sf, "distribution_columns", "Columns", self._distribution_columns_list)
         self._add_series_row(sf, "y_error", "Y error", self._y_err_column_combo)
         self._add_series_row(sf, "y_axis", "Y axis", self._y_axis_combo)
         self._add_series_row(sf, "label", "Label", self._series_label_edit)
@@ -518,6 +590,8 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "bar_options", None, self._bar_options_panel)
         self._add_series_row(sf, "fill_options", None, self._fill_options_panel)
         self._add_series_row(sf, "histogram_options", None, self._histogram_options_panel)
+        self._add_series_row(sf, "distribution_options", None, self._distribution_options_panel)
+        self._add_series_row(sf, "surface_options", None, self._surface_options_panel)
         sb = QHBoxLayout()
         sb.addWidget(add_btn); sb.addWidget(update_btn); sb.addWidget(rm_btn); sb.addWidget(clr_btn)
         sf.addRow(sb)
@@ -535,6 +609,10 @@ class PlotTab(QWidget):
         af.addRow("X range", self._range_row(self._x_min_edit, self._x_max_edit))
         af.addRow("Left Y range", self._range_row(self._y_min_edit, self._y_max_edit))
         af.addRow("Right Y range", self._range_row(self._right_y_min_edit, self._right_y_max_edit))
+        af.addRow("Style", self._style_preset_combo)
+        af.addRow("Color cycle", self._style_cycle_combo)
+        af.addRow("", self._style_latex_checkbox)
+        af.addRow("Custom styles", self._style_custom_edit)
         af.addRow("", self._grid_checkbox)
         af.addRow(self._legend_checkbox, self._legend_pos_combo)
         af.addRow("Width", self._width_spin)
@@ -544,6 +622,7 @@ class PlotTab(QWidget):
         lf = QFormLayout(locator_group)
         lf.addRow("Series", self._locator_series_combo)
         lf.addRow("X value", self._locator_x_edit)
+        lf.addRow("Y value", self._locator_y_edit)
         lf.addRow("Marker", self._locator_marker_combo)
         lf.addRow("Size", self._locator_size_spin)
         lf.addRow("Color", self._locator_color_combo)
@@ -620,7 +699,15 @@ class PlotTab(QWidget):
         self._y_dataset_combo.currentTextChanged.connect(
             lambda: self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
         )
+        self._y_dataset_combo.currentTextChanged.connect(self._update_distribution_columns_list)
+        self._z_dataset_combo.currentTextChanged.connect(
+            lambda: self._update_column_combo(self._z_dataset_combo, self._z_column_combo)
+        )
         self._plot_type_combo.currentIndexChanged.connect(self._apply_plot_type_defaults)
+        self._style_preset_combo.currentIndexChanged.connect(self._render_plot_if_possible)
+        self._style_cycle_combo.currentIndexChanged.connect(self._render_plot_if_possible)
+        self._style_latex_checkbox.toggled.connect(self._render_plot_if_possible)
+        self._style_custom_edit.editingFinished.connect(self._render_plot_if_possible)
         self._update_plot_type_option_visibility()
         self.refresh_controls()
 
@@ -673,6 +760,29 @@ class PlotTab(QWidget):
         layout.addStretch(1)
         return panel
 
+    def _build_distribution_options_panel(self) -> QWidget:
+        """Return box/violin distribution controls."""
+        panel = QWidget()
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._distribution_mean_checkbox)
+        layout.addWidget(self._distribution_median_checkbox)
+        layout.addWidget(self._distribution_outliers_checkbox)
+        layout.addStretch(1)
+        return panel
+
+    def _build_surface_options_panel(self) -> QWidget:
+        """Return 2D interpolated map controls."""
+        panel = QWidget()
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Interpolation"))
+        layout.addWidget(self._interpolation_method_combo)
+        layout.addWidget(QLabel("Grid"))
+        layout.addWidget(self._surface_resolution_spin)
+        layout.addStretch(1)
+        return panel
+
     def _add_series_row(
         self,
         form: QFormLayout,
@@ -702,6 +812,35 @@ class PlotTab(QWidget):
         self._set_combo_items(col_combo, cols)
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
 
+    def _update_distribution_columns_list(self) -> None:
+        """Refresh the multi-column selector used by distribution plots."""
+        previous = set(self._selected_distribution_columns())
+        preferred = self._y_column_combo.currentText()
+        self._distribution_columns_list.blockSignals(True)
+        self._distribution_columns_list.clear()
+
+        name = self._y_dataset_combo.currentText()
+        columns: list[str] = []
+        if name:
+            try:
+                dataset = self._workspace.get_dataset(name)
+                columns = [str(column) for column in dataset.frame.columns]
+            except KeyError:
+                pass
+
+        for column in columns:
+            self._distribution_columns_list.addItem(column)
+
+        selected = previous.intersection(columns)
+        if not selected and preferred in columns:
+            selected = {preferred}
+        for row in range(self._distribution_columns_list.count()):
+            item = self._distribution_columns_list.item(row)
+            item.setSelected(item.text() in selected)
+
+        self._distribution_columns_list.blockSignals(False)
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
+
     def _update_error_column_combo(self, ds_combo: QComboBox, col_combo: QComboBox) -> None:
         """Refresh an error column combo, allowing a blank 'no error' selection."""
         name = ds_combo.currentText()
@@ -727,7 +866,20 @@ class PlotTab(QWidget):
 
     def _set_controls_enabled(self, has_data: bool) -> None:
         """Enable or disable plot controls based on data and selection state."""
-        can_add = has_data and self._x_column_combo.count() > 0 and self._y_column_combo.count() > 0
+        plot_type = str(self._plot_type_combo.currentData() or "line")
+        if plot_type in {"box", "violin"}:
+            can_add = has_data and bool(self._selected_distribution_columns())
+        elif plot_type == "histogram":
+            can_add = has_data and self._y_column_combo.count() > 0
+        elif plot_type in _SURFACE_PLOT_TYPES:
+            can_add = (
+                has_data
+                and self._x_column_combo.count() > 0
+                and self._y_column_combo.count() > 0
+                and self._z_column_combo.count() > 0
+            )
+        else:
+            can_add = has_data and self._x_column_combo.count() > 0 and self._y_column_combo.count() > 0
         self._add_series_button.setEnabled(can_add)
         self._update_series_button.setEnabled(can_add and self._selected_series_row() is not None)
         self._remove_series_button.setEnabled(bool(self._series_list.selectedItems()))
@@ -782,11 +934,34 @@ class PlotTab(QWidget):
     def _plot_series_from_state(self, state: dict[str, object]) -> PlotSeries:
         """Deserialize one saved series dictionary into a PlotSeries."""
         clean_state = {key: value for key, value in state.items() if key in _PLOT_SERIES_FIELDS}
+        columns = clean_state.get("distribution_columns", ())
+        if isinstance(columns, str):
+            clean_state["distribution_columns"] = (columns,)
+        elif isinstance(columns, (list, tuple)):
+            clean_state["distribution_columns"] = tuple(str(column) for column in columns)
+        else:
+            clean_state["distribution_columns"] = ()
+        clean_state["z_dataset"] = str(clean_state.get("z_dataset", "") or "")
+        clean_state["z_column"] = str(clean_state.get("z_column", "") or "")
+        clean_state["interpolation_method"] = str(
+            clean_state.get("interpolation_method", "linear") or "linear"
+        )
+        try:
+            clean_state["grid_resolution"] = int(clean_state.get("grid_resolution", 120))
+        except (TypeError, ValueError):
+            clean_state["grid_resolution"] = 120
         return PlotSeries(**clean_state)
 
     def _plot_locator_from_state(self, state: dict[str, object]) -> PlotLocator:
         """Deserialize one saved locator dictionary into a PlotLocator."""
         clean_state = {key: value for key, value in state.items() if key in _PLOT_LOCATOR_FIELDS}
+        if clean_state.get("y_value") in ("", None):
+            clean_state["y_value"] = None
+        elif "y_value" in clean_state:
+            try:
+                clean_state["y_value"] = float(clean_state["y_value"])
+            except (TypeError, ValueError):
+                clean_state["y_value"] = None
         return PlotLocator(**clean_state)
 
     def _apply_plot_settings(self, state: object) -> None:
@@ -812,6 +987,10 @@ class PlotTab(QWidget):
         self._set_combo_text(self._legend_pos_combo, str(state.get("legend_position", "best")))
         self._width_spin.setValue(self._setting_float(state, "figure_width", 7.0))
         self._height_spin.setValue(self._setting_float(state, "figure_height", 4.8))
+        self._set_combo_data(self._style_preset_combo, str(state.get("plot_style_preset", "")))
+        self._set_combo_data(self._style_cycle_combo, str(state.get("plot_style_cycle", "")))
+        self._style_latex_checkbox.setChecked(bool(state.get("plot_style_use_latex", False)))
+        self._style_custom_edit.setText(self._setting_text(state, "plot_style_custom"))
 
     @staticmethod
     def _setting_text(state: dict[str, object], key: str) -> str:
@@ -838,7 +1017,25 @@ class PlotTab(QWidget):
 
     def _add_series(self) -> None:
         """Append a series from the current controls and render the plot."""
-        if self._x_column_combo.count() == 0 or self._y_column_combo.count() == 0:
+        plot_type = str(self._plot_type_combo.currentData() or "line")
+        if plot_type in {"box", "violin"} and not self._selected_distribution_columns():
+            QMessageBox.information(self, "Add Series", "Select one or more columns for the distribution plot.")
+            return
+        if plot_type in _SURFACE_PLOT_TYPES and (
+            self._x_column_combo.count() == 0
+            or self._y_column_combo.count() == 0
+            or self._z_column_combo.count() == 0
+        ):
+            QMessageBox.information(
+                self,
+                "Add Series",
+                "Choose X, Y, and Z columns before adding a 2D map.",
+            )
+            return
+        non_xy_types = {"box", "violin", "histogram"} | _SURFACE_PLOT_TYPES
+        if plot_type not in non_xy_types and (
+            self._x_column_combo.count() == 0 or self._y_column_combo.count() == 0
+        ):
             QMessageBox.information(self, "Add Series", "Import or create a dataset before adding a series.")
             return
         series = self._series_from_controls()
@@ -852,18 +1049,31 @@ class PlotTab(QWidget):
         """Create a PlotSeries from current series control values."""
         line_style_data = self._line_style_combo.currentData()
         plot_type = str(self._plot_type_combo.currentData() or "line")
+        distribution_columns = tuple(self._selected_distribution_columns())
+        y_dataset = self._y_dataset_combo.currentText()
+        y_column = self._y_column_combo.currentText()
+        z_dataset = self._z_dataset_combo.currentText()
+        z_column = self._z_column_combo.currentText()
+        if plot_type in {"box", "violin"}:
+            y_column = distribution_columns[0] if distribution_columns else y_column
         return PlotSeries(
-            x_dataset=self._x_dataset_combo.currentText(),
-            x_column=self._x_column_combo.currentText(),
+            x_dataset=y_dataset if plot_type in {"box", "violin"} else self._x_dataset_combo.currentText(),
+            x_column="" if plot_type in {"box", "violin"} else self._x_column_combo.currentText(),
             x_err_column=self._x_err_column_combo.currentText() if plot_type == "errorbar" else "",
-            y_dataset=self._y_dataset_combo.currentText(),
-            y_column=self._y_column_combo.currentText(),
+            y_dataset=y_dataset,
+            y_column=y_column,
+            z_dataset=z_dataset if plot_type in _SURFACE_PLOT_TYPES else "",
+            z_column=z_column if plot_type in _SURFACE_PLOT_TYPES else "",
             y_err_column=self._y_err_column_combo.currentText() if plot_type == "errorbar" else "",
             plot_type=plot_type,
             color=str(self._color_combo.currentData() or ""),
             line_style=str(line_style_data) if line_style_data is not None else "-",
             marker=str(self._marker_combo.currentData() or ""),
-            y_axis=str(self._y_axis_combo.currentData() or "left"),
+            y_axis=(
+                "left"
+                if plot_type in ({"box", "violin"} | _SURFACE_PLOT_TYPES)
+                else str(self._y_axis_combo.currentData() or "left")
+            ),
             custom_label=self._series_label_edit.text().strip(),
             line_width=self._line_width_spin.value(),
             marker_size=self._marker_size_spin.value(),
@@ -872,6 +1082,12 @@ class PlotTab(QWidget):
             histogram_bins=self._histogram_bins_spin.value(),
             histogram_density=self._histogram_density_checkbox.isChecked(),
             histogram_cumulative=self._histogram_cumulative_checkbox.isChecked(),
+            distribution_columns=distribution_columns,
+            distribution_show_mean=self._distribution_mean_checkbox.isChecked(),
+            distribution_show_median=self._distribution_median_checkbox.isChecked(),
+            distribution_show_outliers=self._distribution_outliers_checkbox.isChecked(),
+            interpolation_method=str(self._interpolation_method_combo.currentData() or "linear"),
+            grid_resolution=self._surface_resolution_spin.value(),
         )
 
     def _update_selected_series(self) -> None:
@@ -913,6 +1129,12 @@ class PlotTab(QWidget):
         self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
         self._y_column_combo.setCurrentText(series.y_column)
         self._y_err_column_combo.setCurrentText(series.y_err_column)
+        self._z_dataset_combo.setCurrentText(series.z_dataset or series.y_dataset)
+        self._update_column_combo(self._z_dataset_combo, self._z_column_combo)
+        self._z_column_combo.setCurrentText(series.z_column)
+        self._set_distribution_column_selection(
+            list(series.distribution_columns) or ([series.y_column] if series.plot_type in {"box", "violin"} else [])
+        )
         self._set_combo_data(self._plot_type_combo, series.plot_type)
         self._set_combo_data(self._y_axis_combo, series.y_axis)
         self._series_label_edit.setText(series.custom_label)
@@ -926,7 +1148,26 @@ class PlotTab(QWidget):
         self._histogram_bins_spin.setValue(series.histogram_bins)
         self._histogram_density_checkbox.setChecked(series.histogram_density)
         self._histogram_cumulative_checkbox.setChecked(series.histogram_cumulative)
+        self._distribution_mean_checkbox.setChecked(series.distribution_show_mean)
+        self._distribution_median_checkbox.setChecked(series.distribution_show_median)
+        self._distribution_outliers_checkbox.setChecked(series.distribution_show_outliers)
+        self._set_combo_data(self._interpolation_method_combo, series.interpolation_method)
+        self._surface_resolution_spin.setValue(series.grid_resolution)
         self._update_plot_type_option_visibility()
+
+    def _selected_distribution_columns(self) -> list[str]:
+        """Return selected distribution columns from the multi-select list."""
+        return [item.text() for item in self._distribution_columns_list.selectedItems()]
+
+    def _set_distribution_column_selection(self, columns: list[str]) -> None:
+        """Select distribution columns by name when they are present."""
+        wanted = set(columns)
+        self._distribution_columns_list.blockSignals(True)
+        for row in range(self._distribution_columns_list.count()):
+            item = self._distribution_columns_list.item(row)
+            item.setSelected(item.text() in wanted)
+        self._distribution_columns_list.blockSignals(False)
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: str) -> None:
@@ -957,6 +1198,14 @@ class PlotTab(QWidget):
         elif plot_type == "histogram":
             self._set_combo_data(self._line_style_combo, "")
             self._set_combo_data(self._marker_combo, "")
+        elif plot_type in {"box", "violin"}:
+            self._set_combo_data(self._line_style_combo, "")
+            self._set_combo_data(self._marker_combo, "")
+            if not self._selected_distribution_columns():
+                self._set_distribution_column_selection([self._y_column_combo.currentText()])
+        elif plot_type in _SURFACE_PLOT_TYPES:
+            self._set_combo_data(self._line_style_combo, "")
+            self._set_combo_data(self._marker_combo, "")
         else:
             self._set_combo_data(self._line_style_combo, "-")
             self._set_combo_data(self._marker_combo, "")
@@ -967,11 +1216,17 @@ class PlotTab(QWidget):
         x_y_types = {"line", "scatter", "line_marker", "errorbar", "bar", "barh", "area"}
         line_types = {"line", "line_marker", "errorbar", "area"}
         marker_types = {"scatter", "line_marker", "errorbar"}
+        distribution_types = {"box", "violin"}
+        coordinate_types = x_y_types | _SURFACE_PLOT_TYPES
 
-        self._set_series_row_visible("x_dataset", plot_type in x_y_types)
-        self._set_series_row_visible("x_column", plot_type in x_y_types)
+        self._set_series_row_visible("x_dataset", plot_type in coordinate_types)
+        self._set_series_row_visible("x_column", plot_type in coordinate_types)
         self._set_series_row_visible("x_error", plot_type == "errorbar")
         self._set_series_row_visible("y_error", plot_type == "errorbar")
+        self._set_series_row_visible("y_column", plot_type not in distribution_types)
+        self._set_series_row_visible("z_dataset", plot_type in _SURFACE_PLOT_TYPES)
+        self._set_series_row_visible("z_column", plot_type in _SURFACE_PLOT_TYPES)
+        self._set_series_row_visible("distribution_columns", plot_type in distribution_types)
         self._set_series_row_visible("y_axis", plot_type in {"line", "scatter", "line_marker", "errorbar", "bar", "area"})
         self._set_series_row_visible("line", plot_type in line_types)
         self._set_series_row_visible("line_width", plot_type in line_types)
@@ -980,10 +1235,22 @@ class PlotTab(QWidget):
         self._set_series_row_visible("bar_options", plot_type in {"bar", "barh"})
         self._set_series_row_visible("fill_options", plot_type in {"area", "histogram"})
         self._set_series_row_visible("histogram_options", plot_type == "histogram")
+        self._set_series_row_visible("distribution_options", plot_type in distribution_types)
+        self._set_series_row_visible("surface_options", plot_type in _SURFACE_PLOT_TYPES)
 
         if plot_type == "histogram":
             self._set_series_row_label("y_dataset", "Value dataset")
             self._set_series_row_label("y_column", "Value column")
+        elif plot_type in distribution_types:
+            self._set_series_row_label("y_dataset", "Data dataset")
+            self._set_series_row_label("distribution_columns", "Value columns")
+        elif plot_type in _SURFACE_PLOT_TYPES:
+            self._set_series_row_label("x_dataset", "X dataset")
+            self._set_series_row_label("x_column", "X coordinate")
+            self._set_series_row_label("y_dataset", "Y dataset")
+            self._set_series_row_label("y_column", "Y coordinate")
+            self._set_series_row_label("z_dataset", "Z dataset")
+            self._set_series_row_label("z_column", "Z value")
         elif plot_type == "barh":
             self._set_series_row_label("x_dataset", "Position dataset")
             self._set_series_row_label("x_column", "Position column")
@@ -1053,8 +1320,22 @@ class PlotTab(QWidget):
         if not isinstance(idx, int) or not 0 <= idx < len(self._plot_series):
             QMessageBox.warning(self, "Add Locator", "Choose a valid queued series.")
             return
+        y_val: float | None = None
+        if self._plot_series[idx].plot_type in _SURFACE_PLOT_TYPES:
+            y_val, y_errs = self._parse_optional_float(
+                self._locator_y_edit.text(),
+                "Locator Y value",
+            )
+            if y_errs or y_val is None:
+                QMessageBox.warning(
+                    self,
+                    "Add Locator",
+                    "\n".join(y_errs or ["Locator Y value is required for 2D maps."]),
+                )
+                return
         loc = PlotLocator(
             series_index=idx, x_value=x_val,
+            y_value=y_val,
             marker=str(self._locator_marker_combo.currentData() or "o"),
             size=self._locator_size_spin.value(),
             color=str(self._locator_color_combo.currentData() or "tab:red"),
@@ -1103,7 +1384,7 @@ class PlotTab(QWidget):
             shift = sum(1 for r in removed_set if r < loc.series_index)
             new.append(PlotLocator(
                 series_index=loc.series_index - shift,
-                x_value=loc.x_value, marker=loc.marker,
+                x_value=loc.x_value, y_value=loc.y_value, marker=loc.marker,
                 size=loc.size, color=loc.color,
             ))
         self._plot_locators = new
@@ -1117,6 +1398,11 @@ class PlotTab(QWidget):
             self._locator_list.addItem(self._locator_text(loc, by_idx.get(i)))
 
     # -- rendering ----------------------------------------------------------
+
+    def _render_plot_if_possible(self) -> None:
+        """Refresh the visible plot after a style-control change."""
+        if self._plot_series:
+            self._render_plot(silent_if_empty=True)
 
     def _render_plot(self, silent_if_empty: bool = False) -> None:
         """Render queued series and locators to the Matplotlib canvas."""
@@ -1135,12 +1421,19 @@ class PlotTab(QWidget):
             if s0.plot_type == "histogram":
                 x_label = x_label or s0.y_column
                 y_label = y_label or ("Density" if s0.histogram_density else "Count")
+            elif s0.plot_type in {"box", "violin"}:
+                x_label = x_label or "Column"
+                y_label = y_label or "Value"
+            elif s0.plot_type in _SURFACE_PLOT_TYPES:
+                x_label = x_label or s0.x_column
+                y_label = y_label or s0.y_column
             elif s0.plot_type == "barh":
                 x_label = x_label or s0.y_column
                 y_label = y_label or s0.x_column
             else:
                 x_label = x_label or s0.x_column
-            if s0.plot_type in {"histogram", "barh"}:
+            non_y_axis_types = {"histogram", "barh", "box", "violin"} | _SURFACE_PLOT_TYPES
+            if s0.plot_type in non_y_axis_types:
                 pass
             elif s0.y_axis == "right":
                 ry_label = ry_label or s0.y_column
@@ -1183,20 +1476,43 @@ class PlotTab(QWidget):
     @staticmethod
     def _series_text(series: PlotSeries) -> str:
         """Return readable queued-series text for the list widget."""
-        bits = [
-            plot_type_label(series.plot_type),
-            _LINE_LABELS.get(series.line_style, series.line_style or "None"),
-            _MARKER_LABELS.get(series.marker, series.marker or "None"),
-            _COLOR_LABELS.get(series.color, series.color or "Auto"),
-            f"{series.y_axis} axis",
-        ]
+        bits = [plot_type_label(series.plot_type)]
+        if series.plot_type in {"box", "violin"}:
+            column_count = len(series.distribution_columns) or (1 if series.y_column else 0)
+            bits.append(f"{column_count} column{'s' if column_count != 1 else ''}")
+            if series.distribution_show_mean:
+                bits.append("mean")
+            if series.distribution_show_median:
+                bits.append("median")
+            if series.distribution_show_outliers:
+                bits.append("outliers")
+        elif series.plot_type in _SURFACE_PLOT_TYPES:
+            bits.extend([
+                f"Z: {series.z_column}",
+                _INTERPOLATION_LABELS.get(series.interpolation_method, series.interpolation_method),
+                f"{series.grid_resolution} grid",
+            ])
+        else:
+            bits.extend([
+                _LINE_LABELS.get(series.line_style, series.line_style or "None"),
+                _MARKER_LABELS.get(series.marker, series.marker or "None"),
+                _COLOR_LABELS.get(series.color, series.color or "Auto"),
+                f"{series.y_axis} axis",
+            ])
         return f"{series.label} ({', '.join(bits)})"
 
     def _locator_text(self, loc: PlotLocator, pt: LocatedPoint | None = None) -> str:
         """Return locator list text before or after interpolation."""
         label = self._plot_series[loc.series_index].label
         if pt is not None:
+            if pt.z_value is not None:
+                return (
+                    f"{label}: x={pt.x_value:g}, y={pt.y_value:g}, "
+                    f"z={pt.z_value:g}"
+                )
             return f"{label}: x={pt.x_value:g}, y={pt.y_value:g} ({pt.y_axis})"
+        if loc.y_value is not None:
+            return f"{label}: x={loc.x_value:g}, y={loc.y_value:g} (pending)"
         return f"{label}: x={loc.x_value:g} (pending)"
 
     # -- input parsing ------------------------------------------------------
@@ -1218,9 +1534,36 @@ class PlotTab(QWidget):
                 "legend_enabled": self._legend_checkbox.isChecked(),
                 "legend_position": self._legend_pos_combo.currentText(),
                 "locators": self._plot_locators,
+                "style_names": self._style_names(),
             },
             errors,
         )
+
+    def _style_names(self) -> list[str]:
+        """Return Matplotlib/SciencePlots style names for the current plot."""
+        names: list[str] = []
+        for token in str(self._style_preset_combo.currentData() or "").split(","):
+            clean = token.strip()
+            if clean:
+                names.append(clean)
+
+        cycle = str(self._style_cycle_combo.currentData() or "").strip()
+        if cycle:
+            names.append(cycle)
+
+        for token in self._style_custom_edit.text().split(","):
+            clean = token.strip()
+            if clean and clean not in names:
+                names.append(clean)
+
+        uses_science_style = any(name == "science" for name in names)
+        if uses_science_style and not self._style_latex_checkbox.isChecked() and "no-latex" not in names:
+            names.append("no-latex")
+
+        if any(name in _SCIENCEPLOTS_STYLE_NAMES for name in names) and not SCIENCEPLOTS_AVAILABLE:
+            self.status_message.emit("SciencePlots is not installed; style rendering may be unavailable.")
+
+        return names
 
     def _parse_range(
         self, min_edit: QLineEdit, max_edit: QLineEdit, label: str,
