@@ -11,7 +11,13 @@ from pandas.api.types import is_numeric_dtype
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 
 from core.operations import ExpressionResult, apply_column_expression
-from core.workspace import ColumnMetadata, Dataset, column_role_label, copy_column_metadata
+from core.workspace import (
+    ColumnMetadata,
+    Dataset,
+    column_role_label,
+    copy_column_metadata,
+    set_column_operation_comment,
+)
 
 
 @dataclass(slots=True)
@@ -408,6 +414,11 @@ class DataFrameTableModel(QAbstractTableModel):
                 row_positions=row_positions,
             )
             self._dataset.formulas[result.target_column] = expression.strip()
+            set_column_operation_comment(
+                self._dataset,
+                result.target_column,
+                f"Formula = {expression.strip()}",
+            )
             return result
         except Exception:
             self.discard_latest_undo_state()

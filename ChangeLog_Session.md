@@ -6,8 +6,8 @@
 
 ## 1. Project State
 - **Current Version**: 0.1.0
-- **Last Updated**: 2026-05-29
-- **Current Phase**: Phase 2A Plot Type Expansion plus Competitive Stage 0 stabilization, expanded statistics verification, and interpolation workbench verification (pie/donut charts remain the next plot-type subphase after verification)
+- **Last Updated**: 2026-06-02
+- **Current Phase**: Competitive Stage 0 stabilization followed by Competitive Stage 1 operation recipes, batch processing, and cumulative outputs; expanded statistics/interpolation verification remains pending.
 
 ## 2. Completed Tasks
 - [x] Initial project definition, tech stack selection, and requirements gathering.
@@ -202,7 +202,7 @@
 - [x] Reviewed the current application functionality against official Origin/OriginPro and SigmaPlot v16 feature areas.
 - [x] Updated `Roadmap.md` with a current capability baseline, official competitive reference links, an Origin/SigmaPlot-style gap matrix, and a staged competitive implementation roadmap.
 - [x] Added a near-term recommended order that starts with a stabilization/test gate, then completes Phase 2A plotting, then builds workbook metadata, import/export, graph templates, analysis, fitting, automation, reporting, performance, and packaging capabilities.
-- [x] Started Competitive Stage 1 by adding lightweight per-column metadata: role, unit, long name, and comment.
+- [x] Started the metadata foundation, now tracked under Competitive Stage 2, by adding lightweight per-column metadata: role, unit, long name, and comment.
 - [x] Added a Data Editor `Column Metadata...` workflow through the Data menu, Data Inspector, and dataset right-click context menu.
 - [x] Persisted column metadata in `.jasc` project files and included it in Data Editor undo/redo snapshots.
 - [x] Data Editor column headers now expose role/unit/long-name/comment metadata in tooltips alongside formula metadata.
@@ -233,6 +233,23 @@
 - [x] Added a multi-column Statistics scope with selectable columns from one sheet.
 - [x] Added multi-column statistics operations: complete report, per-column descriptive/distribution summary, pairwise Pearson/Spearman/Kendall correlations, covariance values, and standardized PCA summaries.
 - [x] Statistics multi-column companion plots now support selected-column box/violin plots, Pearson correlation heatmaps, and PCA explained-variance bar charts.
+- [x] Reprioritized `Roadmap.md` so operation recipes, batch processing, batch logs, and cumulative outputs are Competitive Stage 1 immediately after stabilization.
+- [x] Added a detailed batch-processing implementation plan covering formula/calculated columns, derivative/integral, FFT/iFFT, interpolation, statistics, curve fitting, plotting, and future peak/signal/data-preparation workflows.
+- [x] Updated `Agent_Instructions.md` so future agents treat batch recipes and cumulative statistics/fitting outputs as the next major product leap before broad plot/import expansion.
+- [x] Started the first batch-processing implementation slice in `Apply Formula`: the formula dialog now lets users choose target worksheets, applies the same expression to each selected sheet, preserves formula metadata, and creates a formula batch summary dataset for multi-sheet runs.
+- [x] Improved formula authoring by adding positional aliases such as `col1`, `col2`, etc. to the formula engine and insert controls in the Apply Formula dialog for either `colN` aliases or exact `col("Column Name")` references.
+- [x] Generated formula, derivative/integral, interpolation, FFT/iFFT, statistics, and curve-fit outputs now write an `Operation: ...` provenance line into output column metadata comments while preserving existing user comment text.
+- [x] Added formula batch overwrite safeguards: target-column conflicts are resolved through an explicit policy, unique new output columns are the default, overwrite/update mode requires confirmation, and formula batch summary sheets record requested target, actual target, conflict state, and output action.
+- [x] Added large-dataset safeguards: imports warn before reading large files, loaded/manual datasets warn when cell count or memory estimate is high, project open warns about large stored sheets, and the Data Editor skips full column auto-sizing for large sheets.
+- [x] Added the first backend-boundary slice in `core/data_backends.py`: backend labels, `DatasetProfile`, large-data thresholds, DataFrame/file size profiling, and shared byte formatting. `MainWindow` now uses this module for large-file warnings, large-dataset warnings, project large-sheet notices, and size-aware Data Editor column auto-sizing.
+- [x] Added a persisted dataset backend label to `Dataset`/`.jasc` metadata, defaulting old and new in-memory worksheets to `pandas`; non-Pandas backends will be surfaced in the Data Editor summary once introduced.
+- [x] Updated `Roadmap.md` and `Agent_Instructions.md` so full DuckDB/PyArrow/Parquet large-dataset mode follows the first usable batch workflow, while the lightweight backend/profile boundary is maintained now to prevent batch recipes from assuming every source is an editable Pandas DataFrame.
+- [x] Added the first PyInstaller-aware parallel batch execution layer in `core/batch_processing.py`: top-level formula worker functions, pickle-friendly task/result dataclasses, Auto/Sequential/Parallel execution decisions, worker-count limits, elapsed-time reporting, and sequential fallback if process startup fails.
+- [x] Extended Apply Formula batch runs with execution controls. Whole-sheet non-visible targets can now run through worker processes, while the active sheet stays on the visible model path for undo/redo. Formula batch summary sheets now include per-sheet execution mode and elapsed seconds.
+- [x] Added `multiprocessing.freeze_support()` in `main.py` and moved Qt imports inside `main()` so future Windows/PyInstaller worker processes do not import the full UI shell at child-process startup.
+- [x] Started the second batch-processing implementation slice for calculus operations: `Derivative` and `Integral` now expose target worksheet selection, the same unique/stop/overwrite target-column policy used by formulas, sequential per-sheet execution, active-sheet plotting when available, operation provenance metadata comments, and cumulative multi-sheet summary datasets with source sheet, bindings, method, output action, row/finite counts, min/max/mean, status/error text, and elapsed seconds.
+- [x] Started the third batch-processing implementation slice for signal transforms: `FFT` and `Inverse FFT` now expose target worksheet selection, reuse exact signal/spectrum column names across selected sheets, create one result sheet per source, support `{source}` result-sheet naming, preserve operation metadata comments, plot the active-source result when available, and create cumulative multi-sheet quality/log summaries with output sheets, sample/reconstruction counts, dominant FFT frequency/amplitude, spectral power, reconstructed real-signal metrics, status/error text, and elapsed seconds.
+- [x] Fixed an FFT batch-summary crash when using a selected window: `MainWindow` now imports `WINDOW_METHODS` before using it to write readable FFT window labels in the cumulative summary.
 
 
 ## 3. Active Bugs / Known Issues
@@ -240,30 +257,36 @@
 - [ ] Statistics companion plot, multi-column, and grouped-statistics support is implemented but still needs compile/import, Qt dialog, numerical, and manual plot smoke tests once a usable Python/Qt runtime is available.
 - [ ] Interpolated 2D-map support is implemented but still needs compile/import, Qt, and manual rendering smoke tests once a usable Python/Qt runtime is available.
 - [ ] Column metadata support is implemented but still needs compile/import, Qt, save/load, undo/redo, copy/paste, and role-hint smoke tests once a usable Python/Qt runtime is available.
-- [ ] Python compile/import and Qt smoke checks were not rerun after the latest Data Editor, interpolated 2D-map, metadata, interpolation-workbench, and statistics companion-plot changes because `python` resolves to the Microsoft Store launcher and currently fails with "A specified logon session does not exist"; `py` is not installed.
+- [ ] Formula batch application is an initial slice, not the full recipe system: selected-row mode is current-sheet only, non-visible target sheets are updated directly without workspace-level undo history when explicit overwrite/update is confirmed, and column remapping is currently exact expression/name based rather than role/position preview based.
+- [ ] Derivative/integral batch application is an initial sequential slice, not the full recipe system: selected worksheets must have exact X/Y column names, non-visible target sheets are updated directly without workspace-level undo history, per-source result-sheet mode is not implemented, and there is no progress/cancel UI or parallel worker path yet.
+- [ ] FFT/iFFT batch application is an initial sequential slice, not the full recipe system: selected worksheets must have exact signal/spectrum column names, result sheets are always new workspace datasets, saved recipes/remapping/progress/cancel/parallel workers are not implemented, and spectral diagnostics are limited to basic summary metrics.
+- [ ] Formula batch parallel execution is process-based and still synchronous from the GUI perspective. It can speed compatible whole-sheet batches, but DataFrames/Series must be pickled into and out of worker processes, so small batches or very large in-memory sheets may run faster or safer sequentially. Progress/cancel/background job UI is still pending.
+- [ ] Large-dataset support is still in-memory Pandas plus profiling/warnings, not chunked/lazy. Undo snapshots still deep-copy the visible dataset, so very large sheets can consume substantial memory during edits and in-place analysis. Full DuckDB/PyArrow/Parquet-backed large datasets remain planned after the first usable batch workflow unless backend dispatch becomes a blocker sooner.
+- [ ] Python compile/import and Qt smoke checks were not rerun after the latest Data Editor, interpolated 2D-map, metadata, interpolation-workbench, statistics companion-plot, formula-batch, calculus-batch, FFT/iFFT-batch, formula-authoring, and large-dataset safeguard changes because `python` resolves to the Microsoft Store launcher and currently fails with "A specified logon session does not exist"; `py` is not installed.
 - [ ] Required analytical-model list mentions arbitrary n-th degree polynomial fitting, but the current fit registry only has linear, quadratic, and cubic polynomial models.
 - [ ] There is no automated test suite or PyInstaller/spec packaging file in the repository yet.
 
 ## 4. Next Steps for Current/New Session (To-Do)
-1. Start Competitive Stage 0 from `Roadmap.md`: install or activate a usable Python runtime, add repeatable smoke tests, and verify the current Data Editor/context-menu and interpolated 2D-map changes.
-2. Manually smoke-test column metadata: edit roles/units/long names/comments, rename columns from the metadata table, open metadata by double-clicking a column header, undo/redo metadata and rename edits, save/load `.jasc`, delete metadata-bearing columns, copy/paste metadata-bearing columns, and confirm plot/math/fitting defaults honor X/Y/Z/error roles.
-3. Manually smoke-test Plot Inspector metadata labels: select metadata-bearing X/Y/Z columns, add/update/load plots, run derivative/integral/FFT/fit plot shortcuts, and confirm Axes fields show long-name/unit labels while preserving manually typed axis labels.
-4. Manually smoke-test Analysis > Statistics companion plots plus multi-column and grouped operations: auto single-column histogram/normal overlay, box, violin, z-score result series, cumulative result series, two-column scatter, regression line, Bland-Altman, multi-column correlation/PCA outputs and plots, grouped ANOVA/Kruskal/Tukey/Mann-Whitney outputs, and grouped/cross-sheet box/violin helper dataset creation.
-5. Manually smoke-test Analysis > Interpolation: 1D generated ranges with all methods and outside policies, 2D generated grids with linear/cubic/piecewise/RBF methods, N-D existing-column and manual query modes, duplicate source-coordinate averaging, generated-grid cap warnings, metadata propagation, and project save/load.
-6. Manually smoke-test Phase 2A plot types on real datasets: Line, Scatter, Line + Markers, Errorbar, Vertical Bar, Horizontal Bar, Area, Histogram, Box Plot, and Violin Plot, including saved plot save/load and invalid column selections.
-7. Manually smoke-test SciencePlots styling on the live canvas: Science, IEEE, Nature, color cycles, custom tokens, saved plot save/load, and LaTeX disabled/enabled behavior.
-8. Manually smoke-test the Data Editor right-click menu on cells and column headers: Undo, Redo, Copy Values, Paste Values, Copy Column(s), Paste Column(s), paste expansion, and undo/redo after value and column paste.
-9. Manually smoke-test Data Editor copy/paste between imported datasets and Manual Entry, including full-column selections and tab-delimited clipboard fallback from external spreadsheets.
-10. Manually smoke-test Data Inspector append/insert/delete row and column operations, including insertion before the current selection and undo/redo.
-11. Begin plot-type expansion Phase 4: pie and donut charts with label/value column roles, percentage label controls, exploded slice controls, and saved-state persistence.
-12. Start the next advanced-statistics layer: two-way/repeated-measures ANOVA design inputs, ANCOVA planning, clustering result datasets, logistic/ROC workflows, and richer statistical advisor/reporting outputs.
-13. Manually smoke-test interpolated 2D maps on irregular X/Y/Z datasets: heatmap, contour, filled contour, linear interpolation, cubic spline interpolation, piecewise cubic interpolation, saved plot save/load, dataset rename, and X/Y locator prediction of Z values.
-14. Continue the interpolated 2D-map follow-ups: regular-grid heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, and contour-level controls.
-15. Continue later Phase 2A work in order: candlestick/OHLC plots, then multi-panel/subplot layouts.
-16. Use the new competitive roadmap after Phase 2A/stabilization work: finish Stage 1 workbook metadata and column roles, Stage 2 Excel/import-export connectors, then graph templates/layout, analysis workbench expansion, advanced fitting, automation/templates, reporting, and performance/packaging.
-17. Add broader edge-case tests for unusual imported data, singular fits, non-monotonic X values, missing values, and project files with many sheets.
-18. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
-19. Write the PyInstaller setup script for building the standalone `.exe`.
+1. Start Competitive Stage 0 from `Roadmap.md`: install or activate a usable Python runtime, add repeatable smoke tests, and verify the current Data Editor/context-menu, metadata, interpolation, statistics, and 2D-map changes.
+2. Start Competitive Stage 1 from `Roadmap.md`: add a lightweight operation recipe model, JSON-friendly persistence, column-binding strategy, backend capability checks, batch run result/log structures, and a first batch workflow UI.
+3. Finish the formula/calculated-column batch MVP by adding formal `OperationRecipe` capture, saved recipe persistence, mapping previews, role/position fallback, backend-aware compatibility fields, workspace-level undo/history for non-visible target sheets, and a progress/cancel UI around batch execution.
+4. Harden formula/calculus batch MVPs with formal `OperationRecipe` capture, mapping previews, role/position fallback, workspace-level undo/history for non-visible target sheets, and progress/cancel UI.
+5. Implement interpolation batch application next: repeat coordinate/value/method/query settings, create per-source prediction sheets, and when generated/manual query points are shared add an optional stacked cumulative prediction table keyed by source sheet and query coordinates.
+6. Implement batch statistics with per-source result sheets plus required cumulative long-format results: source sheet, operation, bindings, metric, value, p-value, notes, status, and warnings.
+7. Implement batch curve fitting with per-source fit/residual outputs plus required cumulative parameter/metric summaries: source sheet, model, parameter values/errors, bounds/fixed state, R2/adjusted R2/RMSE/MAE, output sheets, status, and warnings.
+8. Add batch plot-template application and graph export queues once the recipe model can map columns by name, role, and position.
+9. Manually smoke-test column metadata: edit roles/units/long names/comments, rename columns from the metadata table, open metadata by double-clicking a column header, undo/redo metadata and rename edits, save/load `.jasc`, delete metadata-bearing columns, copy/paste metadata-bearing columns, and confirm plot/math/fitting defaults honor X/Y/Z/error roles.
+10. Manually smoke-test Plot Inspector metadata labels: select metadata-bearing X/Y/Z columns, add/update/load plots, run derivative/integral/FFT/fit plot shortcuts, and confirm Axes fields show long-name/unit labels while preserving manually typed axis labels.
+11. Manually smoke-test Analysis > Statistics companion plots plus multi-column and grouped operations: auto single-column histogram/normal overlay, box, violin, z-score result series, cumulative result series, two-column scatter, regression line, Bland-Altman, multi-column correlation/PCA outputs and plots, grouped ANOVA/Kruskal/Tukey/Mann-Whitney outputs, and grouped/cross-sheet box/violin helper dataset creation.
+12. Manually smoke-test Analysis > Interpolation: 1D generated ranges with all methods and outside policies, 2D generated grids with linear/cubic/piecewise/RBF methods, N-D existing-column and manual query modes, duplicate source-coordinate averaging, generated-grid cap warnings, metadata propagation, and project save/load.
+13. Manually smoke-test Phase 2A plot types on real datasets: Line, Scatter, Line + Markers, Errorbar, Vertical Bar, Horizontal Bar, Area, Histogram, Box Plot, and Violin Plot, including saved plot save/load and invalid column selections.
+14. Continue Competitive Stage 2 metadata/workbook work where it improves batch column matching, source tracking, project organization, and notes/report storage.
+15. Begin plot-type expansion Phase 4 after the first batch workflow is usable: pie and donut charts with label/value column roles, percentage label controls, exploded slice controls, and saved-state persistence.
+16. Start the next advanced-statistics layer after batch statistics exists: two-way/repeated-measures ANOVA design inputs, ANCOVA planning, clustering result datasets, logistic/ROC workflows, and richer statistical advisor/reporting outputs.
+17. Manually smoke-test interpolated 2D maps on irregular X/Y/Z datasets: heatmap, contour, filled contour, linear interpolation, cubic spline interpolation, piecewise cubic interpolation, saved plot save/load, dataset rename, and X/Y locator prediction of Z values.
+18. Continue the interpolated 2D-map follow-ups: regular-grid heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, and contour-level controls.
+19. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
+20. Write the PyInstaller setup script for building the standalone `.exe`.
 
 ## 5. Architectural Context Notes
 - File parsing lives in `core/file_io.py`; Qt file selection and dialogs live in the UI layer.
@@ -293,9 +316,22 @@
 - Statistics multi-column operations use `StatisticOperation.scope == "multi"` and the Statistics dialog multi-select list. The engine expects two or more numeric columns from the primary sheet.
 - Grouped statistics currently include one-way ANOVA, Kruskal-Wallis, Tukey HSD, pairwise Mann-Whitney with Holm-adjusted p-values, Levene/Brown-Forsythe and Bartlett equal-variance checks, and per-group Shapiro-Wilk normality checks.
 - Grouped statistics companion plots create wide helper datasets with one column per group so existing box/violin plot rendering can be reused.
+- Batch processing is now the next major roadmap priority. Treat it as operation recipes plus worksheet selection, visible column mapping, per-source outputs, cumulative outputs, and batch logs.
+- Batch recipe inputs should bind by exact column name first, semantic role second, and positional fallback last. Any fallback or ambiguous mapping must be shown to the user before execution.
+- Batch statistics and curve fitting must produce cumulative long-format sheets in addition to per-source outputs. Formula/calculus batches should update each target sheet and produce cumulative run summaries.
+- Future operation families should not be considered batch-complete until they define recipe schema, compatibility checks, per-source outputs, cumulative outputs, and batch-log fields.
+- Batch parallelism must stay PyInstaller-friendly: keep worker functions at module top level, keep task/result dataclasses pickle-friendly, and never pass Qt objects, bound methods, lambdas, open file handles, or workspace/model objects into process workers. The active Data Editor sheet should keep using model methods until workspace-level undo exists for batch edits.
 - Data Editor "Add" row/column actions append to the end; "Insert" row/column actions insert before the first selected row/column, or append when nothing is selected.
 - Export currently writes UTF-8 CSV or tab-delimited TXT without the DataFrame index.
-- Formula expressions expose valid Python-identifier columns directly (`x + y`) and all columns through `col("Column Name")`.
+- Formula expressions expose valid Python-identifier columns directly (`x + y`), positional aliases such as `col1` and `col2` when they do not conflict with existing names, and all columns through exact references like `col("Column Name")`.
+- Apply Formula includes column-reference insertion controls so users can select a column and insert either its positional alias or an exact-name `col("...")` expression instead of manually typing long column names.
+- Apply Formula protects existing target columns by default. Its target-exists policy can create unique new output columns, stop on conflicts, or explicitly overwrite/update existing columns after a confirmation; multi-sheet summary datasets include requested/actual targets and output actions.
+- Derivative and Integral now use the same worksheet-selection and target-column conflict policy pattern as Apply Formula. `MainWindow._run_column_math_batch()` is the current sequential template for the next batch families: exact-name compatibility, per-sheet try/except, active-sheet undo path, generated operation metadata, tidy cumulative summary dataset, and explicit known gaps.
+- FFT and Inverse FFT now use worksheet-selection and per-source result-sheet creation through `MainWindow._run_fft_batch()` and `_run_ifft_batch()`. Result-sheet names support `{source}` for custom batch naming; if the default current-sheet name is left unchanged, other sources use `{source}_FFT` or `{source}_iFFT`.
+- Generated formula, derivative/integral, interpolation, FFT/iFFT, statistics, and curve-fit outputs store their latest operation in output column metadata comments using `Operation: ...`; existing non-operation comment lines are preserved.
+- Large file/dataset safeguards are centralized in `core/data_backends.py`: file imports warn above 100 MiB, DataFrame additions warn above 2,000,000 cells or 250 MiB estimated DataFrame memory, project open reports large stored sheets, and Data Editor auto-sizing is skipped above 250,000 cells.
+- `core/data_backends.DatasetProfile` plus the persisted `Dataset.backend` label are the first backend boundary. Keep future batch recipe compatibility checks, source-backend labels, large-data import previews, and materialize/query decisions routed through this layer rather than duplicating size/backend checks in UI modules.
+- Full large-dataset mode should use Pandas for normal editable sheets and DuckDB plus PyArrow/Parquet for read-only or limited-edit large datasets with preview/query/sample/materialize workflows. Do not globally replace Pandas with Modin/Dask/Polars.
 - Formula expressions include common NumPy functions/constants such as `sin`, `log`, `sqrt`, `where`, `pi`, and `np.pi`; arbitrary imports, attribute access, and statements are intentionally blocked.
 - Formula exponentiation uses Python syntax (`**`); `^` is intentionally rejected to avoid accidental bitwise-XOR results.
 - Formula metadata is currently in-memory project state: it is retained while the app session/dataset exists, but it is not yet exported with CSV/TXT files.

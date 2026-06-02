@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import sys
-
-from PySide6.QtWidgets import QApplication
-
-from ui.main_window import MainWindow
 
 
 def setup_logging() -> None:
@@ -21,6 +18,10 @@ def setup_logging() -> None:
 
 def main() -> int:
     """Start the Qt application."""
+    from PySide6.QtWidgets import QApplication
+
+    from ui.main_window import MainWindow
+
     setup_logging()
     app = QApplication(sys.argv)
     app.setApplicationName("JASC Data Processor")
@@ -32,4 +33,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     raise SystemExit(main())

@@ -7,9 +7,9 @@
 Reviewed on 2026-05-29 against the current repository state and session changelog.
 
 ### Implemented or Started
-- Workspace and project state: multiple Pandas DataFrames, unique dataset names, `.jasc` save/load, saved plots, project-scoped custom fit models, current project path tracking, close project, and lightweight per-column metadata.
-- Data ingestion and editing: CSV/TXT import with delimiter/header options, manual spreadsheet entry, table sizing, fill range, editable Data Editor, add/insert/delete/rename rows and columns, formula metadata, column roles/units/long names/comments, undo/redo history, value clipboard, whole-column clipboard, and right-click/double-click metadata affordances.
-- Formulas and transforms: constrained Python-like formula evaluator with curated NumPy/SciPy namespaces, row-scoped or full-column formula application, derivative/integral result columns, FFT/iFFT result sheets, and a first general interpolation workbench.
+- Workspace and project state: multiple Pandas DataFrames, persisted dataset backend labels, unique dataset names, `.jasc` save/load, saved plots, project-scoped custom fit models, current project path tracking, close project, and lightweight per-column metadata.
+- Data ingestion and editing: CSV/TXT import with delimiter/header options, manual spreadsheet entry, table sizing, fill range, editable Data Editor, large file/dataset warnings, size-aware column auto-sizing, add/insert/delete/rename rows and columns, formula metadata, operation provenance in column comments, column roles/units/long names/comments, undo/redo history, value clipboard, whole-column clipboard, and right-click/double-click metadata affordances.
+- Formulas and transforms: constrained Python-like formula evaluator with curated NumPy/SciPy namespaces, direct/positional/exact column references, row-scoped or full-column formula application, derivative/integral result columns, FFT/iFFT result sheets, and a first general interpolation workbench.
 - Statistics: descriptive summaries, quantiles, diagnostics, normality tests, outlier checks, z-score/cumulative series, correlations, regression, agreement metrics, paired tests, independent-sample tests, multi-column summaries/correlations/covariance/PCA, grouped one-way analyses, post-hoc comparisons, and optional companion plots.
 - Curve fitting: built-in analytical models, custom expression models, parameter guesses/bounds/fixed parameters, weighting/error columns, ODR for X/Y uncertainties, confidence bands, residual sheets, fit reports, and immediate fit overlay plots.
 - Plotting: Matplotlib canvas and toolbar, saved plot definitions, multi-series XY plots, right Y axis, axis ranges/scales, locators, SciencePlots styles, line/scatter/line+markers/errorbar, bar/barh/area/histogram, box/violin, and early interpolated 2D maps.
@@ -22,7 +22,7 @@ Reviewed on 2026-05-29 against the current repository state and session changelo
 - The app has project-level datasets and a first lightweight column-metadata layer, but not full Origin/SigmaPlot-style workbooks with matrix sheets, notes, reports, folders, cell comments, dependency graphs, or rich worksheet formatting.
 - Import/export is narrow compared with current commercial tools.
 - Plotting is strong for core 2D scientific charts but lacks broad template/layout/page/report workflows, many specialized graph families, and true 3D graphing.
-- Analysis operations exist but are mostly individual dialogs, not reusable recalculating operation graphs/templates.
+- Analysis operations exist but are mostly individual dialogs, not reusable recipes with batch execution, cumulative outputs, recalculation, or audit logs.
 - Fitting lacks global multi-dataset fitting, dynamic/robust initial-guess search, peak analysis, surface fitting, and advanced model comparison.
 
 ## Competitive Reference Points
@@ -80,6 +80,7 @@ The benchmark products emphasize:
 - Add a statistics workbench for descriptive, distribution, correlation, regression, paired-test, independent-test, multi-column, and grouped/factor reports across columns and sheets. (complete)
 - Add optional companion plots for statistics outputs, including distribution, comparison, scatter/regression, Bland-Altman, and result-series plots. (initial implementation complete)
 - Ensure results from these operations can be saved as new columns in the workspace or plotted immediately. (complete)
+- Add operation recipes and batch execution so formulas, transforms, statistics, fitting, interpolation, FFT/iFFT, and plots can be repeated across compatible worksheets with cumulative outputs. (next major implementation target)
 
 ### Phase 4: Curve Fitting Engine
 - Create the curve fitting dialog/UI. (complete)
@@ -105,9 +106,9 @@ The benchmark products emphasize:
 | Analysis | Calculus, FFT/iFFT, 1D/2D/N-D interpolation, statistics workbench | Missing smoothing workbench, filters, baseline correction, peak detection/integration, convolution/correlation, STFT, wavelets, 2D FFT, resampling workflows, ROI/gadget-style analysis, and analysis chains |
 | Statistics | Useful first-pass reports, multi-column correlations/covariance/PCA summaries, grouped one-way analyses, post-hoc comparisons, and companion plots | Missing two-way/repeated-measures ANOVA, ANCOVA/MANOVA families, broader nonparametric families, clustering, survival/reliability, SPC/control charts, DOE, power/sample-size, ROC, probability/distribution fitting, and guided statistical advisor workflows |
 | Fitting | Nonlinear fits, ODR, custom models, weights, residuals, confidence bands | Missing global fitting with shared/local parameters, dynamic initial-guess search, robust model ranking, arbitrary polynomial degree UI, prediction bands, peak deconvolution, surface fitting, implicit fitting UI, constraints by expression, and batch fitting |
-| Automation | Saved plots, saved projects, formula metadata | Missing operation history graph, automatic/manual recalculation locks, templates for analysis and graphing, repeat-last-operation, batch processing, macro recorder, scripting console/API, plugins, and command log |
+| Automation | Saved plots, saved projects, formula metadata, and column-role hints | Missing operation recipes, batch application across compatible worksheets, cumulative result sheets, operation history graph, automatic/manual recalculation locks, templates for analysis and graphing, repeat-last-operation, macro recorder, scripting console/API, plugins, and command log |
 | Reporting/export | Dataset export and Matplotlib toolbar save | Missing report editor, PDF/Word/PowerPoint export workflows, SVG/PDF/EPS/EMF export presets, journal export profiles, graph page export, HTML/web reports, and project-wide slideshow/export |
-| Performance/package | Pandas/Matplotlib desktop app | Missing large-data strategy, lazy loading, background jobs, progress/cancel, memory profiling, autosave/recovery, installer/spec, sample projects, and automated CI/test fixtures |
+| Performance/package | Pandas/Matplotlib desktop app with large dataset warnings and editor auto-size guards | Missing true large-data strategy, lazy/chunked loading, preview import, background jobs, progress/cancel, memory profiling, smarter undo storage, autosave/recovery, installer/spec, sample projects, and automated CI/test fixtures |
 
 ## Step-by-Step Competitive Roadmap
 
@@ -127,7 +128,78 @@ Acceptance criteria:
 - Current Data Editor context-menu work, interpolated 2D-map work, and general interpolation workbench are tested.
 - Known runtime blocker is removed from `ChangeLog_Session.md`.
 
-### Competitive Stage 1: Metadata-Rich Workbook Model
+### Competitive Stage 1: Operation Recipes, Batch Processing, and Cumulative Outputs
+
+Purpose: turn JASC from a collection of one-off tools into a lab/R&D workbench where an analysis defined once can be applied to many compatible worksheets with clear per-sheet and cumulative outputs.
+
+Core architecture:
+- Introduce an `OperationRecipe` model that records operation family, operation key/model, input bindings, parameters, output naming templates, column-matching strategy, cumulative-output strategy, and source compatibility requirements.
+- Keep recipes backend-aware from the start: record whether a source is an in-memory Pandas worksheet, a future DuckDB/Parquet large dataset, or another backend, plus whether the operation can run in-place, must materialize selected columns, or can run as a query.
+- Capture recipes from completed dialogs where practical: formula, derivative/integral, FFT/iFFT, interpolation, statistics, curve fitting, and plot generation.
+- Add a `Batch Processing...` workflow that starts from a selected recipe or the last successful operation, then lets the user choose target worksheets, preview compatibility, override column mappings, choose output behavior, and run the batch.
+- Column binding must support exact column names, column roles (`x`, `y`, `z`, `group`, `label`, `weight`, `x_error`, `y_error`), and positional fallback, with visible warnings when fallback mapping is used.
+- Every batch run must create a batch log dataset with source sheet, status, warning/error text, output dataset names, operation key, timestamp, and key parameters.
+- Cumulative outputs should use a long/tidy table by default because it is easy to filter, pivot, plot, and export. Add wide/pivot summaries later as optional views.
+- Persist reusable recipes and recent batch runs in `.jasc` project metadata with backward-compatible loading.
+
+Operation-by-operation implementation plan:
+- Formula / calculated columns:
+  - Batch mode applies the same expression to each selected worksheet.
+  - Inputs are remapped by column name/role/position; target column can overwrite, append, or use a name template such as `{source}_{target}`.
+  - Output remains in each target worksheet by default, with formula metadata preserved.
+  - Cumulative output is a batch log plus optional per-sheet summary: source sheet, target column, row count, missing/non-numeric counts, min/max/mean of the generated column, and warnings.
+  - Initial implementation started: `Apply Formula` can target multiple worksheets, applies the expression to each selected sheet, preserves formula metadata, protects existing target columns by default with unique output names, requires confirmation for explicit overwrite/update mode, and creates a formula batch summary dataset when more than one sheet is selected. Formal recipe persistence, role/position remapping, and workspace-level undo for non-visible sheets remain follow-ups.
+- Derivative and integral:
+  - Batch mode repeats the same X/Y/method/parameter choices across compatible sheets.
+  - Output can append result columns to each source sheet or create per-source result sheets.
+  - Cumulative output records source sheet, input columns, method, output column/sheet, row count, finite result count, min/max/mean, and integration initial value when relevant.
+  - Initial implementation started: `Derivative` and `Integral` dialogs can target multiple worksheets, use the same target-column conflict policy as formulas, append/update result columns on each selected sheet, preserve operation provenance metadata, plot the active-sheet result when available, and create `{current}_derivative_batch_summary` / `{current}_integral_batch_summary` datasets for multi-sheet runs. Formal recipe persistence, role/position remapping, per-source result-sheet mode, workspace-level undo for non-visible sheets, progress/cancel UI, and parallel workers remain follow-ups.
+- FFT and iFFT:
+  - Batch mode creates one spectrum/reconstruction result sheet per source.
+  - Cumulative output records source sheet, signal/spectrum columns, sample count, sample spacing, dominant frequency, dominant amplitude, total spectral power, and warnings.
+  - Initial implementation started: `FFT` and `Inverse FFT` dialogs can target multiple worksheets, reuse exact signal/spectrum column names across sheets, create per-source spectrum/reconstruction sheets, support `{source}` in result-sheet naming, preserve operation metadata comments, plot the active-source result when available, and create cumulative `{current}_FFT_batch_summary` / `{current}_iFFT_batch_summary` datasets for multi-sheet runs. Formal recipe persistence, role/position remapping, progress/cancel UI, optional parallel workers, and richer spectral diagnostics remain follow-ups.
+- Interpolation:
+  - Batch mode repeats the same coordinate/value bindings, method, smoothing/RBF parameters, outside-range policy, and query mode.
+  - For shared generated/manual query coordinates, create one per-source prediction sheet and an optional cumulative prediction table keyed by source sheet and query coordinates.
+  - For worksheet-specific query columns, create per-source prediction sheets plus a cumulative run/quality table.
+- Statistics:
+  - Batch mode repeats the same single-column, pair, multi-column, or grouped statistic across selected worksheets.
+  - Per-source result sheets are still created for inspection.
+  - Cumulative output is required: source sheet, operation, primary/secondary/group binding, metric, value, p-value, notes, and status.
+  - Add optional wide summary/pivot output later for common metrics such as mean, standard deviation, p-values, ANOVA F/H statistics, PCA variance ratios, and post-hoc comparisons.
+- Curve fitting:
+  - Batch mode repeats the same model, method, initial parameters, bounds, fixed parameters, weighting/error bindings, confidence-band settings, and residual settings.
+  - Per-source fit curve and optional residual sheets are still created.
+  - Cumulative output is required: source sheet, model, parameter, value, standard error, bounds/fixed state, R2, adjusted R2, RMSE, MAE, covariance availability, fit status, warning/error text, and output sheet names.
+  - Later extend the same framework to global fitting with shared/local parameters across datasets.
+- Plot generation:
+  - Batch mode applies a saved plot template to each compatible sheet or compatible group of sheets.
+  - Outputs are saved plot definitions per source sheet and optionally queued graph export jobs.
+  - Cumulative output is a plot/export log with source sheet, saved plot name, template name, render status, and export file path when applicable.
+- Future peak/signal/data-preparation workflows:
+  - New tools must define their recipe schema, compatibility check, per-source output, cumulative output, and batch-log fields before being considered complete.
+
+Implementation phases:
+1. Add a lightweight dataset backend/profile boundary before the formal recipe model grows further, so batch code does not assume every source is an editable Pandas DataFrame. (started: `core/data_backends.py` plus persisted `Dataset.backend`)
+2. Add a reusable batch execution layer before broadening batch operations: top-level worker functions, serializable task/result dataclasses, conservative Auto/Sequential/Parallel execution choices, PyInstaller-compatible Windows spawn behavior, and sequential fallback when process startup or pickling fails. (started: `core/batch_processing.py` plus Apply Formula execution controls)
+3. Add a lightweight `OperationRecipe` and `BatchRunResult` model in the core layer, plus JSON-friendly project persistence.
+4. Implement column-binding and compatibility-check helpers using name, role, and positional fallback.
+5. Add a first `Repeat Last Operation on Worksheets...` dialog with target worksheet selection, mapping preview, output naming, and dry-run validation.
+6. Implement batch formula/calculated-column and derivative/integral first because they exercise in-place column outputs. (initial slices started)
+7. Implement batch statistics and curve fitting next because they require cumulative result aggregation and are the highest-value lab/R&D workflows.
+8. Add batch interpolation next; FFT/iFFT now has an initial sequential result-sheet batch slice.
+9. Add batch plot-template application and graph export queues.
+10. Add saved named recipes, recipe editing, rerun failed sheets, and project-level operation history.
+
+Acceptance criteria:
+- A user can run an operation on one worksheet, repeat it on many compatible worksheets, and inspect a clear success/failure log.
+- Statistics and fitting batches always produce cumulative result sheets suitable for filtering, plotting, and export.
+- Formula/calculus batches can write results back to each target sheet without breaking undo/redo or column metadata.
+- Column mapping is visible and editable before execution; ambiguous mappings never happen silently.
+- Batch execution can use multiple CPU cores for compatible whole-sheet jobs without sending Qt objects, bound methods, lambdas, or open file handles to worker processes.
+- Batch operations can be saved in `.jasc` and rerun after reopening the project.
+
+### Competitive Stage 2: Metadata-Rich Workbook Model
 
 Purpose: build the data foundation needed for Origin/SigmaPlot-like workflows.
 
@@ -144,7 +216,7 @@ Acceptance criteria:
 - Metadata survives save/load and appears in Data Editor headers/tooltips.
 - Plot and analysis dialogs can filter or suggest columns by role.
 
-### Competitive Stage 2: Import, Export, and Data Connectors
+### Competitive Stage 3: Import, Export, and Data Connectors
 
 Purpose: close the most visible data-ingestion gap.
 
@@ -153,7 +225,7 @@ Tasks:
 - Add JSON, XML/HTML table, HDF5, NetCDF, MATLAB `.mat`, and Parquet import where dependencies are reasonable.
 - Add ODBC/SQLite import with query preview; start with SQLite if full ODBC is too heavy.
 - Add drag/drop import and recent import settings.
-- Add re-import from source file and manual refresh; defer periodic refresh until Stage 7.
+- Add re-import from source file and manual refresh; defer periodic refresh until Stage 9.
 - Add export profiles for CSV/TXT/XLSX plus graph export presets for PNG, SVG, PDF, and EPS.
 
 Acceptance criteria:
@@ -161,7 +233,7 @@ Acceptance criteria:
 - Imported datasets remember enough source metadata for refresh.
 - Exported graph files support publication-friendly vector output.
 
-### Competitive Stage 3: Data Preparation Workbench
+### Competitive Stage 4: Data Preparation Workbench
 
 Purpose: make the app useful before analysis begins.
 
@@ -174,9 +246,9 @@ Tasks:
 
 Acceptance criteria:
 - Each operation creates an undoable change or a new result dataset.
-- Operations record enough metadata to be repeated after parameter edits in Stage 7.
+- Operations record enough metadata to be repeated after parameter edits in Stage 9.
 
-### Competitive Stage 4: Graphing and Layout Parity
+### Competitive Stage 5: Graphing and Layout Parity
 
 Purpose: make plots feel like publishable scientific graph pages, not just traces.
 
@@ -193,7 +265,7 @@ Acceptance criteria:
 - A graph template can be applied to a different dataset with compatible roles.
 - Vector export preserves text and line quality.
 
-### Competitive Stage 5: Analysis Workbench Expansion
+### Competitive Stage 6: Analysis Workbench Expansion
 
 Purpose: move from isolated math tools to a broad scientific analysis suite.
 
@@ -208,9 +280,9 @@ Tasks:
 
 Acceptance criteria:
 - Analysis outputs are datasets plus reports and can be plotted immediately.
-- Parameter choices are stored for later recalculation/template use in Stage 7.
+- Parameter choices are stored for later recalculation/template use in Stage 9.
 
-### Competitive Stage 6: Advanced Statistics
+### Competitive Stage 7: Advanced Statistics
 
 Purpose: approach SigmaPlot/OriginPro statistical coverage in practical phases.
 
@@ -228,7 +300,7 @@ Acceptance criteria:
 - Each statistical test produces a structured result dataset and human-readable report.
 - Assumption violations are surfaced with recommended alternative tests.
 
-### Competitive Stage 7: Advanced Fitting, Peak Fitting, and Surface Fitting
+### Competitive Stage 8: Advanced Fitting, Peak Fitting, and Surface Fitting
 
 Purpose: close the high-value analysis gap for research users.
 
@@ -245,24 +317,24 @@ Acceptance criteria:
 - Users can fit multiple datasets with shared parameters and inspect per-dataset residuals.
 - Peak and surface fitting workflows produce reproducible reports and plots.
 
-### Competitive Stage 8: Recalculation, Templates, and Batch Processing
+### Competitive Stage 9: Recalculation, Templates, and Workflow Automation
 
-Purpose: make workflows reproducible and reusable.
+Purpose: build on Stage 1 recipes so workflows become editable, recalculating, template-driven, and scriptable.
 
 Tasks:
-- Introduce an operation-history model that records inputs, parameters, outputs, and dependencies.
+- Extend the Stage 1 recipe model into a full operation-history graph that records inputs, parameters, outputs, dependencies, status, and provenance.
 - Add manual/automatic recalculation modes for formulas, transforms, fits, statistics, and plots.
 - Add analysis templates that can be applied to compatible datasets.
 - Add graph templates and cloneable graph workflows using column roles/names.
 - Add repeat-last-operation and reopen-last-dialog commands.
-- Add batch import, batch plot, batch analysis, and batch export from GUI.
+- Add batch import, advanced batch plot/export, rerun-failed-batch, and scheduled/queued batch workflows from GUI.
 - Add a scripting console/API and a command log; macro recording can follow once operations are represented consistently.
 
 Acceptance criteria:
 - Editing source data can update dependent results on demand or automatically.
 - A template created from one project can process another compatible dataset without hand rebuilding every step.
 
-### Competitive Stage 9: Reporting and Publication Workflow
+### Competitive Stage 10: Reporting and Publication Workflow
 
 Purpose: turn data, graphs, and analyses into final deliverables inside the app.
 
@@ -277,14 +349,19 @@ Acceptance criteria:
 - A report can be saved in `.jasc`, update linked values after recalculation, and export to PDF.
 - A user can export all publication-ready figures from a project in one command.
 
-### Competitive Stage 10: Performance, Packaging, and Extensibility
+### Competitive Stage 11: Performance, Packaging, and Extensibility
 
 Purpose: make the app robust outside the development environment.
 
 Tasks:
 - Add background workers with progress/cancel for imports, fitting, statistics, and large plots.
+- Add a large-data backend based first on DuckDB plus PyArrow/Parquet, keeping Pandas as the default editable backend for small and medium worksheets.
 - Add lazy loading or chunked import for large text/Excel/HDF5 files.
+- Add row/column import limits, sampling previews, and user-selectable load strategies for very large delimited files.
+- Add a read-only paged table model for DuckDB/Parquet-backed datasets, then add limited materialize-to-Pandas workflows for selected rows/columns.
+- Add backend-aware operation dispatch: DuckDB/Polars-style query execution for simple filters, summaries, grouped statistics, and transforms; materialize selected columns for SciPy-heavy fitting/interpolation/statistical tests.
 - Add plot decimation/downsampling for interactive rendering.
+- Replace whole-DataFrame undo snapshots with delta-based or bounded-history undo for large sheets.
 - Add autosave, crash recovery, and project backups.
 - Add PyInstaller spec, icons/resources, version metadata, and a repeatable Windows build command.
 - Add plugin/app extension points for importers, analysis operations, plot types, and fit models.
@@ -292,15 +369,21 @@ Tasks:
 
 Acceptance criteria:
 - Large-data workflows remain responsive.
+- A 10 GB source file can be opened as a preview/queryable large dataset without loading the full table into Pandas memory.
+- Large datasets can be sampled, filtered, summarized, plotted through downsampled/materialized views, and exported without breaking normal Pandas worksheets.
 - A signed or at least repeatable `.exe` build can be produced from a clean checkout.
 - Third-party feature additions can be registered without editing core UI code.
 
 ## Near-Term Recommended Order
 
 1. Finish Competitive Stage 0 so the current feature set can be verified reliably.
-2. Complete Phase 2A subphase 4 (pie/donut) and manually smoke-test all existing plot types.
-3. Finish Phase 2A subphase 5 follow-ups for matrix/density maps.
-4. Implement Stage 1 metadata and column roles before adding major import, graph-template, or batch features.
-5. Implement Stage 2 Excel import/export next, because it unlocks real-world user workflows and supports later workbook metadata.
-6. Start Stage 4 graph templates/layout after column roles exist, not before.
-7. Start Stage 8 recalculation/templates once data-prep, fitting, and analysis operations have consistent metadata.
+2. Add the lightweight dataset backend/profile boundary that lets batch recipes carry source-backend capability without implementing full DuckDB/Parquet large mode yet.
+3. Start Competitive Stage 1 immediately: operation recipes, worksheet batch selection, column-binding previews, batch logs, and cumulative outputs.
+4. Implement the first batch MVP for formula/calculated columns and derivative/integral because they exercise in-place worksheet outputs.
+5. Implement batch statistics and batch curve fitting next because cumulative result sheets are the major lab/R&D productivity gain.
+6. Continue Competitive Stage 2 metadata/workbook work as needed to strengthen column matching, source metadata, notes, and project organization.
+7. Complete Phase 2A subphase 4 (pie/donut) and Phase 2A subphase 5 matrix/density follow-ups after the first batch workflow is usable.
+8. Implement Stage 3 Excel import/export because it unlocks real-world multi-file and multi-sheet workflows for batching.
+9. Implement the full DuckDB/PyArrow large-dataset backend after the first batch workflow and import/export foundations are stable, or earlier only if batch implementation starts requiring backend dispatch.
+10. Start Stage 5 graph templates/layout after batch plot-template application and column roles exist.
+11. Start Stage 9 recalculation/templates after operation recipes and batch outputs are stable.

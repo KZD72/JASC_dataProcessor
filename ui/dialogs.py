@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from html import escape
 
 from PySide6.QtCore import Qt
@@ -222,6 +223,8 @@ class ColumnExpressionDialog(QDialog):
         selected_rows_available: bool,
         default_target: str | None = None,
         column_formulas: dict[str, str] | None = None,
+        dataset_names: list[str] | None = None,
+        current_dataset_name: str = "",
         parent: QWidget | None = None,
     ) -> None:
         """Create controls for target column, formula text, and row scope."""
@@ -230,6 +233,7 @@ class ColumnExpressionDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(560)
         self._column_formulas = column_formulas or {}
+        self._current_dataset_name = current_dataset_name
         self._last_loaded_formula = ""
 
         self._target_combo = QComboBox()
@@ -244,11 +248,40 @@ class ColumnExpressionDialog(QDialog):
         else:
             self._target_combo.setCurrentText("Result")
 
+        self._target_conflict_combo = QComboBox()
+        self._target_conflict_combo.addItem("Create unique new column if target exists", "unique")
+        self._target_conflict_combo.addItem("Stop and warn if target exists", "stop")
+        self._target_conflict_combo.addItem("Overwrite/update existing column", "overwrite")
+
+        cpu_count = os.cpu_count() or 1
+        self._batch_execution_combo = QComboBox()
+        self._batch_execution_combo.addItem("Auto", "auto")
+        self._batch_execution_combo.addItem("Sequential", "sequential")
+        self._batch_execution_combo.addItem("Parallel processes", "parallel")
+
+        self._batch_workers_spin = QSpinBox()
+        self._batch_workers_spin.setRange(1, max(1, cpu_count))
+        self._batch_workers_spin.setValue(max(1, min(4, cpu_count - 1)))
+        self._batch_workers_spin.setToolTip("Maximum worker processes for parallel batch runs.")
+
         self._expression_edit = QPlainTextEdit()
         self._expression_edit.setFixedHeight(90)
         self._expression_edit.setPlaceholderText(
-            'Examples: x + y, sin(x), sqrt(col("Voltage")), where(x > 0, x, 0)'
+            'Examples: col1 + col2, x + y, sin(x), sqrt(col("Voltage"))'
         )
+
+        self._column_reference_combo = QComboBox()
+        for index, column_name in enumerate(column_names, start=1):
+            self._column_reference_combo.addItem(f"col{index} -> {column_name}", (index, column_name))
+        self._insert_alias_button = QPushButton("Insert colN")
+        self._insert_exact_button = QPushButton('Insert col("Name")')
+
+        reference_panel = QWidget()
+        reference_layout = QHBoxLayout(reference_panel)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.addWidget(self._column_reference_combo, 1)
+        reference_layout.addWidget(self._insert_alias_button)
+        reference_layout.addWidget(self._insert_exact_button)
 
         self._formula_hint = QLabel()
         self._formula_hint.setWordWrap(True)
@@ -263,11 +296,34 @@ class ColumnExpressionDialog(QDialog):
         self._selected_rows_checkbox.setEnabled(selected_rows_available)
         self._selected_rows_checkbox.setChecked(selected_rows_available)
 
+        self._dataset_list = QListWidget()
+        self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._dataset_list.setMinimumHeight(110)
+        for dataset_name in dataset_names or [current_dataset_name]:
+            if not dataset_name:
+                continue
+            self._dataset_list.addItem(dataset_name)
+            item = self._dataset_list.item(self._dataset_list.count() - 1)
+            item.setSelected(dataset_name == current_dataset_name)
+
+        self._batch_hint = QLabel(
+            "Selected-row mode only applies to the current sheet. "
+            "Uncheck it to apply the formula to multiple sheets. "
+            "Existing target columns are protected by the output policy above."
+        )
+        self._batch_hint.setWordWrap(True)
+
         form = QFormLayout()
         form.addRow("Target column", self._target_combo)
+        form.addRow("If target exists", self._target_conflict_combo)
+        form.addRow("Batch execution", self._batch_execution_combo)
+        form.addRow("Max workers", self._batch_workers_spin)
         form.addRow("Expression", self._expression_edit)
+        form.addRow("Insert column", reference_panel)
         form.addRow("", self._formula_hint)
         form.addRow("", self._selected_rows_checkbox)
+        form.addRow("Apply to sheets", self._dataset_list)
+        form.addRow("", self._batch_hint)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -279,11 +335,29 @@ class ColumnExpressionDialog(QDialog):
         layout.addWidget(buttons)
 
         self._target_combo.currentTextChanged.connect(self._load_formula_for_target)
+        self._column_reference_combo.currentIndexChanged.connect(self._update_column_insert_buttons)
+        self._insert_alias_button.clicked.connect(self._insert_selected_column_alias)
+        self._insert_exact_button.clicked.connect(self._insert_selected_column_exact)
+        self._selected_rows_checkbox.toggled.connect(self._update_dataset_selection_state)
         self._load_formula_for_target(self._target_combo.currentText(), force=True)
+        self._update_dataset_selection_state()
+        self._update_column_insert_buttons()
 
     def target_column(self) -> str:
         """Return the selected or typed target column."""
         return self._target_combo.currentText().strip()
+
+    def target_conflict_policy(self) -> str:
+        """Return how existing target columns should be handled."""
+        return str(self._target_conflict_combo.currentData() or "unique")
+
+    def batch_execution_mode(self) -> str:
+        """Return the requested formula batch execution mode."""
+        return str(self._batch_execution_combo.currentData() or "auto")
+
+    def batch_max_workers(self) -> int:
+        """Return the requested worker limit for parallel formula batches."""
+        return int(self._batch_workers_spin.value())
 
     def expression(self) -> str:
         """Return the expression text."""
@@ -292,6 +366,30 @@ class ColumnExpressionDialog(QDialog):
     def apply_selected_rows_only(self) -> bool:
         """Return whether only selected rows should be updated."""
         return self._selected_rows_checkbox.isChecked()
+
+    def target_dataset_names(self) -> list[str]:
+        """Return the worksheet names selected for formula application."""
+        return [item.text() for item in self._dataset_list.selectedItems()]
+
+    def accept(self) -> None:
+        """Validate worksheet selection before accepting the formula request."""
+        if not self.target_column():
+            QMessageBox.warning(self, "Apply Formula", "Choose or enter a target column.")
+            return
+        if not self.expression():
+            QMessageBox.warning(self, "Apply Formula", "Enter a formula expression.")
+            return
+        if not self.target_dataset_names():
+            QMessageBox.warning(self, "Apply Formula", "Choose at least one target sheet.")
+            return
+        if self.apply_selected_rows_only() and self.target_dataset_names() != [self._current_dataset_name]:
+            QMessageBox.warning(
+                self,
+                "Apply Formula",
+                "Selected-row mode can only apply to the current sheet.",
+            )
+            return
+        super().accept()
 
     def _build_cheatsheet(self, column_names: list[str]) -> str:
         """Return HTML help text for the expression editor."""
@@ -304,6 +402,9 @@ class ColumnExpressionDialog(QDialog):
             "<b>Formula cheatsheet</b><br>"
             "Use plain column names only when they are valid Python names, like "
             "<code>x</code>, <code>temperature</code>, or <code>Voltage_1</code>.<br>"
+            "Use positional aliases like <code>col1</code>, <code>col2</code>, and "
+            "<code>col3</code> for the first, second, and third columns when those aliases "
+            "do not conflict with existing names.<br>"
             'Use <code>col("exact column name")</code> for names with spaces, symbols, or default '
             'manual-entry names. Example: <code>col("Column 1") + col("Column 2")</code>.<br>'
             "Powers use <code>**</code>, so square a column with <code>x ** 2</code>. "
@@ -342,6 +443,79 @@ class ColumnExpressionDialog(QDialog):
             self._expression_edit.clear()
         self._last_loaded_formula = ""
 
+    def _update_dataset_selection_state(self) -> None:
+        """Limit target sheets when selected-row mode is active."""
+        selected_rows_only = self._selected_rows_checkbox.isChecked()
+        self._dataset_list.setEnabled(not selected_rows_only)
+        if not selected_rows_only:
+            return
+
+        for row in range(self._dataset_list.count()):
+            item = self._dataset_list.item(row)
+            item.setSelected(item.text() == self._current_dataset_name)
+
+    def _selected_column_reference(self) -> tuple[int, str] | None:
+        """Return the currently selected positional alias and column name."""
+        data = self._column_reference_combo.currentData()
+        if not isinstance(data, tuple) or len(data) != 2:
+            return None
+        return int(data[0]), str(data[1])
+
+    def _update_column_insert_buttons(self) -> None:
+        """Refresh insert button labels for the selected column reference."""
+        selected = self._selected_column_reference()
+        if selected is None:
+            self._insert_alias_button.setEnabled(False)
+            self._insert_exact_button.setEnabled(False)
+            return
+
+        index, column_name = selected
+        self._insert_alias_button.setEnabled(True)
+        self._insert_exact_button.setEnabled(True)
+        self._insert_alias_button.setText(f"Insert col{index}")
+        self._insert_exact_button.setText("Insert exact")
+        self._insert_alias_button.setToolTip(
+            f"Insert col{index}, the positional alias for {column_name}."
+        )
+        self._insert_exact_button.setToolTip(
+            f'Insert col("{column_name}") for an exact column-name reference.'
+        )
+
+    def _insert_selected_column_alias(self) -> None:
+        """Insert the selected column's short positional alias."""
+        selected = self._selected_column_reference()
+        if selected is None:
+            return
+        index, _column_name = selected
+        self._insert_expression_text(f"col{index}")
+
+    def _insert_selected_column_exact(self) -> None:
+        """Insert the selected column's exact-name reference."""
+        selected = self._selected_column_reference()
+        if selected is None:
+            return
+        _index, column_name = selected
+        self._insert_expression_text(f"col({self._python_string_literal(column_name)})")
+
+    def _insert_expression_text(self, text: str) -> None:
+        """Insert text at the expression cursor and return focus to the editor."""
+        cursor = self._expression_edit.textCursor()
+        cursor.insertText(text)
+        self._expression_edit.setTextCursor(cursor)
+        self._expression_edit.setFocus()
+
+    @staticmethod
+    def _python_string_literal(value: str) -> str:
+        """Return a double-quoted Python string literal for an exact column name."""
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+        return f'"{escaped}"'
+
 
 class ColumnMathDialog(QDialog):
     """Collect settings for derivative or integral column operations."""
@@ -355,6 +529,8 @@ class ColumnMathDialog(QDialog):
         include_initial_value: bool = False,
         default_x_column: str | None = None,
         default_y_column: str | None = None,
+        dataset_names: list[str] | None = None,
+        current_dataset_name: str = "",
         parent: QWidget | None = None,
     ) -> None:
         """Create controls for derivative/integral settings."""
@@ -362,6 +538,7 @@ class ColumnMathDialog(QDialog):
         self.setWindowTitle(operation_name)
         self.setModal(True)
         self.setMinimumWidth(420)
+        self._current_dataset_name = current_dataset_name
 
         self._x_column_combo = QComboBox()
         self._x_column_combo.addItems(column_names)
@@ -379,10 +556,30 @@ class ColumnMathDialog(QDialog):
             self._method_combo.addItem(method_label, method_key)
 
         self._target_edit = QLineEdit(default_target)
+        self._target_conflict_combo = QComboBox()
+        self._target_conflict_combo.addItem("Create unique new column if target exists", "unique")
+        self._target_conflict_combo.addItem("Stop and warn if target exists", "stop")
+        self._target_conflict_combo.addItem("Overwrite/update existing column", "overwrite")
+
         self._initial_value_edit = QLineEdit("0")
         self._include_initial_value = include_initial_value
         self._plot_result_checkbox = QCheckBox("Plot result immediately")
         self._plot_result_checkbox.setChecked(True)
+        self._dataset_list = QListWidget()
+        self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._dataset_list.setMinimumHeight(110)
+        for dataset_name in dataset_names or [current_dataset_name]:
+            if not dataset_name:
+                continue
+            self._dataset_list.addItem(dataset_name)
+            item = self._dataset_list.item(self._dataset_list.count() - 1)
+            item.setSelected(dataset_name == current_dataset_name)
+
+        self._batch_hint = QLabel(
+            "Batch mode uses the same X/Y column names and method on each selected sheet. "
+            "Sheets missing those columns are skipped and reported in the summary."
+        )
+        self._batch_hint.setWordWrap(True)
 
         form = QFormLayout()
         form.addRow("X column", self._x_column_combo)
@@ -391,6 +588,9 @@ class ColumnMathDialog(QDialog):
         if self._include_initial_value:
             form.addRow("Initial value", self._initial_value_edit)
         form.addRow("Target column", self._target_edit)
+        form.addRow("If target exists", self._target_conflict_combo)
+        form.addRow("Apply to sheets", self._dataset_list)
+        form.addRow("", self._batch_hint)
         form.addRow("", self._plot_result_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -417,6 +617,14 @@ class ColumnMathDialog(QDialog):
         """Return target column name."""
         return self._target_edit.text().strip()
 
+    def target_conflict_policy(self) -> str:
+        """Return how existing target columns should be handled."""
+        return str(self._target_conflict_combo.currentData() or "unique")
+
+    def target_dataset_names(self) -> list[str]:
+        """Return worksheet names selected for this operation."""
+        return [item.text() for item in self._dataset_list.selectedItems()]
+
     def initial_value_text(self) -> str:
         """Return the raw initial value text for operations that need it."""
         return self._initial_value_edit.text().strip()
@@ -424,6 +632,19 @@ class ColumnMathDialog(QDialog):
     def plot_result_immediately(self) -> bool:
         """Return whether the operation result should be plotted immediately."""
         return self._plot_result_checkbox.isChecked()
+
+    def accept(self) -> None:
+        """Validate batch target selection before accepting."""
+        if not self.x_column() or not self.y_column():
+            QMessageBox.warning(self, self.windowTitle(), "Choose X and Y columns.")
+            return
+        if not self.target_column():
+            QMessageBox.warning(self, self.windowTitle(), "Choose or enter a target column.")
+            return
+        if not self.target_dataset_names():
+            QMessageBox.warning(self, self.windowTitle(), "Choose at least one target sheet.")
+            return
+        super().accept()
 
     @staticmethod
     def _set_combo_text_if_present(combo: QComboBox, value: str | None) -> None:
@@ -444,6 +665,8 @@ class FFTDialog(QDialog):
         default_dataset_name: str,
         default_signal_column: str | None = None,
         default_x_column: str | None = None,
+        dataset_names: list[str] | None = None,
+        current_dataset_name: str = "",
         parent: QWidget | None = None,
     ) -> None:
         """Create controls for FFT input, spacing, and output naming."""
@@ -451,6 +674,7 @@ class FFTDialog(QDialog):
         self.setWindowTitle("FFT")
         self.setModal(True)
         self.setMinimumWidth(420)
+        self._current_dataset_name = current_dataset_name or default_dataset_name
 
         self._signal_column_combo = QComboBox()
         self._signal_column_combo.addItems(column_names)
@@ -470,6 +694,21 @@ class FFTDialog(QDialog):
             self._window_combo.addItem(window_label, window_key)
 
         self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_FFT")
+        self._dataset_list = QListWidget()
+        self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._dataset_list.setMinimumHeight(110)
+        for dataset_name in dataset_names or [self._current_dataset_name]:
+            if not dataset_name:
+                continue
+            self._dataset_list.addItem(dataset_name)
+            item = self._dataset_list.item(self._dataset_list.count() - 1)
+            item.setSelected(dataset_name == self._current_dataset_name)
+
+        self._batch_hint = QLabel(
+            "Batch mode uses the same signal, X/time column, and window on each selected sheet. "
+            "Use {source} in the result sheet name for custom per-source naming."
+        )
+        self._batch_hint.setWordWrap(True)
         self._plot_result_checkbox = QCheckBox("Plot magnitude immediately")
         self._plot_result_checkbox.setChecked(True)
 
@@ -478,6 +717,8 @@ class FFTDialog(QDialog):
         form.addRow("X/time column", self._x_column_combo)
         form.addRow("Window", self._window_combo)
         form.addRow("Result sheet", self._target_dataset_edit)
+        form.addRow("Apply to sheets", self._dataset_list)
+        form.addRow("", self._batch_hint)
         form.addRow("", self._plot_result_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -505,9 +746,23 @@ class FFTDialog(QDialog):
         """Return requested result dataset name."""
         return self._target_dataset_edit.text().strip()
 
+    def target_dataset_names(self) -> list[str]:
+        """Return worksheet names selected for FFT application."""
+        return [item.text() for item in self._dataset_list.selectedItems()]
+
     def plot_result_immediately(self) -> bool:
         """Return whether the FFT magnitude should be plotted immediately."""
         return self._plot_result_checkbox.isChecked()
+
+    def accept(self) -> None:
+        """Validate FFT batch target selection before accepting."""
+        if not self.signal_column():
+            QMessageBox.warning(self, "FFT", "Choose a signal column.")
+            return
+        if not self.target_dataset_names():
+            QMessageBox.warning(self, "FFT", "Choose at least one target sheet.")
+            return
+        super().accept()
 
     @staticmethod
     def _set_combo_text_if_present(combo: QComboBox, value: str | None) -> None:
@@ -522,12 +777,20 @@ class FFTDialog(QDialog):
 class IFFTDialog(QDialog):
     """Collect settings for inverse FFT operations."""
 
-    def __init__(self, column_names: list[str], default_dataset_name: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        column_names: list[str],
+        default_dataset_name: str,
+        dataset_names: list[str] | None = None,
+        current_dataset_name: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
         """Create controls for inverse FFT input and output naming."""
         super().__init__(parent)
         self.setWindowTitle("Inverse FFT")
         self.setModal(True)
         self.setMinimumWidth(420)
+        self._current_dataset_name = current_dataset_name or default_dataset_name
 
         self._real_column_combo = QComboBox()
         self._real_column_combo.addItems(column_names)
@@ -543,6 +806,21 @@ class IFFTDialog(QDialog):
             self._real_column_combo.setCurrentText("real")
 
         self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_iFFT")
+        self._dataset_list = QListWidget()
+        self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._dataset_list.setMinimumHeight(110)
+        for dataset_name in dataset_names or [self._current_dataset_name]:
+            if not dataset_name:
+                continue
+            self._dataset_list.addItem(dataset_name)
+            item = self._dataset_list.item(self._dataset_list.count() - 1)
+            item.setSelected(dataset_name == self._current_dataset_name)
+
+        self._batch_hint = QLabel(
+            "Batch mode uses the same real and imaginary column names on each selected sheet. "
+            "Use {source} in the result sheet name for custom per-source naming."
+        )
+        self._batch_hint.setWordWrap(True)
         self._plot_result_checkbox = QCheckBox("Plot reconstructed real signal immediately")
         self._plot_result_checkbox.setChecked(True)
 
@@ -550,6 +828,8 @@ class IFFTDialog(QDialog):
         form.addRow("Real column", self._real_column_combo)
         form.addRow("Imaginary column", self._imaginary_column_combo)
         form.addRow("Result sheet", self._target_dataset_edit)
+        form.addRow("Apply to sheets", self._dataset_list)
+        form.addRow("", self._batch_hint)
         form.addRow("", self._plot_result_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -573,9 +853,23 @@ class IFFTDialog(QDialog):
         """Return requested result dataset name."""
         return self._target_dataset_edit.text().strip()
 
+    def target_dataset_names(self) -> list[str]:
+        """Return worksheet names selected for inverse FFT application."""
+        return [item.text() for item in self._dataset_list.selectedItems()]
+
     def plot_result_immediately(self) -> bool:
         """Return whether the reconstructed real signal should be plotted immediately."""
         return self._plot_result_checkbox.isChecked()
+
+    def accept(self) -> None:
+        """Validate inverse FFT batch target selection before accepting."""
+        if not self.real_column():
+            QMessageBox.warning(self, "Inverse FFT", "Choose a real spectrum column.")
+            return
+        if not self.target_dataset_names():
+            QMessageBox.warning(self, "Inverse FFT", "Choose at least one target sheet.")
+            return
+        super().accept()
 
 
 class InterpolationDialog(QDialog):

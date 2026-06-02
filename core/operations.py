@@ -344,6 +344,11 @@ def _build_environment(frame: pd.DataFrame) -> dict[str, object]:
         if _is_safe_identifier(str(column_name)) and str(column_name) not in environment:
             environment[str(column_name)] = frame[column_name]
 
+    for index, column_name in enumerate(frame.columns, start=1):
+        alias = f"col{index}"
+        if alias not in environment or str(column_name) == alias:
+            environment[alias] = frame[column_name]
+
     return environment
 
 

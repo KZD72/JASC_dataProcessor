@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.data_backends import PANDAS_BACKEND, normalize_backend
 from models.fit_functions import CustomFitModel
 
 
@@ -69,6 +70,7 @@ class Dataset:
     name: str
     frame: pd.DataFrame
     source_path: Path | None = None
+    backend: str = PANDAS_BACKEND
     formulas: dict[str, str] = field(default_factory=dict)
     column_metadata: dict[str, ColumnMetadata] = field(default_factory=dict)
 
@@ -127,6 +129,7 @@ class Workspace:
         name: str,
         frame: pd.DataFrame,
         source_path: str | Path | None = None,
+        backend: str = PANDAS_BACKEND,
     ) -> Dataset:
         """Add a DataFrame under a unique display name and return its dataset."""
         if not isinstance(frame, pd.DataFrame):
@@ -138,6 +141,7 @@ class Workspace:
             name=unique_name,
             frame=frame.copy(),
             source_path=Path(source_path) if source_path else None,
+            backend=normalize_backend(backend),
         )
         self._datasets[unique_name] = dataset
         return dataset
@@ -353,6 +357,34 @@ def normalize_column_role(role: str) -> str:
 def column_role_label(role: str) -> str:
     """Return a user-facing label for a column role key."""
     return COLUMN_ROLE_LABELS.get(normalize_column_role(role), "None")
+
+
+def set_column_operation_comment(dataset: Dataset, column_name: str, operation_text: str) -> None:
+    """Record the latest generated operation in a column metadata comment."""
+    metadata = dataset.metadata_for_column(column_name)
+    existing_lines = [
+        line
+        for line in metadata.comment.splitlines()
+        if not line.startswith("Operation: ")
+    ]
+    while existing_lines and not existing_lines[-1].strip():
+        existing_lines.pop()
+    existing_lines.append(f"Operation: {operation_text.strip()}")
+    metadata.comment = "\n".join(existing_lines).strip()
+
+
+def set_dataset_operation_comments(
+    dataset: Dataset,
+    operation_text: str,
+    column_names: list[str] | tuple[str, ...] | None = None,
+) -> None:
+    """Record operation provenance on multiple generated result columns."""
+    available_columns = {str(column) for column in dataset.frame.columns}
+    target_columns = column_names if column_names is not None else [str(column) for column in dataset.frame.columns]
+    for column_name in target_columns:
+        clean_name = str(column_name)
+        if clean_name in available_columns:
+            set_column_operation_comment(dataset, clean_name, operation_text)
 
 
 def copy_column_metadata(metadata: dict[str, ColumnMetadata]) -> dict[str, ColumnMetadata]:

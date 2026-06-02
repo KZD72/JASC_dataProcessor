@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import time
 from io import StringIO
 from pathlib import Path
 
@@ -41,13 +42,35 @@ from PySide6.QtWidgets import (
 )
 
 from core import project_io
+from core.batch_processing import (
+    BatchExecutionDecision,
+    FormulaBatchTask,
+    FormulaBatchWorkerResult,
+    resolve_formula_batch_execution,
+    run_formula_batch_parallel,
+)
+from core.data_backends import (
+    DEFAULT_LARGE_DATASET_COLUMN_WIDTH,
+    PANDAS_BACKEND,
+    format_bytes,
+    file_size_bytes,
+    profile_dataframe,
+    should_warn_for_large_file,
+)
 from core.file_io import export_tabular_file, read_tabular_file
-from core.operations import ExpressionError
-from core.workspace import ColumnMetadata, Dataset, Workspace
+from core.operations import ExpressionError, ExpressionResult, apply_column_expression
+from core.workspace import (
+    ColumnMetadata,
+    Dataset,
+    Workspace,
+    set_column_operation_comment,
+    set_dataset_operation_comments,
+)
 from math_engine.calculus import (
     DERIVATIVE_METHODS,
     INTEGRATION_METHODS,
     MathOperationError,
+    WINDOW_METHODS,
     derivative_column,
     fft_dataset,
     ifft_dataset,
@@ -95,6 +118,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._workspace = Workspace()
         self._project_path: Path | None = None
+        self._large_dataset_warning_names: set[str] = set()
 
         self.setWindowTitle("JASC Data Processor")
         icon_path = Path(__file__).parent.parent / "resources" / "logo.png"
@@ -655,6 +679,98 @@ class MainWindow(QMainWindow):
             }
         """)
 
+    def _confirm_large_file_import(self, path: Path) -> bool:
+        """Ask before reading a very large delimited text file into memory."""
+        file_size = file_size_bytes(path)
+        if not should_warn_for_large_file(path):
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            "Large File",
+            (
+                f"'{path.name}' is {format_bytes(file_size)} on disk.\n\n"
+                "Delimited files can require several times their file size in memory once "
+                "loaded into pandas, and large sheets may make editing, undo, plotting, and "
+                "analysis slower.\n\n"
+                "Continue importing this file?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    def _confirm_large_dataset(self, frame: pd.DataFrame, title: str, source_label: str) -> bool:
+        """Ask before adding a large DataFrame to the workspace."""
+        profile = profile_dataframe(frame, source_label)
+        if not profile.is_large:
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            title,
+            (
+                f"'{source_label}' contains {profile.dimensions_text()}.\n"
+                f"Estimated DataFrame memory: {format_bytes(profile.memory_bytes)}.\n\n"
+                "This should still load, but full-sheet edits and undo snapshots can duplicate "
+                "the data in memory. Some analysis operations may take noticeable time. "
+                "The data editor will skip full column auto-sizing for responsiveness.\n\n"
+                "Keep this dataset in the workspace?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    def _resize_dataset_columns_to_contents(self, dataset: Dataset | None = None) -> None:
+        """Resize table columns, skipping expensive full auto-sizing for large sheets."""
+        target_dataset = dataset or self._dataset_model.dataset
+        if target_dataset is None:
+            return
+
+        profile = profile_dataframe(target_dataset.frame, target_dataset.name)
+        if profile.should_skip_full_auto_resize:
+            self._dataset_table.horizontalHeader().setDefaultSectionSize(
+                DEFAULT_LARGE_DATASET_COLUMN_WIDTH
+            )
+            if target_dataset.name not in self._large_dataset_warning_names:
+                self._large_dataset_warning_names.add(target_dataset.name)
+                self.statusBar().showMessage(
+                    f"{target_dataset.name} is large; skipped full column auto-sizing for responsiveness"
+                )
+            return
+
+        self._dataset_table.resizeColumnsToContents()
+
+    def _warn_about_large_workspace_datasets(self, source_label: str) -> None:
+        """Show a post-load notice when a project contains large sheets."""
+        large_datasets: list[str] = []
+        for dataset in self._workspace.list_datasets():
+            profile = profile_dataframe(dataset.frame, dataset.name)
+            if profile.is_large:
+                large_datasets.append(
+                    f"{dataset.name}: {profile.dimensions_text()}, "
+                    f"{format_bytes(profile.memory_bytes)}"
+                )
+
+        if not large_datasets:
+            return
+
+        shown = "\n".join(large_datasets[:8])
+        if len(large_datasets) > 8:
+            shown += f"\n... and {len(large_datasets) - 8} more"
+        QMessageBox.warning(
+            self,
+            "Large Project Datasets",
+            (
+                f"'{source_label}' contains large dataset(s):\n\n"
+                f"{shown}\n\n"
+                "They can be kept in the project, but editing, undo snapshots, plotting, "
+                "and analysis may be slower. The data editor will skip full column "
+                "auto-sizing for large sheets."
+            ),
+        )
+
     def _import_data_file(self) -> None:
         """Open a delimited file and add it to the workspace."""
         file_name, _selected_filter = QFileDialog.getOpenFileName(
@@ -671,8 +787,19 @@ class MainWindow(QMainWindow):
             return
 
         path = Path(file_name)
+        if not self._confirm_large_file_import(path):
+            self.statusBar().showMessage("Import cancelled")
+            return
+
         try:
             frame = read_tabular_file(path, dialog.options())
+            if not self._confirm_large_dataset(
+                frame,
+                title="Large Dataset",
+                source_label=path.name,
+            ):
+                self.statusBar().showMessage("Import cancelled")
+                return
             dataset = self._workspace.add_dataset(path.stem, frame, source_path=path)
         except Exception as exc:
             QMessageBox.critical(self, "Import Failed", str(exc))
@@ -688,6 +815,14 @@ class MainWindow(QMainWindow):
         """Add a manually-entered DataFrame to the workspace."""
         if not isinstance(frame, pd.DataFrame):
             QMessageBox.critical(self, "Manual Entry Error", "Manual entry did not produce a DataFrame.")
+            return
+
+        if not self._confirm_large_dataset(
+            frame,
+            title="Large Manual Dataset",
+            source_label=name,
+        ):
+            self.statusBar().showMessage("Manual dataset cancelled")
             return
 
         try:
@@ -872,7 +1007,7 @@ class MainWindow(QMainWindow):
         if selected_column:
             self._select_column(selected_column)
 
-        self._dataset_table.resizeColumnsToContents()
+        self._resize_dataset_columns_to_contents()
         self._plot_tab_widget.refresh_controls(dataset.name)
         self._update_dataset_summary()
         rename_text = f", renamed {len(renamed_columns)} column(s)" if renamed_columns else ""
@@ -926,33 +1061,568 @@ class MainWindow(QMainWindow):
             selected_rows_available=bool(selected_rows),
             default_target=self._default_formula_target(dataset),
             column_formulas=dataset.formulas,
+            dataset_names=[
+                candidate.name
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            ],
+            current_dataset_name=dataset.name,
             parent=self,
         )
         if dialog.exec() != ColumnExpressionDialog.Accepted:
             return
 
         row_positions = selected_rows if dialog.apply_selected_rows_only() else None
+        target_dataset_names = dialog.target_dataset_names()
+        expression = dialog.expression()
+        target_column = dialog.target_column()
+        conflict_policy = dialog.target_conflict_policy()
+        requested_execution_mode = dialog.batch_execution_mode()
+        max_workers = dialog.batch_max_workers()
+        target_plan = self._formula_batch_target_plan(
+            target_dataset_names=target_dataset_names,
+            target_column=target_column,
+            conflict_policy=conflict_policy,
+        )
+        if not self._confirm_formula_batch_target_plan(target_plan, conflict_policy):
+            return
 
-        try:
-            result = self._dataset_model.apply_expression(
-                target_column=dialog.target_column(),
-                expression=dialog.expression(),
-                row_positions=row_positions,
+        execution_decision, parallel_plan_rows = self._formula_batch_execution_decision(
+            target_plan=target_plan,
+            current_dataset_name=dataset.name,
+            row_positions=row_positions,
+            requested_mode=requested_execution_mode,
+            max_workers=max_workers,
+        )
+        if execution_decision.uses_parallel:
+            self.statusBar().showMessage(
+                f"Formula batch running with {execution_decision.worker_count} worker processes..."
             )
-        except ExpressionError as exc:
-            QMessageBox.warning(self, "Formula Error", str(exc))
-            return
-        except Exception as exc:
-            QMessageBox.critical(self, "Formula Failed", str(exc))
+            QApplication.processEvents()
+        elif requested_execution_mode == "parallel" and execution_decision.reason:
+            self.statusBar().showMessage(execution_decision.reason)
+
+        results_by_sheet: dict[str, dict[str, object]] = {}
+        current_result_target = ""
+        parallel_sheet_names = {str(row["source_sheet"]) for row in parallel_plan_rows}
+        for plan_row in target_plan:
+            target_dataset_name = str(plan_row["source_sheet"])
+            if target_dataset_name in parallel_sheet_names:
+                continue
+
+            started = time.perf_counter()
+            try:
+                target_dataset = self._workspace.get_dataset(target_dataset_name)
+                use_visible_model = target_dataset.name == dataset.name
+                result = self._apply_expression_to_dataset(
+                    dataset=target_dataset,
+                    target_column=str(plan_row["target_column"]),
+                    expression=expression,
+                    row_positions=row_positions if use_visible_model else None,
+                    use_visible_model=use_visible_model,
+                )
+                if use_visible_model:
+                    current_result_target = result.target_column
+                results_by_sheet[target_dataset_name] = (
+                    self._formula_batch_summary_row(
+                        dataset=target_dataset,
+                        result_target_column=result.target_column,
+                        updated_rows=result.updated_rows,
+                        status="ok",
+                        error="",
+                        requested_target_column=target_column,
+                        output_action=str(plan_row["output_action"]),
+                        target_existed_before=bool(plan_row["target_existed_before"]),
+                        execution_mode="sequential",
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            except ExpressionError as exc:
+                results_by_sheet[target_dataset_name] = (
+                    self._formula_batch_summary_row(
+                        dataset_name=target_dataset_name,
+                        result_target_column=str(plan_row["target_column"]),
+                        updated_rows=0,
+                        status="failed",
+                        error=str(exc),
+                        requested_target_column=target_column,
+                        output_action=str(plan_row["output_action"]),
+                        target_existed_before=bool(plan_row["target_existed_before"]),
+                        execution_mode="sequential",
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            except Exception as exc:
+                results_by_sheet[target_dataset_name] = (
+                    self._formula_batch_summary_row(
+                        dataset_name=target_dataset_name,
+                        result_target_column=str(plan_row["target_column"]),
+                        updated_rows=0,
+                        status="failed",
+                        error=str(exc),
+                        requested_target_column=target_column,
+                        output_action=str(plan_row["output_action"]),
+                        target_existed_before=bool(plan_row["target_existed_before"]),
+                        execution_mode="sequential",
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+
+        if parallel_plan_rows:
+            parallel_results = self._run_parallel_formula_batch_rows(
+                plan_rows=parallel_plan_rows,
+                expression=expression,
+                requested_target_column=target_column,
+                execution_decision=execution_decision,
+            )
+            results_by_sheet.update(parallel_results)
+
+        results = [
+            results_by_sheet[str(row["source_sheet"])]
+            for row in target_plan
+            if str(row["source_sheet"]) in results_by_sheet
+        ]
+        success_count = sum(1 for row in results if row["status"] == "ok")
+        failure_rows = [row for row in results if row["status"] != "ok"]
+        if success_count == 0:
+            message = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failure_rows[:8])
+            QMessageBox.warning(self, "Formula Error", message or "Formula failed on every selected sheet.")
             return
 
-        self._dataset_table.resizeColumnsToContents()
+        summary_dataset = None
+        if len(target_dataset_names) > 1:
+            summary_dataset = self._workspace.add_dataset(
+                f"{dataset.name}_formula_batch_summary",
+                pd.DataFrame(results),
+            )
+            self._dataset_list.addItem(summary_dataset.name)
+
+        self._resize_dataset_columns_to_contents()
         self._plot_tab_widget.refresh_controls(dataset.name)
         self._update_dataset_summary()
-        self._select_column(result.target_column)
+        if current_result_target:
+            self._select_column(current_result_target)
+        if failure_rows:
+            detail = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failure_rows[:8])
+            QMessageBox.warning(
+                self,
+                "Formula Batch",
+                f"Applied formula to {success_count} sheet(s); {len(failure_rows)} failed.\n\n{detail}",
+            )
         self.statusBar().showMessage(
-            f"Updated {result.updated_rows} row(s) in '{result.target_column}'"
+            self._formula_batch_status_message(
+                success_count=success_count,
+                failure_count=len(failure_rows),
+                summary_dataset_name=summary_dataset.name if summary_dataset else "",
+            )
         )
+
+    def _apply_expression_to_dataset(
+        self,
+        dataset: Dataset,
+        target_column: str,
+        expression: str,
+        row_positions: list[int] | None,
+        use_visible_model: bool,
+    ) -> ExpressionResult:
+        """Apply a formula to one dataset, using the visible model when possible."""
+        if use_visible_model:
+            return self._dataset_model.apply_expression(
+                target_column=target_column,
+                expression=expression,
+                row_positions=row_positions,
+            )
+
+        result = apply_column_expression(
+            dataset.frame,
+            target_column=target_column,
+            expression=expression,
+            row_positions=row_positions,
+        )
+        dataset.formulas[result.target_column] = expression.strip()
+        set_column_operation_comment(
+            dataset,
+            result.target_column,
+            f"Formula = {expression.strip()}",
+        )
+        dataset.prune_column_metadata()
+        return result
+
+    def _formula_batch_target_plan(
+        self,
+        target_dataset_names: list[str],
+        target_column: str,
+        conflict_policy: str,
+    ) -> list[dict[str, object]]:
+        """Resolve formula output columns before any target sheet is modified."""
+        plan_rows: list[dict[str, object]] = []
+        requested_target = target_column.strip()
+        for target_dataset_name in target_dataset_names:
+            target_dataset = self._workspace.get_dataset(target_dataset_name)
+            existing_columns = {str(column) for column in target_dataset.frame.columns}
+            target_exists = requested_target in existing_columns
+            final_target = requested_target
+            output_action = "create"
+            if target_exists and conflict_policy == "unique":
+                final_target = self._unique_batch_column_name(requested_target, existing_columns)
+                output_action = "create_unique"
+            elif target_exists and conflict_policy == "stop":
+                output_action = "blocked"
+            elif target_exists:
+                output_action = "overwrite"
+            plan_rows.append(
+                {
+                    "source_sheet": target_dataset.name,
+                    "requested_target_column": requested_target,
+                    "target_column": final_target,
+                    "target_existed_before": target_exists,
+                    "output_action": output_action,
+                }
+            )
+        return plan_rows
+
+    def _confirm_formula_batch_target_plan(
+        self,
+        plan_rows: list[dict[str, object]],
+        conflict_policy: str,
+    ) -> bool:
+        """Warn or confirm before a formula batch can touch existing columns."""
+        blocked_rows = [row for row in plan_rows if row["output_action"] == "blocked"]
+        if blocked_rows:
+            detail = self._formula_batch_plan_detail(blocked_rows)
+            QMessageBox.warning(
+                self,
+                "Formula Output Conflict",
+                (
+                    "The target column already exists in one or more selected sheets.\n\n"
+                    f"{detail}\n\n"
+                    "Choose a different target column or change the target-exists policy."
+                ),
+            )
+            return False
+
+        conflict_rows = [row for row in plan_rows if row["target_existed_before"]]
+        if not conflict_rows:
+            return True
+
+        detail = self._formula_batch_plan_detail(conflict_rows)
+        if conflict_policy == "overwrite":
+            reply = QMessageBox.question(
+                self,
+                "Confirm Formula Overwrite",
+                (
+                    "This formula will overwrite or update existing target columns.\n"
+                    "Non-visible batch target sheets do not yet have worksheet-level undo.\n\n"
+                    f"{detail}\n\n"
+                    "Continue?"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            return reply == QMessageBox.Yes
+
+        reply = QMessageBox.question(
+            self,
+            "Formula Output Names",
+            (
+                "The requested target column already exists in one or more selected sheets.\n"
+                "JASC will create unique new columns instead of overwriting data.\n\n"
+                f"{detail}\n\n"
+                "Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        return reply == QMessageBox.Yes
+
+    @staticmethod
+    def _formula_batch_plan_detail(plan_rows: list[dict[str, object]], limit: int = 12) -> str:
+        """Return a compact user-facing description of formula output targets."""
+        lines: list[str] = []
+        for row in plan_rows[:limit]:
+            source_sheet = row["source_sheet"]
+            requested_target = row["requested_target_column"]
+            final_target = row["target_column"]
+            action = row["output_action"]
+            if action == "create_unique":
+                lines.append(f"{source_sheet}: {requested_target} -> {final_target}")
+            elif action == "overwrite":
+                lines.append(f"{source_sheet}: overwrite/update {requested_target}")
+            elif action == "blocked":
+                lines.append(f"{source_sheet}: {requested_target} already exists")
+            else:
+                lines.append(f"{source_sheet}: create {final_target}")
+        if len(plan_rows) > limit:
+            lines.append(f"... and {len(plan_rows) - limit} more sheet(s)")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _unique_batch_column_name(base_name: str, existing_columns: set[str]) -> str:
+        """Return a non-colliding column name for formula batch outputs."""
+        if base_name not in existing_columns:
+            return base_name
+        counter = 2
+        while f"{base_name} ({counter})" in existing_columns:
+            counter += 1
+        return f"{base_name} ({counter})"
+
+    def _formula_batch_summary_row(
+        self,
+        result_target_column: str,
+        updated_rows: int,
+        status: str,
+        error: str,
+        dataset: Dataset | None = None,
+        dataset_name: str = "",
+        requested_target_column: str = "",
+        output_action: str = "",
+        target_existed_before: bool = False,
+        execution_mode: str = "",
+        elapsed_seconds: float = 0.0,
+    ) -> dict[str, object]:
+        """Return one formula batch summary row."""
+        source_sheet = dataset.name if dataset is not None else dataset_name
+        row: dict[str, object] = {
+            "source_sheet": source_sheet,
+            "requested_target_column": requested_target_column or result_target_column,
+            "target_column": result_target_column,
+            "output_action": output_action,
+            "target_existed_before": target_existed_before,
+            "updated_rows": updated_rows,
+            "status": status,
+            "error": error,
+            "execution_mode": execution_mode,
+            "elapsed_seconds": round(float(elapsed_seconds), 6),
+            "row_count": len(dataset.frame) if dataset is not None else 0,
+            "finite_count": np.nan,
+            "missing_or_non_numeric": np.nan,
+            "minimum": np.nan,
+            "maximum": np.nan,
+            "mean": np.nan,
+        }
+        if dataset is None or result_target_column not in dataset.frame.columns:
+            return row
+
+        values = pd.to_numeric(dataset.frame[result_target_column], errors="coerce")
+        values = values.replace([np.inf, -np.inf], np.nan)
+        finite_values = values.dropna()
+        row["finite_count"] = int(len(finite_values))
+        row["missing_or_non_numeric"] = int(len(values) - len(finite_values))
+        if not finite_values.empty:
+            row["minimum"] = float(finite_values.min())
+            row["maximum"] = float(finite_values.max())
+            row["mean"] = float(finite_values.mean())
+        return row
+
+    def _formula_batch_execution_decision(
+        self,
+        target_plan: list[dict[str, object]],
+        current_dataset_name: str,
+        row_positions: list[int] | None,
+        requested_mode: str,
+        max_workers: int,
+    ) -> tuple[BatchExecutionDecision, list[dict[str, object]]]:
+        """Return the execution decision and rows eligible for worker processes."""
+        parallel_plan_rows: list[dict[str, object]] = []
+        if row_positions is None:
+            parallel_plan_rows = [
+                row
+                for row in target_plan
+                if str(row["source_sheet"]) != current_dataset_name
+            ]
+
+        total_cells = 0
+        for plan_row in parallel_plan_rows:
+            target_dataset = self._workspace.get_dataset(str(plan_row["source_sheet"]))
+            total_cells += int(target_dataset.frame.shape[0] * target_dataset.frame.shape[1])
+
+        decision = resolve_formula_batch_execution(
+            requested_mode=requested_mode,
+            task_count=len(parallel_plan_rows),
+            total_cells=total_cells,
+            max_workers=max_workers,
+        )
+        return decision, parallel_plan_rows if decision.uses_parallel else []
+
+    def _run_parallel_formula_batch_rows(
+        self,
+        plan_rows: list[dict[str, object]],
+        expression: str,
+        requested_target_column: str,
+        execution_decision: BatchExecutionDecision,
+    ) -> dict[str, dict[str, object]]:
+        """Run formula batch rows in worker processes and apply successful outputs."""
+        results_by_sheet: dict[str, dict[str, object]] = {}
+        tasks = [
+            FormulaBatchTask(
+                source_sheet=str(plan_row["source_sheet"]),
+                target_column=str(plan_row["target_column"]),
+                expression=expression,
+                frame=self._workspace.get_dataset(str(plan_row["source_sheet"])).frame,
+            )
+            for plan_row in plan_rows
+        ]
+
+        try:
+            worker_results = run_formula_batch_parallel(
+                tasks,
+                max_workers=execution_decision.worker_count,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Formula Batch",
+                (
+                    "Parallel execution could not start, so the remaining sheets will run "
+                    f"sequentially.\n\n{exc}"
+                ),
+            )
+            return self._run_sequential_formula_batch_rows(
+                plan_rows=plan_rows,
+                expression=expression,
+                requested_target_column=requested_target_column,
+                execution_mode="sequential_fallback",
+            )
+
+        plan_by_sheet = {str(row["source_sheet"]): row for row in plan_rows}
+        for worker_result in worker_results:
+            plan_row = plan_by_sheet[worker_result.source_sheet]
+            if worker_result.status != "ok":
+                results_by_sheet[worker_result.source_sheet] = self._formula_batch_summary_row(
+                    dataset_name=worker_result.source_sheet,
+                    result_target_column=str(plan_row["target_column"]),
+                    updated_rows=0,
+                    status="failed",
+                    error=worker_result.error,
+                    requested_target_column=requested_target_column,
+                    output_action=str(plan_row["output_action"]),
+                    target_existed_before=bool(plan_row["target_existed_before"]),
+                    execution_mode="parallel",
+                    elapsed_seconds=worker_result.elapsed_seconds,
+                )
+                continue
+
+            started = time.perf_counter()
+            try:
+                target_dataset = self._workspace.get_dataset(worker_result.source_sheet)
+                result = self._apply_formula_worker_result_to_dataset(
+                    dataset=target_dataset,
+                    worker_result=worker_result,
+                    expression=expression,
+                )
+                results_by_sheet[worker_result.source_sheet] = self._formula_batch_summary_row(
+                    dataset=target_dataset,
+                    result_target_column=result.target_column,
+                    updated_rows=result.updated_rows,
+                    status="ok",
+                    error="",
+                    requested_target_column=requested_target_column,
+                    output_action=str(plan_row["output_action"]),
+                    target_existed_before=bool(plan_row["target_existed_before"]),
+                    execution_mode="parallel",
+                    elapsed_seconds=worker_result.elapsed_seconds + time.perf_counter() - started,
+                )
+            except Exception as exc:
+                results_by_sheet[worker_result.source_sheet] = self._formula_batch_summary_row(
+                    dataset_name=worker_result.source_sheet,
+                    result_target_column=str(plan_row["target_column"]),
+                    updated_rows=0,
+                    status="failed",
+                    error=str(exc),
+                    requested_target_column=requested_target_column,
+                    output_action=str(plan_row["output_action"]),
+                    target_existed_before=bool(plan_row["target_existed_before"]),
+                    execution_mode="parallel",
+                    elapsed_seconds=worker_result.elapsed_seconds + time.perf_counter() - started,
+                )
+        return results_by_sheet
+
+    def _run_sequential_formula_batch_rows(
+        self,
+        plan_rows: list[dict[str, object]],
+        expression: str,
+        requested_target_column: str,
+        execution_mode: str,
+    ) -> dict[str, dict[str, object]]:
+        """Run formula batch rows sequentially after a parallel fallback."""
+        results_by_sheet: dict[str, dict[str, object]] = {}
+        for plan_row in plan_rows:
+            target_dataset_name = str(plan_row["source_sheet"])
+            started = time.perf_counter()
+            try:
+                target_dataset = self._workspace.get_dataset(target_dataset_name)
+                result = self._apply_expression_to_dataset(
+                    dataset=target_dataset,
+                    target_column=str(plan_row["target_column"]),
+                    expression=expression,
+                    row_positions=None,
+                    use_visible_model=False,
+                )
+                results_by_sheet[target_dataset_name] = self._formula_batch_summary_row(
+                    dataset=target_dataset,
+                    result_target_column=result.target_column,
+                    updated_rows=result.updated_rows,
+                    status="ok",
+                    error="",
+                    requested_target_column=requested_target_column,
+                    output_action=str(plan_row["output_action"]),
+                    target_existed_before=bool(plan_row["target_existed_before"]),
+                    execution_mode=execution_mode,
+                    elapsed_seconds=time.perf_counter() - started,
+                )
+            except Exception as exc:
+                results_by_sheet[target_dataset_name] = self._formula_batch_summary_row(
+                    dataset_name=target_dataset_name,
+                    result_target_column=str(plan_row["target_column"]),
+                    updated_rows=0,
+                    status="failed",
+                    error=str(exc),
+                    requested_target_column=requested_target_column,
+                    output_action=str(plan_row["output_action"]),
+                    target_existed_before=bool(plan_row["target_existed_before"]),
+                    execution_mode=execution_mode,
+                    elapsed_seconds=time.perf_counter() - started,
+                )
+        return results_by_sheet
+
+    def _apply_formula_worker_result_to_dataset(
+        self,
+        dataset: Dataset,
+        worker_result: FormulaBatchWorkerResult,
+        expression: str,
+    ) -> ExpressionResult:
+        """Apply a successful process-worker formula result to a workspace dataset."""
+        if worker_result.values is None:
+            raise ExpressionError("Worker did not return formula values.")
+
+        dataset.frame[worker_result.target_column] = worker_result.values.reindex(dataset.frame.index)
+        dataset.formulas[worker_result.target_column] = expression.strip()
+        set_column_operation_comment(
+            dataset,
+            worker_result.target_column,
+            f"Formula = {expression.strip()}",
+        )
+        dataset.prune_column_metadata()
+        return ExpressionResult(
+            target_column=worker_result.target_column,
+            updated_rows=worker_result.updated_rows,
+        )
+
+    @staticmethod
+    def _formula_batch_status_message(
+        success_count: int,
+        failure_count: int,
+        summary_dataset_name: str,
+    ) -> str:
+        """Return a concise status-bar message for a formula batch."""
+        if summary_dataset_name:
+            return (
+                f"Formula applied to {success_count} sheet(s), "
+                f"{failure_count} failed; summary saved as '{summary_dataset_name}'"
+            )
+        if failure_count:
+            return f"Formula applied to {success_count} sheet(s), {failure_count} failed"
+        return f"Formula applied to {success_count} sheet(s)"
 
     def _run_derivative(self) -> None:
         """Run the derivative workflow for the selected dataset."""
@@ -968,37 +1638,24 @@ class MainWindow(QMainWindow):
             default_target="Derivative",
             default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
             default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
+            dataset_names=[
+                candidate.name
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            ],
+            current_dataset_name=dataset.name,
             parent=self,
         )
         if dialog.exec() != ColumnMathDialog.Accepted:
             return
 
-        try:
-            self._dataset_model.capture_undo_state()
-            result = derivative_column(
-                dataset.frame,
-                x_column=dialog.x_column(),
-                y_column=dialog.y_column(),
-                method=dialog.method(),
-                target_column=dialog.target_column(),
-            )
-        except MathOperationError as exc:
-            self._dataset_model.discard_latest_undo_state()
-            QMessageBox.warning(self, "Derivative Failed", str(exc))
-            return
-
-        self._refresh_dataset_after_analysis(dataset, result.column_name)
-        if dialog.plot_result_immediately():
-            self._plot_tab_widget.queue_analysis_plot(
-                dataset=dataset,
-                x_column=dialog.x_column(),
-                source_column=dialog.y_column(),
-                result_column=result.column_name,
-                title="Derivative",
-            )
-            self._tabs.setCurrentWidget(self._plot_tab_widget)
-        self.statusBar().showMessage(
-            f"Derivative saved to '{result.column_name}' ({result.values_written} values)"
+        self._run_column_math_batch(
+            current_dataset=dataset,
+            dialog=dialog,
+            operation_key="derivative",
+            operation_title="Derivative",
+            methods=DERIVATIVE_METHODS,
+            initial_value=None,
         )
 
     def _run_integral(self) -> None:
@@ -1016,6 +1673,12 @@ class MainWindow(QMainWindow):
             include_initial_value=True,
             default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
             default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
+            dataset_names=[
+                candidate.name
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            ],
+            current_dataset_name=dataset.name,
             parent=self,
         )
         if dialog.exec() != ColumnMathDialog.Accepted:
@@ -1029,34 +1692,374 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Integral Failed", "\n".join(initial_errors))
             return
 
-        try:
-            self._dataset_model.capture_undo_state()
-            result = integral_column(
-                dataset.frame,
-                x_column=dialog.x_column(),
-                y_column=dialog.y_column(),
-                method=dialog.method(),
-                target_column=dialog.target_column(),
-                initial_value=initial_value or 0.0,
-            )
-        except MathOperationError as exc:
-            self._dataset_model.discard_latest_undo_state()
-            QMessageBox.warning(self, "Integral Failed", str(exc))
+        self._run_column_math_batch(
+            current_dataset=dataset,
+            dialog=dialog,
+            operation_key="integral",
+            operation_title="Integral",
+            methods=INTEGRATION_METHODS,
+            initial_value=initial_value or 0.0,
+        )
+
+    def _run_column_math_batch(
+        self,
+        current_dataset: Dataset,
+        dialog: ColumnMathDialog,
+        operation_key: str,
+        operation_title: str,
+        methods: dict[str, str],
+        initial_value: float | None,
+    ) -> None:
+        """Run a derivative/integral operation on one or more worksheets."""
+        target_dataset_names = dialog.target_dataset_names()
+        target_plan = self._formula_batch_target_plan(
+            target_dataset_names=target_dataset_names,
+            target_column=dialog.target_column(),
+            conflict_policy=dialog.target_conflict_policy(),
+        )
+        if not self._confirm_column_math_batch_target_plan(
+            target_plan,
+            dialog.target_conflict_policy(),
+            operation_title,
+        ):
             return
 
-        self._refresh_dataset_after_analysis(dataset, result.column_name)
-        if dialog.plot_result_immediately():
+        results: list[dict[str, object]] = []
+        current_result_target = ""
+        for plan_row in target_plan:
+            target_dataset_name = str(plan_row["source_sheet"])
+            started = time.perf_counter()
+            try:
+                target_dataset = self._workspace.get_dataset(target_dataset_name)
+                use_visible_model = target_dataset.name == current_dataset.name
+                result = self._apply_column_math_to_dataset(
+                    dataset=target_dataset,
+                    operation_key=operation_key,
+                    x_column=dialog.x_column(),
+                    y_column=dialog.y_column(),
+                    method=dialog.method(),
+                    target_column=str(plan_row["target_column"]),
+                    initial_value=initial_value,
+                    use_visible_model=use_visible_model,
+                    methods=methods,
+                    operation_title=operation_title,
+                )
+                if use_visible_model:
+                    current_result_target = result.column_name
+                results.append(
+                    self._column_math_batch_summary_row(
+                        dataset=target_dataset,
+                        operation_title=operation_title,
+                        x_column=dialog.x_column(),
+                        y_column=dialog.y_column(),
+                        method=dialog.method(),
+                        method_label=methods.get(dialog.method(), dialog.method()),
+                        initial_value=initial_value,
+                        result_column=result.column_name,
+                        values_written=result.values_written,
+                        status="ok",
+                        error="",
+                        requested_target_column=dialog.target_column(),
+                        output_action=str(plan_row["output_action"]),
+                        target_existed_before=bool(plan_row["target_existed_before"]),
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            except MathOperationError as exc:
+                results.append(
+                    self._column_math_batch_summary_row(
+                        dataset_name=target_dataset_name,
+                        operation_title=operation_title,
+                        x_column=dialog.x_column(),
+                        y_column=dialog.y_column(),
+                        method=dialog.method(),
+                        method_label=methods.get(dialog.method(), dialog.method()),
+                        initial_value=initial_value,
+                        result_column=str(plan_row["target_column"]),
+                        values_written=0,
+                        status="failed",
+                        error=str(exc),
+                        requested_target_column=dialog.target_column(),
+                        output_action=str(plan_row["output_action"]),
+                        target_existed_before=bool(plan_row["target_existed_before"]),
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            except Exception as exc:
+                results.append(
+                    self._column_math_batch_summary_row(
+                        dataset_name=target_dataset_name,
+                        operation_title=operation_title,
+                        x_column=dialog.x_column(),
+                        y_column=dialog.y_column(),
+                        method=dialog.method(),
+                        method_label=methods.get(dialog.method(), dialog.method()),
+                        initial_value=initial_value,
+                        result_column=str(plan_row["target_column"]),
+                        values_written=0,
+                        status="failed",
+                        error=str(exc),
+                        requested_target_column=dialog.target_column(),
+                        output_action=str(plan_row["output_action"]),
+                        target_existed_before=bool(plan_row["target_existed_before"]),
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+
+        success_count = sum(1 for row in results if row["status"] == "ok")
+        failure_rows = [row for row in results if row["status"] != "ok"]
+        summary_dataset = None
+        if len(target_dataset_names) > 1:
+            summary_dataset = self._workspace.add_dataset(
+                f"{current_dataset.name}_{operation_key}_batch_summary",
+                pd.DataFrame(results),
+            )
+            self._dataset_list.addItem(summary_dataset.name)
+
+        self._dataset_model.set_dataset(current_dataset)
+        self._resize_dataset_columns_to_contents(current_dataset)
+        self._plot_tab_widget.refresh_controls(current_dataset.name)
+        self._update_dataset_summary()
+        if current_result_target:
+            self._select_column(current_result_target)
+
+        if success_count == 0:
+            message = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failure_rows[:8])
+            if summary_dataset is not None:
+                message = f"{message}\n\nSummary saved as '{summary_dataset.name}'."
+            QMessageBox.warning(self, f"{operation_title} Failed", message or f"{operation_title} failed.")
+            return
+
+        if current_result_target and dialog.plot_result_immediately():
             self._plot_tab_widget.queue_analysis_plot(
-                dataset=dataset,
+                dataset=current_dataset,
                 x_column=dialog.x_column(),
                 source_column=dialog.y_column(),
-                result_column=result.column_name,
-                title="Integral",
+                result_column=current_result_target,
+                title=operation_title,
             )
             self._tabs.setCurrentWidget(self._plot_tab_widget)
+
+        if failure_rows:
+            detail = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failure_rows[:8])
+            QMessageBox.warning(
+                self,
+                f"{operation_title} Batch",
+                f"Applied {operation_title.lower()} to {success_count} sheet(s); "
+                f"{len(failure_rows)} failed.\n\n{detail}",
+            )
         self.statusBar().showMessage(
-            f"Integral saved to '{result.column_name}' ({result.values_written} values)"
+            self._column_math_batch_status_message(
+                operation_title=operation_title,
+                success_count=success_count,
+                failure_count=len(failure_rows),
+                summary_dataset_name=summary_dataset.name if summary_dataset else "",
+            )
         )
+
+    def _apply_column_math_to_dataset(
+        self,
+        dataset: Dataset,
+        operation_key: str,
+        x_column: str,
+        y_column: str,
+        method: str,
+        target_column: str,
+        initial_value: float | None,
+        use_visible_model: bool,
+        methods: dict[str, str],
+        operation_title: str,
+    ):
+        """Apply a derivative/integral operation to one dataset."""
+        if use_visible_model:
+            self._dataset_model.capture_undo_state()
+        try:
+            if operation_key == "derivative":
+                result = derivative_column(
+                    dataset.frame,
+                    x_column=x_column,
+                    y_column=y_column,
+                    method=method,
+                    target_column=target_column,
+                )
+            elif operation_key == "integral":
+                result = integral_column(
+                    dataset.frame,
+                    x_column=x_column,
+                    y_column=y_column,
+                    method=method,
+                    target_column=target_column,
+                    initial_value=initial_value or 0.0,
+                )
+            else:
+                raise MathOperationError(f"Unsupported column math operation: {operation_key}")
+        except Exception:
+            if use_visible_model:
+                self._dataset_model.discard_latest_undo_state()
+            raise
+
+        set_column_operation_comment(
+            dataset,
+            result.column_name,
+            self._column_math_operation_comment(
+                operation_title=operation_title,
+                x_column=x_column,
+                y_column=y_column,
+                method=method,
+                method_label=methods.get(method, method),
+                initial_value=initial_value,
+            ),
+        )
+        dataset.prune_column_metadata()
+        if use_visible_model:
+            self._dataset_model.history_changed.emit()
+        return result
+
+    @staticmethod
+    def _column_math_operation_comment(
+        operation_title: str,
+        x_column: str,
+        y_column: str,
+        method: str,
+        method_label: str,
+        initial_value: float | None,
+    ) -> str:
+        """Return a provenance comment for derivative/integral output columns."""
+        comment = f"{operation_title}: y={y_column}, x={x_column}, method={method_label or method}"
+        if initial_value is not None:
+            comment = f"{comment}, initial={initial_value:g}"
+        return comment
+
+    def _confirm_column_math_batch_target_plan(
+        self,
+        plan_rows: list[dict[str, object]],
+        conflict_policy: str,
+        operation_title: str,
+    ) -> bool:
+        """Confirm derivative/integral target-column conflicts."""
+        blocked_rows = [row for row in plan_rows if row["output_action"] == "blocked"]
+        if blocked_rows:
+            detail = self._formula_batch_plan_detail(blocked_rows)
+            QMessageBox.warning(
+                self,
+                f"{operation_title} Output Conflict",
+                (
+                    "The target column already exists in one or more selected sheets.\n\n"
+                    f"{detail}\n\n"
+                    "Choose a different target column or change the target-exists policy."
+                ),
+            )
+            return False
+
+        conflict_rows = [row for row in plan_rows if row["target_existed_before"]]
+        if not conflict_rows:
+            return True
+
+        detail = self._formula_batch_plan_detail(conflict_rows)
+        if conflict_policy == "overwrite":
+            reply = QMessageBox.question(
+                self,
+                f"Confirm {operation_title} Overwrite",
+                (
+                    f"This {operation_title.lower()} batch will overwrite or update existing "
+                    "target columns.\n"
+                    "Non-visible batch target sheets do not yet have worksheet-level undo.\n\n"
+                    f"{detail}\n\n"
+                    "Continue?"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            return reply == QMessageBox.Yes
+
+        reply = QMessageBox.question(
+            self,
+            f"{operation_title} Output Names",
+            (
+                "The requested target column already exists in one or more selected sheets.\n"
+                "JASC will create unique new columns instead of overwriting data.\n\n"
+                f"{detail}\n\n"
+                "Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        return reply == QMessageBox.Yes
+
+    def _column_math_batch_summary_row(
+        self,
+        operation_title: str,
+        x_column: str,
+        y_column: str,
+        method: str,
+        method_label: str,
+        initial_value: float | None,
+        result_column: str,
+        values_written: int,
+        status: str,
+        error: str,
+        dataset: Dataset | None = None,
+        dataset_name: str = "",
+        requested_target_column: str = "",
+        output_action: str = "",
+        target_existed_before: bool = False,
+        elapsed_seconds: float = 0.0,
+    ) -> dict[str, object]:
+        """Return one derivative/integral batch summary row."""
+        source_sheet = dataset.name if dataset is not None else dataset_name
+        row: dict[str, object] = {
+            "source_sheet": source_sheet,
+            "operation": operation_title,
+            "x_column": x_column,
+            "y_column": y_column,
+            "method": method,
+            "method_label": method_label,
+            "initial_value": np.nan if initial_value is None else initial_value,
+            "requested_target_column": requested_target_column or result_column,
+            "target_column": result_column,
+            "output_action": output_action,
+            "target_existed_before": target_existed_before,
+            "values_written": values_written,
+            "status": status,
+            "error": error,
+            "elapsed_seconds": round(float(elapsed_seconds), 6),
+            "row_count": len(dataset.frame) if dataset is not None else 0,
+            "finite_count": np.nan,
+            "missing_or_non_numeric": np.nan,
+            "minimum": np.nan,
+            "maximum": np.nan,
+            "mean": np.nan,
+        }
+        if dataset is None or result_column not in dataset.frame.columns:
+            return row
+
+        values = pd.to_numeric(dataset.frame[result_column], errors="coerce")
+        values = values.replace([np.inf, -np.inf], np.nan)
+        finite_values = values.dropna()
+        row["finite_count"] = int(len(finite_values))
+        row["missing_or_non_numeric"] = int(len(values) - len(finite_values))
+        if not finite_values.empty:
+            row["minimum"] = float(finite_values.min())
+            row["maximum"] = float(finite_values.max())
+            row["mean"] = float(finite_values.mean())
+        return row
+
+    @staticmethod
+    def _column_math_batch_status_message(
+        operation_title: str,
+        success_count: int,
+        failure_count: int,
+        summary_dataset_name: str,
+    ) -> str:
+        """Return a concise derivative/integral batch status message."""
+        if summary_dataset_name:
+            return (
+                f"{operation_title} applied to {success_count} sheet(s), "
+                f"{failure_count} failed; summary saved as '{summary_dataset_name}'"
+            )
+        if failure_count:
+            return f"{operation_title} applied to {success_count} sheet(s), {failure_count} failed"
+        return f"{operation_title} saved for {success_count} sheet(s)"
 
     def _run_interpolation(self) -> None:
         """Run the interpolation workflow and create a prediction dataset."""
@@ -1115,6 +2118,17 @@ class MainWindow(QMainWindow):
                 coordinate_columns=dialog.coordinate_columns(),
                 value_column=dialog.value_column(),
             )
+            prediction_column = f"{dialog.value_column()}_interpolated"
+            set_dataset_operation_comments(
+                result_dataset,
+                (
+                    f"Interpolation: value={dialog.value_column()}, "
+                    f"coordinates={', '.join(dialog.coordinate_columns())}, "
+                    f"method={dialog.method_key()}, query={dialog.query_mode()}, "
+                    f"outside={dialog.fill_policy()}"
+                ),
+                (prediction_column,),
+            )
         except MathOperationError as exc:
             QMessageBox.warning(self, "Interpolation Failed", str(exc))
             return
@@ -1139,42 +2153,18 @@ class MainWindow(QMainWindow):
             default_dataset_name=dataset.name,
             default_signal_column=self._preferred_dataset_column(dataset, ("y", "z"), fallback_index=1),
             default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
+            dataset_names=[
+                candidate.name
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            ],
+            current_dataset_name=dataset.name,
             parent=self,
         )
         if dialog.exec() != FFTDialog.Accepted:
             return
 
-        try:
-            result_frame = fft_dataset(
-                dataset.frame,
-                signal_column=dialog.signal_column(),
-                x_column=dialog.x_column(),
-                window_method=dialog.window_method(),
-            )
-            result_dataset = self._workspace.add_dataset(
-                dialog.target_dataset_name() or f"{dataset.name}_FFT",
-                result_frame,
-            )
-        except MathOperationError as exc:
-            QMessageBox.warning(self, "FFT Failed", str(exc))
-            return
-        except Exception as exc:
-            QMessageBox.critical(self, "FFT Failed", str(exc))
-            return
-
-        self._refresh_dataset_list(result_dataset.name)
-        if dialog.plot_result_immediately():
-            self._plot_tab_widget.queue_single_series_plot(
-                dataset=result_dataset,
-                x_column="frequency",
-                y_column="magnitude",
-                title="FFT magnitude",
-                label="Magnitude",
-            )
-            self._tabs.setCurrentWidget(self._plot_tab_widget)
-        self.statusBar().showMessage(
-            f"FFT saved as '{result_dataset.name}' ({len(result_dataset.frame)} rows)"
-        )
+        self._run_fft_batch(dataset, dialog)
 
     def _run_ifft(self) -> None:
         """Run the inverse FFT workflow and create a reconstructed dataset."""
@@ -1186,41 +2176,504 @@ class MainWindow(QMainWindow):
         dialog = IFFTDialog(
             column_names=[str(column) for column in dataset.frame.columns],
             default_dataset_name=dataset.name,
+            dataset_names=[
+                candidate.name
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            ],
+            current_dataset_name=dataset.name,
             parent=self,
         )
         if dialog.exec() != IFFTDialog.Accepted:
             return
 
-        try:
-            result_frame = ifft_dataset(
-                dataset.frame,
-                real_column=dialog.real_column(),
-                imaginary_column=dialog.imaginary_column(),
+        self._run_ifft_batch(dataset, dialog)
+
+    def _run_fft_batch(self, current_dataset: Dataset, dialog: FFTDialog) -> None:
+        """Run FFT on one or more worksheets and create result sheets."""
+        target_dataset_names = dialog.target_dataset_names()
+        result_datasets: list[Dataset] = []
+        current_result_dataset: Dataset | None = None
+        results: list[dict[str, object]] = []
+
+        for source_name in target_dataset_names:
+            started = time.perf_counter()
+            result_dataset_name = self._batch_result_dataset_name(
+                source_name=source_name,
+                requested_name=dialog.target_dataset_name(),
+                current_dataset_name=current_dataset.name,
+                default_suffix="FFT",
             )
-            result_dataset = self._workspace.add_dataset(
-                dialog.target_dataset_name() or f"{dataset.name}_iFFT",
-                result_frame,
+            try:
+                source_dataset = self._workspace.get_dataset(source_name)
+                result_frame = fft_dataset(
+                    source_dataset.frame,
+                    signal_column=dialog.signal_column(),
+                    x_column=dialog.x_column(),
+                    window_method=dialog.window_method(),
+                )
+                result_dataset = self._workspace.add_dataset(result_dataset_name, result_frame)
+                result_datasets.append(result_dataset)
+                if source_dataset.name == current_dataset.name:
+                    current_result_dataset = result_dataset
+                set_dataset_operation_comments(
+                    result_dataset,
+                    self._fft_operation_comment(
+                        signal_column=dialog.signal_column(),
+                        x_column=dialog.x_column(),
+                        window_method=dialog.window_method(),
+                    ),
+                )
+                results.append(
+                    self._fft_batch_summary_row(
+                        source_dataset=source_dataset,
+                        operation="FFT",
+                        signal_column=dialog.signal_column(),
+                        x_column=dialog.x_column(),
+                        window_method=dialog.window_method(),
+                        requested_result_sheet=result_dataset_name,
+                        output_sheet=result_dataset.name,
+                        result_frame=result_frame,
+                        status="ok",
+                        error="",
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            except MathOperationError as exc:
+                results.append(
+                    self._fft_batch_summary_row(
+                        source_sheet=source_name,
+                        operation="FFT",
+                        signal_column=dialog.signal_column(),
+                        x_column=dialog.x_column(),
+                        window_method=dialog.window_method(),
+                        requested_result_sheet=result_dataset_name,
+                        output_sheet="",
+                        status="failed",
+                        error=str(exc),
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            except Exception as exc:
+                results.append(
+                    self._fft_batch_summary_row(
+                        source_sheet=source_name,
+                        operation="FFT",
+                        signal_column=dialog.signal_column(),
+                        x_column=dialog.x_column(),
+                        window_method=dialog.window_method(),
+                        requested_result_sheet=result_dataset_name,
+                        output_sheet="",
+                        status="failed",
+                        error=str(exc),
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+
+        summary_dataset = self._add_signal_batch_summary_dataset(
+            current_dataset=current_dataset,
+            operation_key="FFT",
+            target_dataset_names=target_dataset_names,
+            results=results,
+        )
+        self._finish_signal_batch(
+            operation_title="FFT",
+            target_dataset_names=target_dataset_names,
+            result_datasets=result_datasets,
+            current_result_dataset=current_result_dataset,
+            summary_dataset=summary_dataset,
+            results=results,
+            plot_result=dialog.plot_result_immediately(),
+            plot_x_column="frequency",
+            plot_y_column="magnitude",
+            plot_title="FFT magnitude",
+            plot_label="Magnitude",
+        )
+
+    def _run_ifft_batch(self, current_dataset: Dataset, dialog: IFFTDialog) -> None:
+        """Run inverse FFT on one or more worksheets and create result sheets."""
+        target_dataset_names = dialog.target_dataset_names()
+        result_datasets: list[Dataset] = []
+        current_result_dataset: Dataset | None = None
+        results: list[dict[str, object]] = []
+
+        for source_name in target_dataset_names:
+            started = time.perf_counter()
+            result_dataset_name = self._batch_result_dataset_name(
+                source_name=source_name,
+                requested_name=dialog.target_dataset_name(),
+                current_dataset_name=current_dataset.name,
+                default_suffix="iFFT",
             )
-        except MathOperationError as exc:
-            QMessageBox.warning(self, "Inverse FFT Failed", str(exc))
-            return
-        except Exception as exc:
-            QMessageBox.critical(self, "Inverse FFT Failed", str(exc))
+            try:
+                source_dataset = self._workspace.get_dataset(source_name)
+                result_frame = ifft_dataset(
+                    source_dataset.frame,
+                    real_column=dialog.real_column(),
+                    imaginary_column=dialog.imaginary_column(),
+                )
+                result_dataset = self._workspace.add_dataset(result_dataset_name, result_frame)
+                result_datasets.append(result_dataset)
+                if source_dataset.name == current_dataset.name:
+                    current_result_dataset = result_dataset
+                set_dataset_operation_comments(
+                    result_dataset,
+                    self._ifft_operation_comment(
+                        real_column=dialog.real_column(),
+                        imaginary_column=dialog.imaginary_column(),
+                    ),
+                )
+                results.append(
+                    self._ifft_batch_summary_row(
+                        source_dataset=source_dataset,
+                        real_column=dialog.real_column(),
+                        imaginary_column=dialog.imaginary_column(),
+                        requested_result_sheet=result_dataset_name,
+                        output_sheet=result_dataset.name,
+                        result_frame=result_frame,
+                        status="ok",
+                        error="",
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            except MathOperationError as exc:
+                results.append(
+                    self._ifft_batch_summary_row(
+                        source_sheet=source_name,
+                        real_column=dialog.real_column(),
+                        imaginary_column=dialog.imaginary_column(),
+                        requested_result_sheet=result_dataset_name,
+                        output_sheet="",
+                        status="failed",
+                        error=str(exc),
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            except Exception as exc:
+                results.append(
+                    self._ifft_batch_summary_row(
+                        source_sheet=source_name,
+                        real_column=dialog.real_column(),
+                        imaginary_column=dialog.imaginary_column(),
+                        requested_result_sheet=result_dataset_name,
+                        output_sheet="",
+                        status="failed",
+                        error=str(exc),
+                        elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+
+        summary_dataset = self._add_signal_batch_summary_dataset(
+            current_dataset=current_dataset,
+            operation_key="iFFT",
+            target_dataset_names=target_dataset_names,
+            results=results,
+        )
+        self._finish_signal_batch(
+            operation_title="Inverse FFT",
+            target_dataset_names=target_dataset_names,
+            result_datasets=result_datasets,
+            current_result_dataset=current_result_dataset,
+            summary_dataset=summary_dataset,
+            results=results,
+            plot_result=dialog.plot_result_immediately(),
+            plot_x_column="sample",
+            plot_y_column="real",
+            plot_title="Inverse FFT",
+            plot_label="Reconstructed real",
+        )
+
+    def _add_signal_batch_summary_dataset(
+        self,
+        current_dataset: Dataset,
+        operation_key: str,
+        target_dataset_names: list[str],
+        results: list[dict[str, object]],
+    ) -> Dataset | None:
+        """Create a cumulative FFT/iFFT batch summary when multiple sheets were selected."""
+        if len(target_dataset_names) <= 1:
+            return None
+        return self._workspace.add_dataset(
+            f"{current_dataset.name}_{operation_key}_batch_summary",
+            pd.DataFrame(results),
+        )
+
+    def _finish_signal_batch(
+        self,
+        operation_title: str,
+        target_dataset_names: list[str],
+        result_datasets: list[Dataset],
+        current_result_dataset: Dataset | None,
+        summary_dataset: Dataset | None,
+        results: list[dict[str, object]],
+        plot_result: bool,
+        plot_x_column: str,
+        plot_y_column: str,
+        plot_title: str,
+        plot_label: str,
+    ) -> None:
+        """Refresh UI, plot the active result, and report FFT/iFFT batch status."""
+        success_count = sum(1 for row in results if row["status"] == "ok")
+        failure_rows = [row for row in results if row["status"] != "ok"]
+        selected_name = ""
+        if current_result_dataset is not None:
+            selected_name = current_result_dataset.name
+        elif result_datasets:
+            selected_name = result_datasets[0].name
+        elif summary_dataset is not None:
+            selected_name = summary_dataset.name
+
+        if selected_name:
+            self._refresh_dataset_list(selected_name)
+        else:
+            self._update_dataset_summary()
+
+        if success_count == 0:
+            message = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failure_rows[:8])
+            if summary_dataset is not None:
+                message = f"{message}\n\nSummary saved as '{summary_dataset.name}'."
+            QMessageBox.warning(
+                self,
+                f"{operation_title} Failed",
+                message or f"{operation_title} failed on every selected sheet.",
+            )
             return
 
-        self._refresh_dataset_list(result_dataset.name)
-        if dialog.plot_result_immediately():
+        if current_result_dataset is not None and plot_result:
             self._plot_tab_widget.queue_single_series_plot(
-                dataset=result_dataset,
-                x_column="sample",
-                y_column="real",
-                title="Inverse FFT",
-                label="Reconstructed real",
+                dataset=current_result_dataset,
+                x_column=plot_x_column,
+                y_column=plot_y_column,
+                title=plot_title,
+                label=plot_label,
             )
             self._tabs.setCurrentWidget(self._plot_tab_widget)
+
+        if failure_rows:
+            detail = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failure_rows[:8])
+            QMessageBox.warning(
+                self,
+                f"{operation_title} Batch",
+                f"Created {success_count} result sheet(s); {len(failure_rows)} failed.\n\n{detail}",
+            )
         self.statusBar().showMessage(
-            f"Inverse FFT saved as '{result_dataset.name}' ({len(result_dataset.frame)} rows)"
+            self._signal_batch_status_message(
+                operation_title=operation_title,
+                success_count=success_count,
+                failure_count=len(failure_rows),
+                summary_dataset_name=summary_dataset.name if summary_dataset else "",
+            )
         )
+
+    @staticmethod
+    def _batch_result_dataset_name(
+        source_name: str,
+        requested_name: str,
+        current_dataset_name: str,
+        default_suffix: str,
+    ) -> str:
+        """Return a per-source result-sheet name for batch-created datasets."""
+        clean_requested = requested_name.strip()
+        default_current_name = f"{current_dataset_name}_{default_suffix}"
+        if not clean_requested:
+            return f"{source_name}_{default_suffix}"
+        if "{source}" in clean_requested:
+            return clean_requested.replace("{source}", source_name)
+        if source_name == current_dataset_name:
+            return clean_requested
+        if clean_requested == default_current_name:
+            return f"{source_name}_{default_suffix}"
+        return f"{source_name}_{clean_requested}"
+
+    @staticmethod
+    def _fft_operation_comment(
+        signal_column: str,
+        x_column: str | None,
+        window_method: str,
+    ) -> str:
+        """Return a compact provenance comment for FFT result sheets."""
+        return f"FFT: signal={signal_column}, x={x_column or 'sample index'}, window={window_method}"
+
+    @staticmethod
+    def _ifft_operation_comment(real_column: str, imaginary_column: str | None) -> str:
+        """Return a compact provenance comment for inverse FFT result sheets."""
+        return f"Inverse FFT: real={real_column}, imaginary={imaginary_column or '0'}"
+
+    def _fft_batch_summary_row(
+        self,
+        operation: str,
+        signal_column: str,
+        x_column: str | None,
+        window_method: str,
+        requested_result_sheet: str,
+        output_sheet: str,
+        status: str,
+        error: str,
+        elapsed_seconds: float,
+        source_dataset: Dataset | None = None,
+        source_sheet: str = "",
+        result_frame: pd.DataFrame | None = None,
+    ) -> dict[str, object]:
+        """Return one FFT batch summary row."""
+        metrics = self._fft_result_metrics(source_dataset, result_frame, signal_column, x_column)
+        row: dict[str, object] = {
+            "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
+            "operation": operation,
+            "signal_column": signal_column,
+            "x_column": x_column or "sample index",
+            "window": window_method,
+            "window_label": WINDOW_METHODS.get(window_method, window_method),
+            "requested_result_sheet": requested_result_sheet,
+            "output_sheet": output_sheet,
+            "status": status,
+            "error": error,
+            "elapsed_seconds": round(float(elapsed_seconds), 6),
+        }
+        row.update(metrics)
+        return row
+
+    @staticmethod
+    def _fft_result_metrics(
+        source_dataset: Dataset | None,
+        result_frame: pd.DataFrame | None,
+        signal_column: str,
+        x_column: str | None,
+    ) -> dict[str, object]:
+        """Return quality metrics for one FFT result."""
+        metrics: dict[str, object] = {
+            "source_row_count": len(source_dataset.frame) if source_dataset is not None else 0,
+            "sample_count": len(result_frame) if result_frame is not None else 0,
+            "sample_spacing": np.nan,
+            "dominant_frequency": np.nan,
+            "dominant_amplitude": np.nan,
+            "total_spectral_power": np.nan,
+        }
+        if source_dataset is not None:
+            metrics["sample_spacing"] = MainWindow._estimate_fft_sample_spacing(
+                source_dataset,
+                signal_column,
+                x_column,
+            )
+        if result_frame is None or result_frame.empty or "magnitude" not in result_frame:
+            return metrics
+
+        magnitudes = pd.to_numeric(result_frame["magnitude"], errors="coerce")
+        magnitudes = magnitudes.replace([np.inf, -np.inf], np.nan).dropna()
+        if magnitudes.empty:
+            return metrics
+
+        dominant_index = magnitudes.idxmax()
+        metrics["dominant_amplitude"] = float(magnitudes.loc[dominant_index])
+        if "frequency" in result_frame:
+            frequency = pd.to_numeric(result_frame.loc[[dominant_index], "frequency"], errors="coerce")
+            if not frequency.empty and pd.notna(frequency.iloc[0]):
+                metrics["dominant_frequency"] = float(frequency.iloc[0])
+        metrics["total_spectral_power"] = float(np.square(magnitudes.to_numpy(dtype=float)).sum())
+        return metrics
+
+    @staticmethod
+    def _estimate_fft_sample_spacing(
+        source_dataset: Dataset,
+        signal_column: str,
+        x_column: str | None,
+    ) -> float:
+        """Estimate sample spacing for the FFT batch summary."""
+        if not x_column:
+            return 1.0
+        if x_column not in source_dataset.frame.columns or signal_column not in source_dataset.frame.columns:
+            return float("nan")
+        x_values = pd.to_numeric(source_dataset.frame[x_column], errors="coerce")
+        y_values = pd.to_numeric(source_dataset.frame[signal_column], errors="coerce")
+        aligned = pd.DataFrame({"x": x_values, "y": y_values}).dropna()
+        if len(aligned) < 2:
+            return float("nan")
+        spacing = np.diff(aligned["x"].to_numpy(dtype=float))
+        if len(spacing) == 0:
+            return float("nan")
+        return float(np.median(np.abs(spacing)))
+
+    def _ifft_batch_summary_row(
+        self,
+        real_column: str,
+        imaginary_column: str | None,
+        requested_result_sheet: str,
+        output_sheet: str,
+        status: str,
+        error: str,
+        elapsed_seconds: float,
+        source_dataset: Dataset | None = None,
+        source_sheet: str = "",
+        result_frame: pd.DataFrame | None = None,
+    ) -> dict[str, object]:
+        """Return one inverse FFT batch summary row."""
+        metrics = self._ifft_result_metrics(source_dataset, result_frame)
+        row: dict[str, object] = {
+            "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
+            "operation": "Inverse FFT",
+            "real_column": real_column,
+            "imaginary_column": imaginary_column or "0",
+            "requested_result_sheet": requested_result_sheet,
+            "output_sheet": output_sheet,
+            "status": status,
+            "error": error,
+            "elapsed_seconds": round(float(elapsed_seconds), 6),
+        }
+        row.update(metrics)
+        return row
+
+    @staticmethod
+    def _ifft_result_metrics(
+        source_dataset: Dataset | None,
+        result_frame: pd.DataFrame | None,
+    ) -> dict[str, object]:
+        """Return quality metrics for one inverse FFT result."""
+        metrics: dict[str, object] = {
+            "source_row_count": len(source_dataset.frame) if source_dataset is not None else 0,
+            "reconstruction_count": len(result_frame) if result_frame is not None else 0,
+            "finite_real_count": np.nan,
+            "real_minimum": np.nan,
+            "real_maximum": np.nan,
+            "real_mean": np.nan,
+            "maximum_magnitude": np.nan,
+            "reconstructed_power": np.nan,
+        }
+        if result_frame is None or result_frame.empty:
+            return metrics
+
+        if "real" in result_frame:
+            real_values = pd.to_numeric(result_frame["real"], errors="coerce")
+            real_values = real_values.replace([np.inf, -np.inf], np.nan).dropna()
+            metrics["finite_real_count"] = int(len(real_values))
+            if not real_values.empty:
+                real_array = real_values.to_numpy(dtype=float)
+                metrics["real_minimum"] = float(real_values.min())
+                metrics["real_maximum"] = float(real_values.max())
+                metrics["real_mean"] = float(real_values.mean())
+                metrics["reconstructed_power"] = float(np.square(real_array).sum())
+
+        if "magnitude" in result_frame:
+            magnitudes = pd.to_numeric(result_frame["magnitude"], errors="coerce")
+            magnitudes = magnitudes.replace([np.inf, -np.inf], np.nan).dropna()
+            if not magnitudes.empty:
+                metrics["maximum_magnitude"] = float(magnitudes.max())
+        return metrics
+
+    @staticmethod
+    def _signal_batch_status_message(
+        operation_title: str,
+        success_count: int,
+        failure_count: int,
+        summary_dataset_name: str,
+    ) -> str:
+        """Return a concise FFT/iFFT batch status message."""
+        if summary_dataset_name:
+            return (
+                f"{operation_title} created {success_count} result sheet(s), "
+                f"{failure_count} failed; summary saved as '{summary_dataset_name}'"
+            )
+        if failure_count:
+            return f"{operation_title} created {success_count} result sheet(s), {failure_count} failed"
+        return f"{operation_title} created {success_count} result sheet(s)"
 
     def _run_statistics(self) -> None:
         """Run a statistics workflow and create a result dataset."""
@@ -1285,6 +2738,17 @@ class MainWindow(QMainWindow):
                 dialog.target_dataset_name() or f"{primary_dataset.name}_statistics",
                 result_frame,
             )
+            set_dataset_operation_comments(
+                result_dataset,
+                self._statistics_operation_comment(
+                    operation_key=dialog.operation_key(),
+                    primary_dataset=primary_dataset,
+                    primary_column=primary_column,
+                    secondary_dataset=secondary_dataset,
+                    secondary_column=secondary_column,
+                    multi_columns=multi_columns,
+                ),
+            )
         except KeyError as exc:
             QMessageBox.warning(self, "Statistics Failed", f"Selected data is no longer available: {exc}")
             return
@@ -1319,6 +2783,25 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Statistics saved as '{result_dataset.name}' ({len(result_dataset.frame)} rows)"
         )
+
+    @staticmethod
+    def _statistics_operation_comment(
+        operation_key: str,
+        primary_dataset: Dataset,
+        primary_column: str,
+        secondary_dataset: Dataset | None,
+        secondary_column: str,
+        multi_columns: list[str],
+    ) -> str:
+        """Return a compact provenance comment for a statistics result sheet."""
+        operation_label = STATISTIC_OPERATIONS[operation_key].label
+        if multi_columns:
+            inputs = f"{primary_dataset.name}: {', '.join(multi_columns)}"
+        else:
+            inputs = f"{primary_dataset.name}: {primary_column}"
+            if secondary_dataset is not None and secondary_column:
+                inputs = f"{inputs}; secondary={secondary_dataset.name}: {secondary_column}"
+        return f"Statistics: operation={operation_label}, inputs={inputs}"
 
     def _queue_statistics_companion_plot(
         self,
@@ -1996,12 +3479,18 @@ class MainWindow(QMainWindow):
                 dialog.target_dataset_name() or f"{dataset.name}_fit",
                 result.fit_frame,
             )
+            fit_operation_comment = (
+                f"Curve fit: y={dialog.y_column()}, x={dialog.x_column()}, "
+                f"model={result.report.model_name}, method={dialog.method()}"
+            )
+            set_dataset_operation_comments(result_dataset, fit_operation_comment)
             residual_dataset = None
             if dialog.create_residual_sheet() or dialog.plot_residuals():
                 residual_dataset = self._workspace.add_dataset(
                     dialog.residual_dataset_name() or f"{dataset.name}_residuals",
                     result.residual_frame,
                 )
+                set_dataset_operation_comments(residual_dataset, f"Fit residuals: {fit_operation_comment}")
         except MathOperationError as exc:
             QMessageBox.warning(self, "Curve Fit Failed", str(exc))
             return
@@ -2032,7 +3521,7 @@ class MainWindow(QMainWindow):
     def _refresh_dataset_after_analysis(self, dataset: Dataset, selected_column: str) -> None:
         """Refresh editor and plot controls after an in-place analysis column edit."""
         self._dataset_model.set_dataset(dataset)
-        self._dataset_table.resizeColumnsToContents()
+        self._resize_dataset_columns_to_contents(dataset)
         self._plot_tab_widget.refresh_controls(dataset.name)
         self._update_dataset_summary()
         self._select_column(selected_column)
@@ -2091,7 +3580,7 @@ class MainWindow(QMainWindow):
             return
 
         deleted_columns = self._dataset_model.delete_columns(selected_columns)
-        self._dataset_table.resizeColumnsToContents()
+        self._resize_dataset_columns_to_contents(dataset)
         self._plot_tab_widget.refresh_controls(dataset.name)
         self._update_dataset_summary()
         self.statusBar().showMessage(
@@ -2131,7 +3620,7 @@ class MainWindow(QMainWindow):
 
         dataset = self._workspace.get_dataset(dataset_name)
         self._dataset_model.set_dataset(dataset)
-        self._dataset_table.resizeColumnsToContents()
+        self._resize_dataset_columns_to_contents(dataset)
         self._update_dataset_summary()
         self._tabs.setCurrentIndex(0)
 
@@ -2295,7 +3784,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Paste Failed", str(exc))
             return
 
-        self._dataset_table.resizeColumnsToContents()
+        self._resize_dataset_columns_to_contents(dataset)
         self._plot_tab_widget.refresh_controls(dataset.name)
         self._update_dataset_summary()
         if pasted_rows and pasted_columns:
@@ -2386,7 +3875,7 @@ class MainWindow(QMainWindow):
         if not inserted_columns:
             return
 
-        self._dataset_table.resizeColumnsToContents()
+        self._resize_dataset_columns_to_contents(dataset)
         self._plot_tab_widget.refresh_controls(dataset.name)
         self._update_dataset_summary()
         self._select_dataset_column_range(insert_position, len(inserted_columns))
@@ -2554,9 +4043,10 @@ class MainWindow(QMainWindow):
             if role_count:
                 metadata_bits.append(f"{role_count} role(s)")
             metadata_text = f", {', '.join(metadata_bits)}" if metadata_bits else ""
+            backend_text = f", backend={dataset.backend}" if dataset.backend != PANDAS_BACKEND else ""
             self._dataset_summary.setText(
                 f"{dataset.name}: {len(dataset.frame)} rows, "
-                f"{len(dataset.frame.columns)} columns{formula_text}{metadata_text}"
+                f"{len(dataset.frame.columns)} columns{formula_text}{metadata_text}{backend_text}"
             )
 
         self._export_action.setEnabled(has_dataset)
@@ -2602,7 +4092,7 @@ class MainWindow(QMainWindow):
         """Refresh controls after an undoable dataset edit changes history."""
         dataset = self._dataset_model.dataset
         if dataset is not None and hasattr(self, "_plot_tab_widget"):
-            self._dataset_table.resizeColumnsToContents()
+            self._resize_dataset_columns_to_contents(dataset)
             self._plot_tab_widget.refresh_controls(dataset.name)
         if hasattr(self, "_undo_action"):
             self._update_dataset_summary()
@@ -2846,10 +4336,12 @@ class MainWindow(QMainWindow):
         try:
             self._workspace = project_io.load_project(file_name)
             self._project_path = Path(file_name)
+            self._large_dataset_warning_names.clear()
             self._plot_tab_widget.set_workspace(self._workspace)
             self._refresh_dataset_list()
             self._refresh_plot_list()
             self._set_project_window_title()
+            self._warn_about_large_workspace_datasets(Path(file_name).name)
             self.statusBar().showMessage(f"Opened project {Path(file_name).name}")
         except Exception as exc:
             QMessageBox.critical(self, "Open Failed", str(exc))
@@ -2911,6 +4403,7 @@ class MainWindow(QMainWindow):
 
         self._workspace = Workspace()
         self._project_path = None
+        self._large_dataset_warning_names.clear()
         self._plot_tab_widget.set_workspace(self._workspace)
         self._refresh_dataset_list()
         self._refresh_plot_list()

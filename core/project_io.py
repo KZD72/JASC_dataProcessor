@@ -46,6 +46,7 @@ def save_project(workspace: Workspace, path: str | Path) -> None:
             metadata["datasets"].append({
                 "name": dataset.name,
                 "csv_file": csv_name,
+                "backend": dataset.backend,
                 "source_path": str(dataset.source_path) if dataset.source_path else None,
                 "formulas": dict(dataset.formulas),
                 "column_metadata": {
@@ -94,6 +95,7 @@ def load_project(path: str | Path) -> Workspace:
                 entry["name"],
                 frame,
                 source_path=source_path,
+                backend=entry.get("backend", "pandas"),
             )
 
             formulas = entry.get("formulas")

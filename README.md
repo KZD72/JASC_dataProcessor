@@ -5,8 +5,8 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 ## Features
 
 - **Data Ingestion**: Import tabular datasets (CSV/TXT) with dynamic type detection, or manually enter data in a spreadsheet interface.
-- **Data Editing**: Edit imported datasets directly with undo/redo, append/insert/delete row and column operations, spreadsheet-style copy/paste, whole-column copy/paste, and per-column name/role/unit/long-name/comment metadata.
-- **Formula Engine**: Apply safe math operations to columns using a sandboxed expression evaluator supporting standard numpy/scipy operations.
+- **Data Editing**: Edit imported datasets directly with undo/redo, append/insert/delete row and column operations, spreadsheet-style copy/paste, whole-column copy/paste, large-dataset warnings, size-aware table auto-sizing, and per-column name/role/unit/long-name/comment metadata.
+- **Formula Engine**: Apply safe math operations to columns using a sandboxed expression evaluator with NumPy/SciPy support, positional aliases such as `col1`, exact-name insertion helpers, worksheet batch targets, and protected output naming by default.
 - **Signal Processing & Calculus**: Perform numerical differentiation, cumulative integration, and Fast Fourier Transforms (FFT).
 - **Interpolation Workbench**: Generate 1D, 2D, and N-D prediction datasets with linear, spline, piecewise cubic, nearest-neighbor, and RBF methods.
 - **Statistics Workbench**: Generate single-column summaries, multi-column summaries/correlations/covariance/PCA, grouped/factor analyses, normality tests, outlier checks, regression metrics, paired tests, independent-sample tests, one-way ANOVA, Kruskal-Wallis, post-hoc comparisons, and optional companion plots.
