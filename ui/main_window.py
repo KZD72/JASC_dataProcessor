@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QStackedWidget,
     QTabWidget,
@@ -76,8 +77,9 @@ from math_engine.calculus import (
     ifft_dataset,
     integral_column,
 )
-from math_engine.curve_fitting import fit_curve
+from math_engine.curve_fitting import FIT_METHODS, FitResult, fit_curve
 from math_engine.interpolation import (
+    INTERPOLATION_METHODS,
     generated_query_points,
     interpolate_dataset,
     query_points_from_columns,
@@ -91,11 +93,15 @@ from math_engine.statistics import (
 from ui.data_table import DataTableWidget
 from ui.dataframe_model import DataFrameTableModel
 from ui.dialogs import (
+    BATCH_COLUMN_BINDING_NAME,
+    BATCH_COLUMN_BINDING_POSITION,
+    BatchPreviewDialog,
     ColumnExpressionDialog,
     ColumnMathDialog,
     ColumnMetadataDialog,
     CustomFitModelsDialog,
     FFTDialog,
+    FigureDigitizerDialog,
     FitDialog,
     FitReportDialog,
     IFFTDialog,
@@ -388,6 +394,9 @@ class MainWindow(QMainWindow):
         import_action.setShortcut("Ctrl+I")
         import_action.triggered.connect(self._import_data_file)
 
+        import_figure_action = file_menu.addAction("Import From &Figure...")
+        import_figure_action.triggered.connect(self._import_from_figure)
+
         export_action = file_menu.addAction("&Export Dataset...")
         export_action.setShortcut("Ctrl+E")
         export_action.triggered.connect(self._export_current_dataset)
@@ -515,6 +524,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(close_project_action)
         toolbar.addSeparator()
         toolbar.addAction(import_action)
+        toolbar.addAction(import_figure_action)
         toolbar.addAction(export_action)
         self.addToolBar(toolbar)
 
@@ -531,6 +541,7 @@ class MainWindow(QMainWindow):
         self._insert_column_action = insert_column_action
         self._column_metadata_action = column_metadata_action
         self._apply_formula_action = apply_formula_action
+        self._import_figure_action = import_figure_action
         self._derivative_action = derivative_action
         self._integral_action = integral_action
         self._interpolation_action = interpolation_action
@@ -811,6 +822,120 @@ class MainWindow(QMainWindow):
             f"Imported {dataset.name}: {len(dataset.frame)} rows, {len(dataset.frame.columns)} columns"
         )
 
+    def _import_from_figure(self) -> None:
+        """Open a raster figure digitizer and add extracted data as a dataset."""
+        file_name, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Figure Image",
+            "",
+            FigureDigitizerDialog.image_file_filter(),
+        )
+        if not file_name:
+            return
+
+        dialog = FigureDigitizerDialog(file_name, self)
+        if dialog.exec() != FigureDigitizerDialog.Accepted:
+            self.statusBar().showMessage("Figure import cancelled")
+            return
+
+        rows = dialog.extracted_rows()
+        if not rows:
+            QMessageBox.information(self, "Import From Figure", "No extracted points were created.")
+            return
+
+        columns = [
+            "x",
+            "y",
+            "x_uncertainty",
+            "y_uncertainty",
+            "pixel_x",
+            "pixel_y",
+            "pixel_x_uncertainty",
+            "pixel_y_uncertainty",
+            "method",
+            "trace_mode",
+            "trace_color",
+            "roi_marks",
+            "symbol_id",
+            "symbol_area",
+            "symbol_width",
+            "symbol_height",
+            "symbol_score",
+            "symbol_template_width",
+            "symbol_template_height",
+            "source_image",
+        ]
+        frame = pd.DataFrame(rows)
+        frame = frame[[column for column in columns if column in frame.columns]]
+
+        if not self._confirm_large_dataset(
+            frame,
+            title="Large Figure Extraction",
+            source_label=dialog.dataset_name(),
+        ):
+            self.statusBar().showMessage("Figure import cancelled")
+            return
+
+        try:
+            dataset = self._workspace.add_dataset(
+                dialog.dataset_name(),
+                frame,
+                source_path=dialog.source_path() or None,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Import From Figure Failed", str(exc))
+            self.statusBar().showMessage("Figure import failed")
+            return
+
+        x_metadata = dataset.metadata_for_column("x")
+        x_metadata.role = "x"
+        x_metadata.long_name = "Digitized X"
+        y_metadata = dataset.metadata_for_column("y")
+        y_metadata.role = "y"
+        y_metadata.long_name = "Digitized Y"
+        for column_name in ("pixel_x", "pixel_y"):
+            if column_name in dataset.frame.columns:
+                metadata = dataset.metadata_for_column(column_name)
+                metadata.comment = "Source pixel coordinate from figure digitization."
+        for column_name in ("trace_mode", "trace_color", "roi_marks"):
+            if column_name in dataset.frame.columns:
+                metadata = dataset.metadata_for_column(column_name)
+                metadata.comment = "Automatic figure-trace provenance."
+        for column_name in (
+            "symbol_id",
+            "symbol_area",
+            "symbol_width",
+            "symbol_height",
+            "symbol_score",
+            "symbol_template_width",
+            "symbol_template_height",
+            "pixel_x_uncertainty",
+            "pixel_y_uncertainty",
+            "x_uncertainty",
+            "y_uncertainty",
+        ):
+            if column_name in dataset.frame.columns:
+                metadata = dataset.metadata_for_column(column_name)
+                metadata.comment = "Detected symbol-center diagnostics from figure digitization."
+                if column_name == "x_uncertainty":
+                    metadata.role = "x_error"
+                    metadata.comment = "Estimated digitized X uncertainty from manual error picks or symbol/template size and calibration."
+                elif column_name == "y_uncertainty":
+                    metadata.role = "y_error"
+                    metadata.comment = "Estimated digitized Y uncertainty from manual error picks or symbol/template size and calibration."
+                elif column_name in {"pixel_x_uncertainty", "pixel_y_uncertainty"}:
+                    metadata.comment = "Estimated manual or symbol-center uncertainty in source-image pixels."
+        operation = (
+            f"Figure digitization from {Path(dialog.source_path()).name}; "
+            f"{dialog.calibration_summary()}; {dialog.extraction_summary()}"
+        )
+        set_dataset_operation_comments(dataset, operation)
+
+        self._refresh_dataset_list(dataset.name)
+        self.statusBar().showMessage(
+            f"Imported {dataset.name} from figure: {len(dataset.frame)} extracted point(s)"
+        )
+
     def _add_manual_dataset(self, name: str, frame: object) -> None:
         """Add a manually-entered DataFrame to the workspace."""
         if not isinstance(frame, pd.DataFrame):
@@ -1048,6 +1173,188 @@ class MainWindow(QMainWindow):
             self._select_dataset_range(inserted_row, 0, 1, len(dataset.frame.columns))
         self.statusBar().showMessage(f"Inserted empty row in {dataset.name}")
 
+    @staticmethod
+    def _batch_column_binding_label(binding_mode: str) -> str:
+        """Return a readable label for a batch column binding mode."""
+        if binding_mode == BATCH_COLUMN_BINDING_POSITION:
+            return "column_position"
+        return "exact_column_name"
+
+    @staticmethod
+    def _column_position_label(position: int) -> str:
+        """Return the 1-based colN label for a zero-based column position."""
+        return f"col{position + 1}"
+
+    def _show_batch_preview(
+        self,
+        title: str,
+        rows: list[dict[str, object]],
+        columns: list[tuple[str, str]],
+    ) -> bool:
+        """Show a batch preflight preview and return whether to continue."""
+        if not rows:
+            QMessageBox.warning(self, title, "No batch jobs were prepared.")
+            return False
+        dialog = BatchPreviewDialog(title, rows, columns, self)
+        return dialog.exec() == BatchPreviewDialog.Accepted
+
+    def _batch_progress_dialog(self, title: str, total_jobs: int) -> QProgressDialog | None:
+        """Return a progress dialog for multi-job batch runs."""
+        if total_jobs <= 1:
+            return None
+        progress = QProgressDialog("Preparing batch...", "Cancel", 0, total_jobs, self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QApplication.processEvents()
+        return progress
+
+    @staticmethod
+    def _batch_progress_canceled(
+        progress: QProgressDialog | None,
+        completed_jobs: int,
+        message: str,
+    ) -> bool:
+        """Advance progress and return whether the user canceled."""
+        if progress is None:
+            return False
+        progress.setLabelText(message)
+        progress.setValue(completed_jobs)
+        QApplication.processEvents()
+        return progress.wasCanceled()
+
+    def _resolve_batch_column(
+        self,
+        reference_dataset: Dataset,
+        target_dataset: Dataset,
+        source_column: str | None,
+        binding_mode: str,
+        field_label: str,
+    ) -> str | None:
+        """Resolve one source column against a target worksheet using the requested binding."""
+        if source_column is None:
+            return None
+
+        clean_source = str(source_column)
+        if binding_mode != BATCH_COLUMN_BINDING_POSITION:
+            if clean_source not in target_dataset.frame.columns:
+                raise MathOperationError(
+                    f"{field_label} column '{clean_source}' does not exist in '{target_dataset.name}'."
+                )
+            return clean_source
+
+        reference_columns = [str(column) for column in reference_dataset.frame.columns]
+        try:
+            source_position = reference_columns.index(clean_source)
+        except ValueError as exc:
+            raise MathOperationError(
+                f"{field_label} source column '{clean_source}' no longer exists in '{reference_dataset.name}'."
+            ) from exc
+
+        target_columns = [str(column) for column in target_dataset.frame.columns]
+        if source_position >= len(target_columns):
+            raise MathOperationError(
+                f"{field_label} source column '{clean_source}' is {self._column_position_label(source_position)}, "
+                f"but '{target_dataset.name}' has only {len(target_columns)} column(s)."
+            )
+        return target_columns[source_position]
+
+    def _resolve_batch_columns(
+        self,
+        reference_dataset: Dataset,
+        target_dataset: Dataset,
+        source_columns: list[str],
+        binding_mode: str,
+        field_label: str,
+    ) -> list[str]:
+        """Resolve multiple source columns against a target worksheet."""
+        resolved_columns: list[str] = []
+        for index, source_column in enumerate(source_columns, start=1):
+            resolved = self._resolve_batch_column(
+                reference_dataset=reference_dataset,
+                target_dataset=target_dataset,
+                source_column=source_column,
+                binding_mode=binding_mode,
+                field_label=f"{field_label} {index}",
+            )
+            if resolved is not None:
+                resolved_columns.append(resolved)
+        return resolved_columns
+
+    def _formula_evaluation_frame(
+        self,
+        reference_dataset: Dataset,
+        target_dataset: Dataset,
+        binding_mode: str,
+    ) -> pd.DataFrame:
+        """Return the DataFrame used to evaluate a formula under the selected binding mode."""
+        if binding_mode != BATCH_COLUMN_BINDING_POSITION or reference_dataset.name == target_dataset.name:
+            return target_dataset.frame
+
+        evaluation_frame = target_dataset.frame.copy()
+        reference_columns = [str(column) for column in reference_dataset.frame.columns]
+        renamed_columns = [
+            reference_columns[index] if index < len(reference_columns) else str(column)
+            for index, column in enumerate(evaluation_frame.columns)
+        ]
+        evaluation_frame.columns = renamed_columns
+        return evaluation_frame
+
+    @staticmethod
+    def _batch_output_column_name(base_name: str, source_column: str, multiple_columns: bool) -> str:
+        """Return an output column name for single- or multi-source-column batches."""
+        clean_base = base_name.strip() or "Result"
+        if "{column}" in clean_base:
+            return clean_base.replace("{column}", str(source_column))
+        if multiple_columns:
+            return f"{clean_base}_{source_column}"
+        return clean_base
+
+    def _batch_output_target_plan(
+        self,
+        target_requests: list[dict[str, object]],
+        conflict_policy: str,
+    ) -> list[dict[str, object]]:
+        """Resolve output target columns for pre-expanded batch requests."""
+        planned_columns_by_sheet: dict[str, set[str]] = {}
+        existing_columns_by_sheet: dict[str, set[str]] = {}
+        plan_rows: list[dict[str, object]] = []
+        for request in target_requests:
+            target_dataset_name = str(request["source_sheet"])
+            if target_dataset_name not in planned_columns_by_sheet:
+                target_dataset = self._workspace.get_dataset(target_dataset_name)
+                existing_columns = {str(column) for column in target_dataset.frame.columns}
+                existing_columns_by_sheet[target_dataset_name] = set(existing_columns)
+                planned_columns_by_sheet[target_dataset_name] = set(existing_columns)
+
+            requested_target = str(request["requested_target_column"]).strip()
+            existing_columns = existing_columns_by_sheet[target_dataset_name]
+            planned_columns = planned_columns_by_sheet[target_dataset_name]
+            target_existed_before = requested_target in existing_columns
+            target_exists = requested_target in planned_columns
+            final_target = requested_target
+            output_action = "create"
+            if target_exists and conflict_policy == "unique":
+                final_target = self._unique_batch_column_name(requested_target, planned_columns)
+                output_action = "create_unique"
+            elif target_exists and conflict_policy == "stop":
+                output_action = "blocked"
+            elif target_exists:
+                output_action = "overwrite"
+            planned_columns.add(final_target)
+            row = dict(request)
+            row.update(
+                {
+                    "requested_target_column": requested_target,
+                    "target_column": final_target,
+                    "target_existed_before": target_existed_before,
+                    "output_action": output_action,
+                }
+            )
+            plan_rows.append(row)
+        return plan_rows
+
     def _apply_column_formula(self) -> None:
         """Apply a safe expression to all or selected rows in a column."""
         dataset = self._current_dataset()
@@ -1079,11 +1386,27 @@ class MainWindow(QMainWindow):
         conflict_policy = dialog.target_conflict_policy()
         requested_execution_mode = dialog.batch_execution_mode()
         max_workers = dialog.batch_max_workers()
+        column_binding_mode = dialog.column_binding_mode()
         target_plan = self._formula_batch_target_plan(
             target_dataset_names=target_dataset_names,
             target_column=target_column,
             conflict_policy=conflict_policy,
         )
+        if (len(target_plan) > 1 or any(row["output_action"] == "blocked" for row in target_plan)) and not (
+            self._show_batch_preview(
+                "Formula Batch Preview",
+                self._formula_batch_preview_rows(target_plan, column_binding_mode),
+                [
+                    ("Sheet", "source_sheet"),
+                    ("Status", "status"),
+                    ("Target", "target_column"),
+                    ("Action", "output_action"),
+                    ("Binding", "column_binding"),
+                    ("Details", "error"),
+                ],
+            )
+        ):
+            return
         if not self._confirm_formula_batch_target_plan(target_plan, conflict_policy):
             return
 
@@ -1105,21 +1428,43 @@ class MainWindow(QMainWindow):
         results_by_sheet: dict[str, dict[str, object]] = {}
         current_result_target = ""
         parallel_sheet_names = {str(row["source_sheet"]) for row in parallel_plan_rows}
+        sequential_plan_rows = [
+            row
+            for row in target_plan
+            if str(row["source_sheet"]) not in parallel_sheet_names
+        ]
+        progress = self._batch_progress_dialog("Formula Batch", len(sequential_plan_rows))
+        completed_jobs = 0
+        canceled = False
         for plan_row in target_plan:
             target_dataset_name = str(plan_row["source_sheet"])
             if target_dataset_name in parallel_sheet_names:
                 continue
 
+            if self._batch_progress_canceled(
+                progress,
+                completed_jobs,
+                f"Formula: {target_dataset_name}",
+            ):
+                canceled = True
+                break
             started = time.perf_counter()
             try:
                 target_dataset = self._workspace.get_dataset(target_dataset_name)
                 use_visible_model = target_dataset.name == dataset.name
+                evaluation_frame = self._formula_evaluation_frame(
+                    reference_dataset=dataset,
+                    target_dataset=target_dataset,
+                    binding_mode=column_binding_mode,
+                )
                 result = self._apply_expression_to_dataset(
                     dataset=target_dataset,
                     target_column=str(plan_row["target_column"]),
                     expression=expression,
                     row_positions=row_positions if use_visible_model else None,
                     use_visible_model=use_visible_model,
+                    evaluation_frame=evaluation_frame,
+                    column_binding_mode=column_binding_mode,
                 )
                 if use_visible_model:
                     current_result_target = result.target_column
@@ -1133,6 +1478,7 @@ class MainWindow(QMainWindow):
                         requested_target_column=target_column,
                         output_action=str(plan_row["output_action"]),
                         target_existed_before=bool(plan_row["target_existed_before"]),
+                        column_binding_mode=column_binding_mode,
                         execution_mode="sequential",
                         elapsed_seconds=time.perf_counter() - started,
                     )
@@ -1148,6 +1494,7 @@ class MainWindow(QMainWindow):
                         requested_target_column=target_column,
                         output_action=str(plan_row["output_action"]),
                         target_existed_before=bool(plan_row["target_existed_before"]),
+                        column_binding_mode=column_binding_mode,
                         execution_mode="sequential",
                         elapsed_seconds=time.perf_counter() - started,
                     )
@@ -1163,17 +1510,40 @@ class MainWindow(QMainWindow):
                         requested_target_column=target_column,
                         output_action=str(plan_row["output_action"]),
                         target_existed_before=bool(plan_row["target_existed_before"]),
+                        column_binding_mode=column_binding_mode,
                         execution_mode="sequential",
                         elapsed_seconds=time.perf_counter() - started,
                     )
                 )
+            completed_jobs += 1
 
-        if parallel_plan_rows:
+        if progress is not None:
+            progress.setValue(completed_jobs)
+        if canceled:
+            for plan_row in sequential_plan_rows[completed_jobs:]:
+                target_dataset_name = str(plan_row["source_sheet"])
+                results_by_sheet[target_dataset_name] = self._formula_batch_summary_row(
+                    dataset_name=target_dataset_name,
+                    result_target_column=str(plan_row["target_column"]),
+                    updated_rows=0,
+                    status="canceled",
+                    error="Canceled by user before this sheet was processed.",
+                    requested_target_column=target_column,
+                    output_action=str(plan_row["output_action"]),
+                    target_existed_before=bool(plan_row["target_existed_before"]),
+                    column_binding_mode=column_binding_mode,
+                    execution_mode="sequential",
+                    elapsed_seconds=0.0,
+                )
+
+        if parallel_plan_rows and not canceled:
             parallel_results = self._run_parallel_formula_batch_rows(
                 plan_rows=parallel_plan_rows,
                 expression=expression,
                 requested_target_column=target_column,
                 execution_decision=execution_decision,
+                reference_dataset=dataset,
+                column_binding_mode=column_binding_mode,
             )
             results_by_sheet.update(parallel_results)
 
@@ -1224,26 +1594,37 @@ class MainWindow(QMainWindow):
         expression: str,
         row_positions: list[int] | None,
         use_visible_model: bool,
+        evaluation_frame: pd.DataFrame | None = None,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
     ) -> ExpressionResult:
         """Apply a formula to one dataset, using the visible model when possible."""
+        operation_comment = (
+            f"Formula = {expression.strip()} "
+            f"({self._batch_column_binding_label(column_binding_mode)})"
+        )
         if use_visible_model:
-            return self._dataset_model.apply_expression(
+            result = self._dataset_model.apply_expression(
                 target_column=target_column,
                 expression=expression,
                 row_positions=row_positions,
             )
+            set_column_operation_comment(dataset, result.target_column, operation_comment)
+            return result
 
+        target_frame = evaluation_frame if evaluation_frame is not None else dataset.frame
         result = apply_column_expression(
-            dataset.frame,
+            target_frame,
             target_column=target_column,
             expression=expression,
             row_positions=row_positions,
         )
+        if target_frame is not dataset.frame:
+            dataset.frame[result.target_column] = target_frame[result.target_column].reindex(dataset.frame.index)
         dataset.formulas[result.target_column] = expression.strip()
         set_column_operation_comment(
             dataset,
             result.target_column,
-            f"Formula = {expression.strip()}",
+            operation_comment,
         )
         dataset.prune_column_metadata()
         return result
@@ -1335,6 +1716,29 @@ class MainWindow(QMainWindow):
         )
         return reply == QMessageBox.Yes
 
+    def _formula_batch_preview_rows(
+        self,
+        plan_rows: list[dict[str, object]],
+        column_binding_mode: str,
+    ) -> list[dict[str, object]]:
+        """Return preview rows for formula output targets."""
+        rows: list[dict[str, object]] = []
+        for row in plan_rows:
+            output_action = str(row["output_action"])
+            status = "blocked" if output_action == "blocked" else "ready"
+            error = "Target exists and the selected policy is Stop." if status == "blocked" else ""
+            rows.append(
+                {
+                    "source_sheet": row["source_sheet"],
+                    "status": status,
+                    "target_column": row["target_column"],
+                    "output_action": output_action,
+                    "column_binding": self._batch_column_binding_label(column_binding_mode),
+                    "error": error,
+                }
+            )
+        return rows
+
     @staticmethod
     def _formula_batch_plan_detail(plan_rows: list[dict[str, object]], limit: int = 12) -> str:
         """Return a compact user-facing description of formula output targets."""
@@ -1377,6 +1781,7 @@ class MainWindow(QMainWindow):
         requested_target_column: str = "",
         output_action: str = "",
         target_existed_before: bool = False,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
         execution_mode: str = "",
         elapsed_seconds: float = 0.0,
     ) -> dict[str, object]:
@@ -1388,6 +1793,7 @@ class MainWindow(QMainWindow):
             "target_column": result_target_column,
             "output_action": output_action,
             "target_existed_before": target_existed_before,
+            "column_binding": self._batch_column_binding_label(column_binding_mode),
             "updated_rows": updated_rows,
             "status": status,
             "error": error,
@@ -1450,18 +1856,26 @@ class MainWindow(QMainWindow):
         expression: str,
         requested_target_column: str,
         execution_decision: BatchExecutionDecision,
+        reference_dataset: Dataset,
+        column_binding_mode: str,
     ) -> dict[str, dict[str, object]]:
         """Run formula batch rows in worker processes and apply successful outputs."""
         results_by_sheet: dict[str, dict[str, object]] = {}
-        tasks = [
-            FormulaBatchTask(
-                source_sheet=str(plan_row["source_sheet"]),
-                target_column=str(plan_row["target_column"]),
-                expression=expression,
-                frame=self._workspace.get_dataset(str(plan_row["source_sheet"])).frame,
+        tasks: list[FormulaBatchTask] = []
+        for plan_row in plan_rows:
+            target_dataset = self._workspace.get_dataset(str(plan_row["source_sheet"]))
+            tasks.append(
+                FormulaBatchTask(
+                    source_sheet=str(plan_row["source_sheet"]),
+                    target_column=str(plan_row["target_column"]),
+                    expression=expression,
+                    frame=self._formula_evaluation_frame(
+                        reference_dataset=reference_dataset,
+                        target_dataset=target_dataset,
+                        binding_mode=column_binding_mode,
+                    ),
+                )
             )
-            for plan_row in plan_rows
-        ]
 
         try:
             worker_results = run_formula_batch_parallel(
@@ -1482,6 +1896,8 @@ class MainWindow(QMainWindow):
                 expression=expression,
                 requested_target_column=requested_target_column,
                 execution_mode="sequential_fallback",
+                reference_dataset=reference_dataset,
+                column_binding_mode=column_binding_mode,
             )
 
         plan_by_sheet = {str(row["source_sheet"]): row for row in plan_rows}
@@ -1497,6 +1913,7 @@ class MainWindow(QMainWindow):
                     requested_target_column=requested_target_column,
                     output_action=str(plan_row["output_action"]),
                     target_existed_before=bool(plan_row["target_existed_before"]),
+                    column_binding_mode=column_binding_mode,
                     execution_mode="parallel",
                     elapsed_seconds=worker_result.elapsed_seconds,
                 )
@@ -1509,6 +1926,7 @@ class MainWindow(QMainWindow):
                     dataset=target_dataset,
                     worker_result=worker_result,
                     expression=expression,
+                    column_binding_mode=column_binding_mode,
                 )
                 results_by_sheet[worker_result.source_sheet] = self._formula_batch_summary_row(
                     dataset=target_dataset,
@@ -1519,6 +1937,7 @@ class MainWindow(QMainWindow):
                     requested_target_column=requested_target_column,
                     output_action=str(plan_row["output_action"]),
                     target_existed_before=bool(plan_row["target_existed_before"]),
+                    column_binding_mode=column_binding_mode,
                     execution_mode="parallel",
                     elapsed_seconds=worker_result.elapsed_seconds + time.perf_counter() - started,
                 )
@@ -1532,6 +1951,7 @@ class MainWindow(QMainWindow):
                     requested_target_column=requested_target_column,
                     output_action=str(plan_row["output_action"]),
                     target_existed_before=bool(plan_row["target_existed_before"]),
+                    column_binding_mode=column_binding_mode,
                     execution_mode="parallel",
                     elapsed_seconds=worker_result.elapsed_seconds + time.perf_counter() - started,
                 )
@@ -1543,6 +1963,8 @@ class MainWindow(QMainWindow):
         expression: str,
         requested_target_column: str,
         execution_mode: str,
+        reference_dataset: Dataset,
+        column_binding_mode: str,
     ) -> dict[str, dict[str, object]]:
         """Run formula batch rows sequentially after a parallel fallback."""
         results_by_sheet: dict[str, dict[str, object]] = {}
@@ -1551,12 +1973,19 @@ class MainWindow(QMainWindow):
             started = time.perf_counter()
             try:
                 target_dataset = self._workspace.get_dataset(target_dataset_name)
+                evaluation_frame = self._formula_evaluation_frame(
+                    reference_dataset=reference_dataset,
+                    target_dataset=target_dataset,
+                    binding_mode=column_binding_mode,
+                )
                 result = self._apply_expression_to_dataset(
                     dataset=target_dataset,
                     target_column=str(plan_row["target_column"]),
                     expression=expression,
                     row_positions=None,
                     use_visible_model=False,
+                    evaluation_frame=evaluation_frame,
+                    column_binding_mode=column_binding_mode,
                 )
                 results_by_sheet[target_dataset_name] = self._formula_batch_summary_row(
                     dataset=target_dataset,
@@ -1567,6 +1996,7 @@ class MainWindow(QMainWindow):
                     requested_target_column=requested_target_column,
                     output_action=str(plan_row["output_action"]),
                     target_existed_before=bool(plan_row["target_existed_before"]),
+                    column_binding_mode=column_binding_mode,
                     execution_mode=execution_mode,
                     elapsed_seconds=time.perf_counter() - started,
                 )
@@ -1580,6 +2010,7 @@ class MainWindow(QMainWindow):
                     requested_target_column=requested_target_column,
                     output_action=str(plan_row["output_action"]),
                     target_existed_before=bool(plan_row["target_existed_before"]),
+                    column_binding_mode=column_binding_mode,
                     execution_mode=execution_mode,
                     elapsed_seconds=time.perf_counter() - started,
                 )
@@ -1590,6 +2021,7 @@ class MainWindow(QMainWindow):
         dataset: Dataset,
         worker_result: FormulaBatchWorkerResult,
         expression: str,
+        column_binding_mode: str,
     ) -> ExpressionResult:
         """Apply a successful process-worker formula result to a workspace dataset."""
         if worker_result.values is None:
@@ -1600,7 +2032,10 @@ class MainWindow(QMainWindow):
         set_column_operation_comment(
             dataset,
             worker_result.target_column,
-            f"Formula = {expression.strip()}",
+            (
+                f"Formula = {expression.strip()} "
+                f"({self._batch_column_binding_label(column_binding_mode)})"
+            ),
         )
         dataset.prune_column_metadata()
         return ExpressionResult(
@@ -1712,11 +2147,154 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Run a derivative/integral operation on one or more worksheets."""
         target_dataset_names = dialog.target_dataset_names()
-        target_plan = self._formula_batch_target_plan(
-            target_dataset_names=target_dataset_names,
-            target_column=dialog.target_column(),
+        column_binding_mode = dialog.column_binding_mode()
+        requested_x_column = dialog.x_column()
+        requested_y_columns = dialog.y_columns()
+        multiple_y_columns = len(requested_y_columns) > 1
+        target_requests: list[dict[str, object]] = []
+        preflight_results: list[dict[str, object]] = []
+        for target_dataset_name in target_dataset_names:
+            try:
+                target_dataset = self._workspace.get_dataset(target_dataset_name)
+            except Exception as exc:
+                started = time.perf_counter()
+                for requested_y_column in requested_y_columns:
+                    requested_target_column = self._batch_output_column_name(
+                        dialog.target_column(),
+                        requested_y_column,
+                        multiple_y_columns,
+                    )
+                    preflight_results.append(
+                        self._column_math_batch_summary_row(
+                            dataset_name=target_dataset_name,
+                            operation_title=operation_title,
+                            x_column=requested_x_column,
+                            y_column=requested_y_column,
+                            requested_x_column=requested_x_column,
+                            requested_y_column=requested_y_column,
+                            column_binding_mode=column_binding_mode,
+                            method=dialog.method(),
+                            method_label=methods.get(dialog.method(), dialog.method()),
+                            initial_value=initial_value,
+                            result_column="",
+                            values_written=0,
+                            status="failed",
+                            error=str(exc),
+                            requested_target_column=requested_target_column,
+                            output_action="input_error",
+                            target_existed_before=False,
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                continue
+
+            for requested_y_column in requested_y_columns:
+                started = time.perf_counter()
+                try:
+                    y_column = self._resolve_batch_column(
+                        reference_dataset=current_dataset,
+                        target_dataset=target_dataset,
+                        source_column=requested_y_column,
+                        binding_mode=column_binding_mode,
+                        field_label="Y",
+                    )
+                    if y_column is None:
+                        raise MathOperationError("Choose at least one Y column.")
+                    target_requests.append(
+                        {
+                            "source_sheet": target_dataset.name,
+                            "requested_x_column": requested_x_column,
+                            "requested_y_column": requested_y_column,
+                            "y_column": y_column,
+                            "requested_target_column": self._batch_output_column_name(
+                                dialog.target_column(),
+                                y_column,
+                                multiple_y_columns,
+                            ),
+                        }
+                    )
+                except MathOperationError as exc:
+                    requested_target_column = self._batch_output_column_name(
+                        dialog.target_column(),
+                        requested_y_column,
+                        multiple_y_columns,
+                    )
+                    preflight_results.append(
+                        self._column_math_batch_summary_row(
+                            dataset_name=target_dataset_name,
+                            operation_title=operation_title,
+                            x_column=requested_x_column,
+                            y_column=requested_y_column,
+                            requested_x_column=requested_x_column,
+                            requested_y_column=requested_y_column,
+                            column_binding_mode=column_binding_mode,
+                            method=dialog.method(),
+                            method_label=methods.get(dialog.method(), dialog.method()),
+                            initial_value=initial_value,
+                            result_column="",
+                            values_written=0,
+                            status="failed",
+                            error=str(exc),
+                            requested_target_column=requested_target_column,
+                            output_action="input_error",
+                            target_existed_before=False,
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                except Exception as exc:
+                    requested_target_column = self._batch_output_column_name(
+                        dialog.target_column(),
+                        requested_y_column,
+                        multiple_y_columns,
+                    )
+                    preflight_results.append(
+                        self._column_math_batch_summary_row(
+                            dataset_name=target_dataset_name,
+                            operation_title=operation_title,
+                            x_column=requested_x_column,
+                            y_column=requested_y_column,
+                            requested_x_column=requested_x_column,
+                            requested_y_column=requested_y_column,
+                            column_binding_mode=column_binding_mode,
+                            method=dialog.method(),
+                            method_label=methods.get(dialog.method(), dialog.method()),
+                            initial_value=initial_value,
+                            result_column="",
+                            values_written=0,
+                            status="failed",
+                            error=str(exc),
+                            requested_target_column=requested_target_column,
+                            output_action="input_error",
+                            target_existed_before=False,
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+        target_plan = self._batch_output_target_plan(
+            target_requests=target_requests,
             conflict_policy=dialog.target_conflict_policy(),
         )
+        preview_rows = self._column_math_batch_preview_rows(
+            target_plan=target_plan,
+            preflight_results=preflight_results,
+            column_binding_mode=column_binding_mode,
+        )
+        if (len(preview_rows) > 1 or any(row["status"] in {"failed", "blocked"} for row in preview_rows)) and not (
+            self._show_batch_preview(
+                f"{operation_title} Batch Preview",
+                preview_rows,
+                [
+                    ("Sheet", "source_sheet"),
+                    ("Status", "status"),
+                    ("X", "x_column"),
+                    ("Y", "y_column"),
+                    ("Target", "target_column"),
+                    ("Action", "output_action"),
+                    ("Binding", "column_binding"),
+                    ("Details", "error"),
+                ],
+            )
+        ):
+            return
         if not self._confirm_column_math_batch_target_plan(
             target_plan,
             dialog.target_conflict_policy(),
@@ -1724,34 +2302,59 @@ class MainWindow(QMainWindow):
         ):
             return
 
-        results: list[dict[str, object]] = []
+        results: list[dict[str, object]] = list(preflight_results)
         current_result_target = ""
+        progress = self._batch_progress_dialog(f"{operation_title} Batch", len(target_plan))
+        completed_jobs = 0
+        canceled = False
         for plan_row in target_plan:
             target_dataset_name = str(plan_row["source_sheet"])
+            requested_y_column = str(plan_row["requested_y_column"])
+            planned_y_column = str(plan_row["y_column"])
+            if self._batch_progress_canceled(
+                progress,
+                completed_jobs,
+                f"{operation_title}: {target_dataset_name} / {requested_y_column}",
+            ):
+                canceled = True
+                break
             started = time.perf_counter()
             try:
                 target_dataset = self._workspace.get_dataset(target_dataset_name)
                 use_visible_model = target_dataset.name == current_dataset.name
+                x_column = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=target_dataset,
+                    source_column=requested_x_column,
+                    binding_mode=column_binding_mode,
+                    field_label="X",
+                )
+                if x_column is None or not planned_y_column:
+                    raise MathOperationError("Choose X and Y columns.")
                 result = self._apply_column_math_to_dataset(
                     dataset=target_dataset,
                     operation_key=operation_key,
-                    x_column=dialog.x_column(),
-                    y_column=dialog.y_column(),
+                    x_column=x_column,
+                    y_column=planned_y_column,
                     method=dialog.method(),
                     target_column=str(plan_row["target_column"]),
                     initial_value=initial_value,
                     use_visible_model=use_visible_model,
                     methods=methods,
                     operation_title=operation_title,
+                    column_binding_mode=column_binding_mode,
                 )
-                if use_visible_model:
+                if use_visible_model and not current_result_target:
                     current_result_target = result.column_name
                 results.append(
                     self._column_math_batch_summary_row(
                         dataset=target_dataset,
                         operation_title=operation_title,
-                        x_column=dialog.x_column(),
-                        y_column=dialog.y_column(),
+                        x_column=x_column,
+                        y_column=planned_y_column,
+                        requested_x_column=requested_x_column,
+                        requested_y_column=requested_y_column,
+                        column_binding_mode=column_binding_mode,
                         method=dialog.method(),
                         method_label=methods.get(dialog.method(), dialog.method()),
                         initial_value=initial_value,
@@ -1759,7 +2362,7 @@ class MainWindow(QMainWindow):
                         values_written=result.values_written,
                         status="ok",
                         error="",
-                        requested_target_column=dialog.target_column(),
+                        requested_target_column=str(plan_row["requested_target_column"]),
                         output_action=str(plan_row["output_action"]),
                         target_existed_before=bool(plan_row["target_existed_before"]),
                         elapsed_seconds=time.perf_counter() - started,
@@ -1770,8 +2373,11 @@ class MainWindow(QMainWindow):
                     self._column_math_batch_summary_row(
                         dataset_name=target_dataset_name,
                         operation_title=operation_title,
-                        x_column=dialog.x_column(),
-                        y_column=dialog.y_column(),
+                        x_column=requested_x_column,
+                        y_column=requested_y_column,
+                        requested_x_column=requested_x_column,
+                        requested_y_column=requested_y_column,
+                        column_binding_mode=column_binding_mode,
                         method=dialog.method(),
                         method_label=methods.get(dialog.method(), dialog.method()),
                         initial_value=initial_value,
@@ -1779,7 +2385,7 @@ class MainWindow(QMainWindow):
                         values_written=0,
                         status="failed",
                         error=str(exc),
-                        requested_target_column=dialog.target_column(),
+                        requested_target_column=str(plan_row["requested_target_column"]),
                         output_action=str(plan_row["output_action"]),
                         target_existed_before=bool(plan_row["target_existed_before"]),
                         elapsed_seconds=time.perf_counter() - started,
@@ -1790,8 +2396,11 @@ class MainWindow(QMainWindow):
                     self._column_math_batch_summary_row(
                         dataset_name=target_dataset_name,
                         operation_title=operation_title,
-                        x_column=dialog.x_column(),
-                        y_column=dialog.y_column(),
+                        x_column=requested_x_column,
+                        y_column=requested_y_column,
+                        requested_x_column=requested_x_column,
+                        requested_y_column=requested_y_column,
+                        column_binding_mode=column_binding_mode,
                         method=dialog.method(),
                         method_label=methods.get(dialog.method(), dialog.method()),
                         initial_value=initial_value,
@@ -1799,17 +2408,45 @@ class MainWindow(QMainWindow):
                         values_written=0,
                         status="failed",
                         error=str(exc),
-                        requested_target_column=dialog.target_column(),
+                        requested_target_column=str(plan_row["requested_target_column"]),
                         output_action=str(plan_row["output_action"]),
                         target_existed_before=bool(plan_row["target_existed_before"]),
                         elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            completed_jobs += 1
+
+        if progress is not None:
+            progress.setValue(completed_jobs)
+        if canceled:
+            for plan_row in target_plan[completed_jobs:]:
+                results.append(
+                    self._column_math_batch_summary_row(
+                        dataset_name=str(plan_row["source_sheet"]),
+                        operation_title=operation_title,
+                        x_column=requested_x_column,
+                        y_column=str(plan_row["requested_y_column"]),
+                        requested_x_column=requested_x_column,
+                        requested_y_column=str(plan_row["requested_y_column"]),
+                        column_binding_mode=column_binding_mode,
+                        method=dialog.method(),
+                        method_label=methods.get(dialog.method(), dialog.method()),
+                        initial_value=initial_value,
+                        result_column=str(plan_row["target_column"]),
+                        values_written=0,
+                        status="canceled",
+                        error="Canceled by user before this job was processed.",
+                        requested_target_column=str(plan_row["requested_target_column"]),
+                        output_action=str(plan_row["output_action"]),
+                        target_existed_before=bool(plan_row["target_existed_before"]),
+                        elapsed_seconds=0.0,
                     )
                 )
 
         success_count = sum(1 for row in results if row["status"] == "ok")
         failure_rows = [row for row in results if row["status"] != "ok"]
         summary_dataset = None
-        if len(target_dataset_names) > 1:
+        if len(results) > 1:
             summary_dataset = self._workspace.add_dataset(
                 f"{current_dataset.name}_{operation_key}_batch_summary",
                 pd.DataFrame(results),
@@ -1833,8 +2470,8 @@ class MainWindow(QMainWindow):
         if current_result_target and dialog.plot_result_immediately():
             self._plot_tab_widget.queue_analysis_plot(
                 dataset=current_dataset,
-                x_column=dialog.x_column(),
-                source_column=dialog.y_column(),
+                x_column=requested_x_column,
+                source_column=requested_y_columns[0],
                 result_column=current_result_target,
                 title=operation_title,
             )
@@ -1845,7 +2482,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 f"{operation_title} Batch",
-                f"Applied {operation_title.lower()} to {success_count} sheet(s); "
+                f"Applied {operation_title.lower()} to {success_count} result(s); "
                 f"{len(failure_rows)} failed.\n\n{detail}",
             )
         self.statusBar().showMessage(
@@ -1869,6 +2506,7 @@ class MainWindow(QMainWindow):
         use_visible_model: bool,
         methods: dict[str, str],
         operation_title: str,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
     ):
         """Apply a derivative/integral operation to one dataset."""
         if use_visible_model:
@@ -1908,6 +2546,7 @@ class MainWindow(QMainWindow):
                 method=method,
                 method_label=methods.get(method, method),
                 initial_value=initial_value,
+                column_binding_mode=column_binding_mode,
             ),
         )
         dataset.prune_column_metadata()
@@ -1923,12 +2562,55 @@ class MainWindow(QMainWindow):
         method: str,
         method_label: str,
         initial_value: float | None,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
     ) -> str:
         """Return a provenance comment for derivative/integral output columns."""
-        comment = f"{operation_title}: y={y_column}, x={x_column}, method={method_label or method}"
+        comment = (
+            f"{operation_title}: y={y_column}, x={x_column}, "
+            f"method={method_label or method}, "
+            f"binding={MainWindow._batch_column_binding_label(column_binding_mode)}"
+        )
         if initial_value is not None:
             comment = f"{comment}, initial={initial_value:g}"
         return comment
+
+    def _column_math_batch_preview_rows(
+        self,
+        target_plan: list[dict[str, object]],
+        preflight_results: list[dict[str, object]],
+        column_binding_mode: str,
+    ) -> list[dict[str, object]]:
+        """Return preview rows for derivative/integral batch jobs."""
+        rows: list[dict[str, object]] = []
+        for row in preflight_results:
+            rows.append(
+                {
+                    "source_sheet": row.get("source_sheet", ""),
+                    "status": "failed",
+                    "x_column": row.get("requested_x_column", row.get("x_column", "")),
+                    "y_column": row.get("requested_y_column", row.get("y_column", "")),
+                    "target_column": row.get("requested_target_column", ""),
+                    "output_action": row.get("output_action", "input_error"),
+                    "column_binding": row.get("column_binding", self._batch_column_binding_label(column_binding_mode)),
+                    "error": row.get("error", ""),
+                }
+            )
+        for row in target_plan:
+            output_action = str(row["output_action"])
+            status = "blocked" if output_action == "blocked" else "ready"
+            rows.append(
+                {
+                    "source_sheet": row["source_sheet"],
+                    "status": status,
+                    "x_column": row.get("requested_x_column", ""),
+                    "y_column": row.get("y_column", row.get("requested_y_column", "")),
+                    "target_column": row.get("target_column", ""),
+                    "output_action": output_action,
+                    "column_binding": self._batch_column_binding_label(column_binding_mode),
+                    "error": "Target exists and the selected policy is Stop." if status == "blocked" else "",
+                }
+            )
+        return rows
 
     def _confirm_column_math_batch_target_plan(
         self,
@@ -2000,6 +2682,9 @@ class MainWindow(QMainWindow):
         error: str,
         dataset: Dataset | None = None,
         dataset_name: str = "",
+        requested_x_column: str = "",
+        requested_y_column: str = "",
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
         requested_target_column: str = "",
         output_action: str = "",
         target_existed_before: bool = False,
@@ -2010,6 +2695,9 @@ class MainWindow(QMainWindow):
         row: dict[str, object] = {
             "source_sheet": source_sheet,
             "operation": operation_title,
+            "column_binding": self._batch_column_binding_label(column_binding_mode),
+            "requested_x_column": requested_x_column or x_column,
+            "requested_y_column": requested_y_column or y_column,
             "x_column": x_column,
             "y_column": y_column,
             "method": method,
@@ -2054,12 +2742,12 @@ class MainWindow(QMainWindow):
         """Return a concise derivative/integral batch status message."""
         if summary_dataset_name:
             return (
-                f"{operation_title} applied to {success_count} sheet(s), "
+                f"{operation_title} applied to {success_count} result(s), "
                 f"{failure_count} failed; summary saved as '{summary_dataset_name}'"
             )
         if failure_count:
-            return f"{operation_title} applied to {success_count} sheet(s), {failure_count} failed"
-        return f"{operation_title} saved for {success_count} sheet(s)"
+            return f"{operation_title} applied to {success_count} result(s), {failure_count} failed"
+        return f"{operation_title} saved for {success_count} result(s)"
 
     def _run_interpolation(self) -> None:
         """Run the interpolation workflow and create a prediction dataset."""
@@ -2079,56 +2767,33 @@ class MainWindow(QMainWindow):
             default_y_column=default_y,
             default_z_column=default_z,
             default_value_column=default_y,
+            dataset_names=[
+                candidate.name
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            ],
+            current_dataset_name=dataset.name,
             parent=self,
         )
         if dialog.exec() != InterpolationDialog.Accepted:
             return
 
-        try:
-            if dialog.query_mode() == "generated":
-                query_points = generated_query_points(
-                    dialog.generated_ranges(),
-                    mesh=dialog.mode() == "2d",
-                )
-            elif dialog.query_mode() == "columns":
-                query_points = query_points_from_columns(dataset.frame, dialog.query_columns())
-            else:
-                query_points = query_points_from_text(
-                    dialog.manual_points_text(),
-                    dimension=len(dialog.coordinate_columns()),
-                )
+        self._run_interpolation_batch(dataset, dialog)
 
-            result_frame = interpolate_dataset(
-                dataset.frame,
-                coordinate_columns=dialog.coordinate_columns(),
-                value_column=dialog.value_column(),
-                query_points=query_points,
-                method=dialog.method_key(),
-                fill_policy=dialog.fill_policy(),
-                smoothing=dialog.smoothing(),
-                epsilon=dialog.epsilon(),
-            )
-            result_dataset = self._workspace.add_dataset(
-                dialog.target_dataset_name() or f"{dataset.name}_interpolation",
-                result_frame,
-            )
-            self._apply_interpolation_metadata(
-                source_dataset=dataset,
-                result_dataset=result_dataset,
-                coordinate_columns=dialog.coordinate_columns(),
-                value_column=dialog.value_column(),
-            )
-            prediction_column = f"{dialog.value_column()}_interpolated"
-            set_dataset_operation_comments(
-                result_dataset,
-                (
-                    f"Interpolation: value={dialog.value_column()}, "
-                    f"coordinates={', '.join(dialog.coordinate_columns())}, "
-                    f"method={dialog.method_key()}, query={dialog.query_mode()}, "
-                    f"outside={dialog.fill_policy()}"
-                ),
-                (prediction_column,),
-            )
+    def _run_interpolation_batch(self, current_dataset: Dataset, dialog: InterpolationDialog) -> None:
+        """Run interpolation on one or more worksheets and create prediction sheets."""
+        target_dataset_names = dialog.target_dataset_names()
+        column_binding_mode = dialog.column_binding_mode()
+        requested_coordinate_columns = dialog.coordinate_columns()
+        requested_value_columns = dialog.value_columns()
+        multiple_value_columns = len(requested_value_columns) > 1
+        requested_query_columns = dialog.query_columns() if dialog.query_mode() == "columns" else []
+        result_datasets: list[Dataset] = []
+        current_result_dataset: Dataset | None = None
+        results: list[dict[str, object]] = []
+
+        try:
+            shared_query_points = self._shared_interpolation_query_points(dialog)
         except MathOperationError as exc:
             QMessageBox.warning(self, "Interpolation Failed", str(exc))
             return
@@ -2136,10 +2801,566 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Interpolation Failed", str(exc))
             return
 
-        self._refresh_dataset_list(result_dataset.name)
-        self.statusBar().showMessage(
-            f"Interpolation saved as '{result_dataset.name}' ({len(result_dataset.frame)} row(s))"
+        preview_rows = self._interpolation_batch_preview_rows(
+            current_dataset=current_dataset,
+            dialog=dialog,
+            target_dataset_names=target_dataset_names,
+            requested_coordinate_columns=requested_coordinate_columns,
+            requested_value_columns=requested_value_columns,
+            requested_query_columns=requested_query_columns,
+            multiple_value_columns=multiple_value_columns,
+            column_binding_mode=column_binding_mode,
         )
+        if (len(preview_rows) > 1 or any(row["status"] == "failed" for row in preview_rows)) and not (
+            self._show_batch_preview(
+                "Interpolation Batch Preview",
+                preview_rows,
+                [
+                    ("Sheet", "source_sheet"),
+                    ("Status", "status"),
+                    ("Coordinates", "coordinate_columns"),
+                    ("Value", "value_column"),
+                    ("Query", "query_columns"),
+                    ("Result Sheet", "result_sheet"),
+                    ("Binding", "column_binding"),
+                    ("Details", "error"),
+                ],
+            )
+        ):
+            return
+
+        total_jobs = len(target_dataset_names) * len(requested_value_columns)
+        progress = self._batch_progress_dialog("Interpolation Batch", total_jobs)
+        completed_jobs = 0
+
+        for source_name in target_dataset_names:
+            try:
+                source_dataset = self._workspace.get_dataset(source_name)
+                coordinate_columns = self._resolve_batch_columns(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_columns=requested_coordinate_columns,
+                    binding_mode=column_binding_mode,
+                    field_label="Coordinate",
+                )
+                query_columns = (
+                    self._resolve_batch_columns(
+                        reference_dataset=current_dataset,
+                        target_dataset=source_dataset,
+                        source_columns=requested_query_columns,
+                        binding_mode=column_binding_mode,
+                        field_label="Query",
+                    )
+                    if dialog.query_mode() == "columns"
+                    else []
+                )
+                query_points = (
+                    query_points_from_columns(source_dataset.frame, query_columns)
+                    if dialog.query_mode() == "columns"
+                    else shared_query_points
+                )
+                if query_points is None:
+                    raise MathOperationError("Query coordinates could not be prepared.")
+            except MathOperationError as exc:
+                for requested_value_column in requested_value_columns:
+                    result_dataset_name = self._batch_result_dataset_name(
+                        source_name=source_name,
+                        requested_name=dialog.target_dataset_name(),
+                        current_dataset_name=current_dataset.name,
+                        default_suffix="interpolation",
+                        source_column=requested_value_column,
+                        multiple_columns=multiple_value_columns,
+                    )
+                    results.append(
+                        self._interpolation_batch_summary_row(
+                            source_sheet=source_name,
+                            dialog=dialog,
+                            requested_coordinate_columns=requested_coordinate_columns,
+                            requested_value_column=requested_value_column,
+                            requested_query_columns=requested_query_columns,
+                            column_binding_mode=column_binding_mode,
+                            requested_result_sheet=result_dataset_name,
+                            output_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=0.0,
+                        )
+                    )
+                completed_jobs += len(requested_value_columns)
+                continue
+            except Exception as exc:
+                for requested_value_column in requested_value_columns:
+                    result_dataset_name = self._batch_result_dataset_name(
+                        source_name=source_name,
+                        requested_name=dialog.target_dataset_name(),
+                        current_dataset_name=current_dataset.name,
+                        default_suffix="interpolation",
+                        source_column=requested_value_column,
+                        multiple_columns=multiple_value_columns,
+                    )
+                    results.append(
+                        self._interpolation_batch_summary_row(
+                            source_sheet=source_name,
+                            dialog=dialog,
+                            requested_coordinate_columns=requested_coordinate_columns,
+                            requested_value_column=requested_value_column,
+                            requested_query_columns=requested_query_columns,
+                            column_binding_mode=column_binding_mode,
+                            requested_result_sheet=result_dataset_name,
+                            output_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=0.0,
+                        )
+                    )
+                completed_jobs += len(requested_value_columns)
+                continue
+
+            for requested_value_column in requested_value_columns:
+                if self._batch_progress_canceled(
+                    progress,
+                    completed_jobs,
+                    f"Interpolation: {source_name} / {requested_value_column}",
+                ):
+                    result_dataset_name = self._batch_result_dataset_name(
+                        source_name=source_name,
+                        requested_name=dialog.target_dataset_name(),
+                        current_dataset_name=current_dataset.name,
+                        default_suffix="interpolation",
+                        source_column=requested_value_column,
+                        multiple_columns=multiple_value_columns,
+                    )
+                    results.append(
+                        self._interpolation_batch_summary_row(
+                            source_sheet=source_name,
+                            dialog=dialog,
+                            requested_coordinate_columns=requested_coordinate_columns,
+                            requested_value_column=requested_value_column,
+                            requested_query_columns=requested_query_columns,
+                            column_binding_mode=column_binding_mode,
+                            requested_result_sheet=result_dataset_name,
+                            output_sheet="",
+                            status="canceled",
+                            error="Canceled by user before this job was processed.",
+                            elapsed_seconds=0.0,
+                        )
+                    )
+                    completed_jobs += 1
+                    continue
+                started = time.perf_counter()
+                result_dataset_name = self._batch_result_dataset_name(
+                    source_name=source_name,
+                    requested_name=dialog.target_dataset_name(),
+                    current_dataset_name=current_dataset.name,
+                    default_suffix="interpolation",
+                    source_column=requested_value_column,
+                    multiple_columns=multiple_value_columns,
+                )
+                try:
+                    value_column = self._resolve_batch_column(
+                        reference_dataset=current_dataset,
+                        target_dataset=source_dataset,
+                        source_column=requested_value_column,
+                        binding_mode=column_binding_mode,
+                        field_label="Value",
+                    )
+                    if value_column is None:
+                        raise MathOperationError("Choose a value column to interpolate.")
+
+                    result_frame = interpolate_dataset(
+                        source_dataset.frame,
+                        coordinate_columns=coordinate_columns,
+                        value_column=value_column,
+                        query_points=query_points,
+                        method=dialog.method_key(),
+                        fill_policy=dialog.fill_policy(),
+                        smoothing=dialog.smoothing(),
+                        epsilon=dialog.epsilon(),
+                    )
+                    result_dataset = self._workspace.add_dataset(result_dataset_name, result_frame)
+                    result_datasets.append(result_dataset)
+                    if source_dataset.name == current_dataset.name and current_result_dataset is None:
+                        current_result_dataset = result_dataset
+                    self._apply_interpolation_metadata(
+                        source_dataset=source_dataset,
+                        result_dataset=result_dataset,
+                        coordinate_columns=coordinate_columns,
+                        value_column=value_column,
+                    )
+                    set_dataset_operation_comments(
+                        result_dataset,
+                        self._interpolation_operation_comment(
+                            dialog=dialog,
+                            coordinate_columns=coordinate_columns,
+                            value_column=value_column,
+                            column_binding_mode=column_binding_mode,
+                        ),
+                        (self._interpolation_prediction_column(value_column),),
+                    )
+                    results.append(
+                        self._interpolation_batch_summary_row(
+                            source_dataset=source_dataset,
+                            dialog=dialog,
+                            coordinate_columns=coordinate_columns,
+                            value_column=value_column,
+                            query_columns=query_columns,
+                            requested_coordinate_columns=requested_coordinate_columns,
+                            requested_value_column=requested_value_column,
+                            requested_query_columns=requested_query_columns,
+                            column_binding_mode=column_binding_mode,
+                            requested_result_sheet=result_dataset_name,
+                            output_sheet=result_dataset.name,
+                            result_frame=result_frame,
+                            status="ok",
+                            error="",
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                except MathOperationError as exc:
+                    results.append(
+                        self._interpolation_batch_summary_row(
+                            source_sheet=source_name,
+                            dialog=dialog,
+                            requested_coordinate_columns=requested_coordinate_columns,
+                            requested_value_column=requested_value_column,
+                            requested_query_columns=requested_query_columns,
+                            column_binding_mode=column_binding_mode,
+                            requested_result_sheet=result_dataset_name,
+                            output_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                except Exception as exc:
+                    results.append(
+                        self._interpolation_batch_summary_row(
+                            source_sheet=source_name,
+                            dialog=dialog,
+                            requested_coordinate_columns=requested_coordinate_columns,
+                            requested_value_column=requested_value_column,
+                            requested_query_columns=requested_query_columns,
+                            column_binding_mode=column_binding_mode,
+                            requested_result_sheet=result_dataset_name,
+                            output_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                completed_jobs += 1
+
+        if progress is not None:
+            progress.setValue(completed_jobs)
+
+        summary_dataset = self._add_interpolation_batch_summary_dataset(
+            current_dataset=current_dataset,
+            target_dataset_names=target_dataset_names,
+            results=results,
+        )
+        self._finish_interpolation_batch(
+            result_datasets=result_datasets,
+            current_result_dataset=current_result_dataset,
+            summary_dataset=summary_dataset,
+            results=results,
+        )
+
+    def _interpolation_batch_preview_rows(
+        self,
+        current_dataset: Dataset,
+        dialog: InterpolationDialog,
+        target_dataset_names: list[str],
+        requested_coordinate_columns: list[str],
+        requested_value_columns: list[str],
+        requested_query_columns: list[str],
+        multiple_value_columns: bool,
+        column_binding_mode: str,
+    ) -> list[dict[str, object]]:
+        """Return preflight preview rows for interpolation jobs."""
+        rows: list[dict[str, object]] = []
+        for source_name in target_dataset_names:
+            coordinate_columns: list[str] = []
+            query_columns: list[str] = []
+            source_error = ""
+            try:
+                source_dataset = self._workspace.get_dataset(source_name)
+                coordinate_columns = self._resolve_batch_columns(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_columns=requested_coordinate_columns,
+                    binding_mode=column_binding_mode,
+                    field_label="Coordinate",
+                )
+                query_columns = (
+                    self._resolve_batch_columns(
+                        reference_dataset=current_dataset,
+                        target_dataset=source_dataset,
+                        source_columns=requested_query_columns,
+                        binding_mode=column_binding_mode,
+                        field_label="Query",
+                    )
+                    if dialog.query_mode() == "columns"
+                    else []
+                )
+                if dialog.query_mode() == "columns":
+                    query_points_from_columns(source_dataset.frame, query_columns)
+            except Exception as exc:
+                source_error = str(exc)
+
+            for requested_value_column in requested_value_columns:
+                result_dataset_name = self._batch_result_dataset_name(
+                    source_name=source_name,
+                    requested_name=dialog.target_dataset_name(),
+                    current_dataset_name=current_dataset.name,
+                    default_suffix="interpolation",
+                    source_column=requested_value_column,
+                    multiple_columns=multiple_value_columns,
+                )
+                value_column = requested_value_column
+                status = "ready"
+                error = source_error
+                try:
+                    if source_error:
+                        raise MathOperationError(source_error)
+                    source_dataset = self._workspace.get_dataset(source_name)
+                    resolved_value = self._resolve_batch_column(
+                        reference_dataset=current_dataset,
+                        target_dataset=source_dataset,
+                        source_column=requested_value_column,
+                        binding_mode=column_binding_mode,
+                        field_label="Value",
+                    )
+                    value_column = resolved_value or ""
+                    if not value_column:
+                        raise MathOperationError("Choose a value column to interpolate.")
+                except Exception as exc:
+                    status = "failed"
+                    error = str(exc)
+                rows.append(
+                    {
+                        "source_sheet": source_name,
+                        "status": status,
+                        "coordinate_columns": ", ".join(coordinate_columns or requested_coordinate_columns),
+                        "value_column": value_column,
+                        "query_columns": ", ".join(query_columns or requested_query_columns),
+                        "result_sheet": result_dataset_name,
+                        "column_binding": self._batch_column_binding_label(column_binding_mode),
+                        "error": error,
+                    }
+                )
+        return rows
+
+    @staticmethod
+    def _shared_interpolation_query_points(dialog: InterpolationDialog) -> np.ndarray | None:
+        """Return shared query points for generated/manual interpolation batches."""
+        if dialog.query_mode() == "generated":
+            return generated_query_points(
+                dialog.generated_ranges(),
+                mesh=dialog.mode() == "2d",
+            )
+        if dialog.query_mode() == "manual":
+            return query_points_from_text(
+                dialog.manual_points_text(),
+                dimension=len(dialog.coordinate_columns()),
+            )
+        return None
+
+    @staticmethod
+    def _interpolation_prediction_column(value_column: str) -> str:
+        """Return the generated interpolation prediction column name."""
+        return f"{value_column}_interpolated"
+
+    def _interpolation_operation_comment(
+        self,
+        dialog: InterpolationDialog,
+        coordinate_columns: list[str],
+        value_column: str,
+        column_binding_mode: str,
+    ) -> str:
+        """Return a compact provenance comment for interpolation result sheets."""
+        return (
+            f"Interpolation: value={value_column}, "
+            f"coordinates={', '.join(coordinate_columns)}, "
+            f"method={dialog.method_key()}, query={dialog.query_mode()}, "
+            f"outside={dialog.fill_policy()}, "
+            f"binding={self._batch_column_binding_label(column_binding_mode)}"
+        )
+
+    def _interpolation_batch_summary_row(
+        self,
+        dialog: InterpolationDialog,
+        requested_result_sheet: str,
+        output_sheet: str,
+        status: str,
+        error: str,
+        elapsed_seconds: float,
+        coordinate_columns: list[str] | None = None,
+        value_column: str = "",
+        query_columns: list[str] | None = None,
+        requested_coordinate_columns: list[str] | None = None,
+        requested_value_column: str = "",
+        requested_query_columns: list[str] | None = None,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
+        source_dataset: Dataset | None = None,
+        source_sheet: str = "",
+        result_frame: pd.DataFrame | None = None,
+    ) -> dict[str, object]:
+        """Return one interpolation batch summary row."""
+        resolved_value_column = value_column or requested_value_column or dialog.value_column()
+        resolved_coordinate_columns = coordinate_columns or dialog.coordinate_columns()
+        resolved_query_columns = query_columns or []
+        requested_coordinates = requested_coordinate_columns or resolved_coordinate_columns
+        requested_queries = requested_query_columns or resolved_query_columns
+        prediction_column = self._interpolation_prediction_column(resolved_value_column)
+        metrics = self._interpolation_result_metrics(
+            source_dataset=source_dataset,
+            result_frame=result_frame,
+            prediction_column=prediction_column,
+        )
+        row: dict[str, object] = {
+            "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
+            "operation": "Interpolation",
+            "mode": dialog.mode(),
+            "column_binding": self._batch_column_binding_label(column_binding_mode),
+            "requested_coordinate_columns": ", ".join(requested_coordinates),
+            "coordinate_columns": ", ".join(resolved_coordinate_columns),
+            "requested_value_column": requested_value_column or resolved_value_column,
+            "value_column": resolved_value_column,
+            "query_mode": dialog.query_mode(),
+            "requested_query_columns": (
+                ", ".join(requested_queries) if dialog.query_mode() == "columns" else ""
+            ),
+            "query_columns": (
+                ", ".join(resolved_query_columns) if dialog.query_mode() == "columns" else ""
+            ),
+            "method": dialog.method_key(),
+            "method_label": self._interpolation_method_label(dialog.mode(), dialog.method_key()),
+            "fill_policy": dialog.fill_policy(),
+            "smoothing": dialog.smoothing(),
+            "epsilon": np.nan if dialog.epsilon() is None else dialog.epsilon(),
+            "requested_result_sheet": requested_result_sheet,
+            "output_sheet": output_sheet,
+            "prediction_column": prediction_column,
+            "status": status,
+            "error": error,
+            "elapsed_seconds": round(float(elapsed_seconds), 6),
+        }
+        row.update(metrics)
+        return row
+
+    @staticmethod
+    def _interpolation_method_label(mode: str, method_key: str) -> str:
+        """Return a display label for an interpolation method."""
+        method = INTERPOLATION_METHODS.get(mode, {}).get(method_key)
+        return method.label if method is not None else method_key
+
+    @staticmethod
+    def _interpolation_result_metrics(
+        source_dataset: Dataset | None,
+        result_frame: pd.DataFrame | None,
+        prediction_column: str,
+    ) -> dict[str, object]:
+        """Return quality metrics for one interpolation result."""
+        metrics: dict[str, object] = {
+            "source_row_count": len(source_dataset.frame) if source_dataset is not None else 0,
+            "query_count": len(result_frame) if result_frame is not None else 0,
+            "finite_prediction_count": np.nan,
+            "missing_prediction_count": np.nan,
+            "prediction_minimum": np.nan,
+            "prediction_maximum": np.nan,
+            "prediction_mean": np.nan,
+        }
+        if result_frame is None or prediction_column not in result_frame.columns:
+            return metrics
+
+        predictions = pd.to_numeric(result_frame[prediction_column], errors="coerce")
+        predictions = predictions.replace([np.inf, -np.inf], np.nan)
+        finite_predictions = predictions.dropna()
+        metrics["finite_prediction_count"] = int(len(finite_predictions))
+        metrics["missing_prediction_count"] = int(len(predictions) - len(finite_predictions))
+        if not finite_predictions.empty:
+            metrics["prediction_minimum"] = float(finite_predictions.min())
+            metrics["prediction_maximum"] = float(finite_predictions.max())
+            metrics["prediction_mean"] = float(finite_predictions.mean())
+        return metrics
+
+    def _add_interpolation_batch_summary_dataset(
+        self,
+        current_dataset: Dataset,
+        target_dataset_names: list[str],
+        results: list[dict[str, object]],
+    ) -> Dataset | None:
+        """Create a cumulative interpolation batch summary when needed."""
+        if len(results) <= 1:
+            return None
+        return self._workspace.add_dataset(
+            f"{current_dataset.name}_interpolation_batch_summary",
+            pd.DataFrame(results),
+        )
+
+    def _finish_interpolation_batch(
+        self,
+        result_datasets: list[Dataset],
+        current_result_dataset: Dataset | None,
+        summary_dataset: Dataset | None,
+        results: list[dict[str, object]],
+    ) -> None:
+        """Refresh UI and report interpolation batch status."""
+        success_count = sum(1 for row in results if row["status"] == "ok")
+        failure_rows = [row for row in results if row["status"] != "ok"]
+        selected_name = ""
+        if current_result_dataset is not None:
+            selected_name = current_result_dataset.name
+        elif result_datasets:
+            selected_name = result_datasets[0].name
+        elif summary_dataset is not None:
+            selected_name = summary_dataset.name
+
+        if selected_name:
+            self._refresh_dataset_list(selected_name)
+        else:
+            self._update_dataset_summary()
+
+        if success_count == 0:
+            message = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failure_rows[:8])
+            if summary_dataset is not None:
+                message = f"{message}\n\nSummary saved as '{summary_dataset.name}'."
+            QMessageBox.warning(
+                self,
+                "Interpolation Failed",
+                message or "Interpolation failed on every selected sheet.",
+            )
+            return
+
+        if failure_rows:
+            detail = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failure_rows[:8])
+            QMessageBox.warning(
+                self,
+                "Interpolation Batch",
+                f"Created {success_count} prediction sheet(s); {len(failure_rows)} failed.\n\n{detail}",
+            )
+        self.statusBar().showMessage(
+            self._interpolation_batch_status_message(
+                success_count=success_count,
+                failure_count=len(failure_rows),
+                summary_dataset_name=summary_dataset.name if summary_dataset else "",
+            )
+        )
+
+    @staticmethod
+    def _interpolation_batch_status_message(
+        success_count: int,
+        failure_count: int,
+        summary_dataset_name: str,
+    ) -> str:
+        """Return a concise interpolation batch status message."""
+        suffixes: list[str] = []
+        if summary_dataset_name:
+            suffixes.append(f"summary saved as '{summary_dataset_name}'")
+        suffix = "; " + "; ".join(suffixes) if suffixes else ""
+        if failure_count:
+            return f"Interpolation created {success_count} prediction sheet(s), {failure_count} failed{suffix}"
+        return f"Interpolation created {success_count} prediction sheet(s){suffix}"
 
     def _run_fft(self) -> None:
         """Run the FFT workflow and create a frequency-domain dataset."""
@@ -2192,44 +3413,109 @@ class MainWindow(QMainWindow):
     def _run_fft_batch(self, current_dataset: Dataset, dialog: FFTDialog) -> None:
         """Run FFT on one or more worksheets and create result sheets."""
         target_dataset_names = dialog.target_dataset_names()
+        column_binding_mode = dialog.column_binding_mode()
+        requested_signal_columns = dialog.signal_columns()
+        requested_x_column = dialog.x_column()
+        multiple_signal_columns = len(requested_signal_columns) > 1
         result_datasets: list[Dataset] = []
         current_result_dataset: Dataset | None = None
         results: list[dict[str, object]] = []
+        jobs = [
+            (source_name, requested_signal_column)
+            for source_name in target_dataset_names
+            for requested_signal_column in requested_signal_columns
+        ]
+        preview_rows = self._fft_batch_preview_rows(
+            current_dataset=current_dataset,
+            jobs=jobs,
+            requested_x_column=requested_x_column,
+            requested_result_sheet=dialog.target_dataset_name(),
+            multiple_signal_columns=multiple_signal_columns,
+            column_binding_mode=column_binding_mode,
+        )
+        if (len(preview_rows) > 1 or any(row["status"] == "failed" for row in preview_rows)) and not (
+            self._show_batch_preview(
+                "FFT Batch Preview",
+                preview_rows,
+                [
+                    ("Sheet", "source_sheet"),
+                    ("Status", "status"),
+                    ("Signal", "signal_column"),
+                    ("X/time", "x_column"),
+                    ("Result Sheet", "result_sheet"),
+                    ("Binding", "column_binding"),
+                    ("Details", "error"),
+                ],
+            )
+        ):
+            return
 
-        for source_name in target_dataset_names:
+        progress = self._batch_progress_dialog("FFT Batch", len(jobs))
+        completed_jobs = 0
+        canceled = False
+        for source_name, requested_signal_column in jobs:
+            if self._batch_progress_canceled(
+                progress,
+                completed_jobs,
+                f"FFT: {source_name} / {requested_signal_column}",
+            ):
+                canceled = True
+                break
             started = time.perf_counter()
             result_dataset_name = self._batch_result_dataset_name(
                 source_name=source_name,
                 requested_name=dialog.target_dataset_name(),
                 current_dataset_name=current_dataset.name,
                 default_suffix="FFT",
+                source_column=requested_signal_column,
+                multiple_columns=multiple_signal_columns,
             )
             try:
                 source_dataset = self._workspace.get_dataset(source_name)
+                signal_column = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_signal_column,
+                    binding_mode=column_binding_mode,
+                    field_label="Signal",
+                )
+                x_column = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_x_column,
+                    binding_mode=column_binding_mode,
+                    field_label="X/time",
+                )
+                if signal_column is None:
+                    raise MathOperationError("Choose a signal column.")
                 result_frame = fft_dataset(
                     source_dataset.frame,
-                    signal_column=dialog.signal_column(),
-                    x_column=dialog.x_column(),
+                    signal_column=signal_column,
+                    x_column=x_column,
                     window_method=dialog.window_method(),
                 )
                 result_dataset = self._workspace.add_dataset(result_dataset_name, result_frame)
                 result_datasets.append(result_dataset)
-                if source_dataset.name == current_dataset.name:
+                if source_dataset.name == current_dataset.name and current_result_dataset is None:
                     current_result_dataset = result_dataset
                 set_dataset_operation_comments(
                     result_dataset,
                     self._fft_operation_comment(
-                        signal_column=dialog.signal_column(),
-                        x_column=dialog.x_column(),
+                        signal_column=signal_column,
+                        x_column=x_column,
                         window_method=dialog.window_method(),
+                        column_binding_mode=column_binding_mode,
                     ),
                 )
                 results.append(
                     self._fft_batch_summary_row(
                         source_dataset=source_dataset,
                         operation="FFT",
-                        signal_column=dialog.signal_column(),
-                        x_column=dialog.x_column(),
+                        signal_column=signal_column,
+                        x_column=x_column,
+                        requested_signal_column=requested_signal_column,
+                        requested_x_column=requested_x_column,
+                        column_binding_mode=column_binding_mode,
                         window_method=dialog.window_method(),
                         requested_result_sheet=result_dataset_name,
                         output_sheet=result_dataset.name,
@@ -2244,8 +3530,11 @@ class MainWindow(QMainWindow):
                     self._fft_batch_summary_row(
                         source_sheet=source_name,
                         operation="FFT",
-                        signal_column=dialog.signal_column(),
-                        x_column=dialog.x_column(),
+                        signal_column=requested_signal_column,
+                        x_column=requested_x_column,
+                        requested_signal_column=requested_signal_column,
+                        requested_x_column=requested_x_column,
+                        column_binding_mode=column_binding_mode,
                         window_method=dialog.window_method(),
                         requested_result_sheet=result_dataset_name,
                         output_sheet="",
@@ -2259,14 +3548,48 @@ class MainWindow(QMainWindow):
                     self._fft_batch_summary_row(
                         source_sheet=source_name,
                         operation="FFT",
-                        signal_column=dialog.signal_column(),
-                        x_column=dialog.x_column(),
+                        signal_column=requested_signal_column,
+                        x_column=requested_x_column,
+                        requested_signal_column=requested_signal_column,
+                        requested_x_column=requested_x_column,
+                        column_binding_mode=column_binding_mode,
                         window_method=dialog.window_method(),
                         requested_result_sheet=result_dataset_name,
                         output_sheet="",
                         status="failed",
                         error=str(exc),
                         elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            completed_jobs += 1
+
+        if progress is not None:
+            progress.setValue(completed_jobs)
+        if canceled:
+            for source_name, requested_signal_column in jobs[completed_jobs:]:
+                result_dataset_name = self._batch_result_dataset_name(
+                    source_name=source_name,
+                    requested_name=dialog.target_dataset_name(),
+                    current_dataset_name=current_dataset.name,
+                    default_suffix="FFT",
+                    source_column=requested_signal_column,
+                    multiple_columns=multiple_signal_columns,
+                )
+                results.append(
+                    self._fft_batch_summary_row(
+                        source_sheet=source_name,
+                        operation="FFT",
+                        signal_column=requested_signal_column,
+                        x_column=requested_x_column,
+                        requested_signal_column=requested_signal_column,
+                        requested_x_column=requested_x_column,
+                        column_binding_mode=column_binding_mode,
+                        window_method=dialog.window_method(),
+                        requested_result_sheet=result_dataset_name,
+                        output_sheet="",
+                        status="canceled",
+                        error="Canceled by user before this job was processed.",
+                        elapsed_seconds=0.0,
                     )
                 )
 
@@ -2293,41 +3616,109 @@ class MainWindow(QMainWindow):
     def _run_ifft_batch(self, current_dataset: Dataset, dialog: IFFTDialog) -> None:
         """Run inverse FFT on one or more worksheets and create result sheets."""
         target_dataset_names = dialog.target_dataset_names()
+        column_binding_mode = dialog.column_binding_mode()
+        requested_real_columns = dialog.real_columns()
+        requested_imaginary_columns = dialog.imaginary_columns()
+        multiple_real_columns = len(requested_real_columns) > 1
         result_datasets: list[Dataset] = []
         current_result_dataset: Dataset | None = None
         results: list[dict[str, object]] = []
-
+        jobs: list[tuple[str, int, str, str | None]] = []
         for source_name in target_dataset_names:
+            for index, requested_real_column in enumerate(requested_real_columns):
+                requested_imaginary_column = None
+                if len(requested_imaginary_columns) == 1:
+                    requested_imaginary_column = requested_imaginary_columns[0]
+                elif requested_imaginary_columns:
+                    requested_imaginary_column = requested_imaginary_columns[index]
+                jobs.append((source_name, index, requested_real_column, requested_imaginary_column))
+        preview_rows = self._ifft_batch_preview_rows(
+            current_dataset=current_dataset,
+            jobs=jobs,
+            requested_result_sheet=dialog.target_dataset_name(),
+            multiple_real_columns=multiple_real_columns,
+            column_binding_mode=column_binding_mode,
+        )
+        if (len(preview_rows) > 1 or any(row["status"] == "failed" for row in preview_rows)) and not (
+            self._show_batch_preview(
+                "Inverse FFT Batch Preview",
+                preview_rows,
+                [
+                    ("Sheet", "source_sheet"),
+                    ("Status", "status"),
+                    ("Real", "real_column"),
+                    ("Imaginary", "imaginary_column"),
+                    ("Result Sheet", "result_sheet"),
+                    ("Binding", "column_binding"),
+                    ("Details", "error"),
+                ],
+            )
+        ):
+            return
+
+        progress = self._batch_progress_dialog("Inverse FFT Batch", len(jobs))
+        completed_jobs = 0
+        canceled = False
+        for source_name, _index, requested_real_column, requested_imaginary_column in jobs:
+            if self._batch_progress_canceled(
+                progress,
+                completed_jobs,
+                f"Inverse FFT: {source_name} / {requested_real_column}",
+            ):
+                canceled = True
+                break
             started = time.perf_counter()
             result_dataset_name = self._batch_result_dataset_name(
                 source_name=source_name,
                 requested_name=dialog.target_dataset_name(),
                 current_dataset_name=current_dataset.name,
                 default_suffix="iFFT",
+                source_column=requested_real_column,
+                multiple_columns=multiple_real_columns,
             )
             try:
                 source_dataset = self._workspace.get_dataset(source_name)
+                real_column = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_real_column,
+                    binding_mode=column_binding_mode,
+                    field_label="Real",
+                )
+                imaginary_column = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_imaginary_column,
+                    binding_mode=column_binding_mode,
+                    field_label="Imaginary",
+                )
+                if real_column is None:
+                    raise MathOperationError("Choose a real spectrum column.")
                 result_frame = ifft_dataset(
                     source_dataset.frame,
-                    real_column=dialog.real_column(),
-                    imaginary_column=dialog.imaginary_column(),
+                    real_column=real_column,
+                    imaginary_column=imaginary_column,
                 )
                 result_dataset = self._workspace.add_dataset(result_dataset_name, result_frame)
                 result_datasets.append(result_dataset)
-                if source_dataset.name == current_dataset.name:
+                if source_dataset.name == current_dataset.name and current_result_dataset is None:
                     current_result_dataset = result_dataset
                 set_dataset_operation_comments(
                     result_dataset,
                     self._ifft_operation_comment(
-                        real_column=dialog.real_column(),
-                        imaginary_column=dialog.imaginary_column(),
+                        real_column=real_column,
+                        imaginary_column=imaginary_column,
+                        column_binding_mode=column_binding_mode,
                     ),
                 )
                 results.append(
                     self._ifft_batch_summary_row(
                         source_dataset=source_dataset,
-                        real_column=dialog.real_column(),
-                        imaginary_column=dialog.imaginary_column(),
+                        real_column=real_column,
+                        imaginary_column=imaginary_column,
+                        requested_real_column=requested_real_column,
+                        requested_imaginary_column=requested_imaginary_column,
+                        column_binding_mode=column_binding_mode,
                         requested_result_sheet=result_dataset_name,
                         output_sheet=result_dataset.name,
                         result_frame=result_frame,
@@ -2340,8 +3731,11 @@ class MainWindow(QMainWindow):
                 results.append(
                     self._ifft_batch_summary_row(
                         source_sheet=source_name,
-                        real_column=dialog.real_column(),
-                        imaginary_column=dialog.imaginary_column(),
+                        real_column=requested_real_column,
+                        imaginary_column=requested_imaginary_column,
+                        requested_real_column=requested_real_column,
+                        requested_imaginary_column=requested_imaginary_column,
+                        column_binding_mode=column_binding_mode,
                         requested_result_sheet=result_dataset_name,
                         output_sheet="",
                         status="failed",
@@ -2353,13 +3747,45 @@ class MainWindow(QMainWindow):
                 results.append(
                     self._ifft_batch_summary_row(
                         source_sheet=source_name,
-                        real_column=dialog.real_column(),
-                        imaginary_column=dialog.imaginary_column(),
+                        real_column=requested_real_column,
+                        imaginary_column=requested_imaginary_column,
+                        requested_real_column=requested_real_column,
+                        requested_imaginary_column=requested_imaginary_column,
+                        column_binding_mode=column_binding_mode,
                         requested_result_sheet=result_dataset_name,
                         output_sheet="",
                         status="failed",
                         error=str(exc),
                         elapsed_seconds=time.perf_counter() - started,
+                    )
+                )
+            completed_jobs += 1
+
+        if progress is not None:
+            progress.setValue(completed_jobs)
+        if canceled:
+            for source_name, _index, requested_real_column, requested_imaginary_column in jobs[completed_jobs:]:
+                result_dataset_name = self._batch_result_dataset_name(
+                    source_name=source_name,
+                    requested_name=dialog.target_dataset_name(),
+                    current_dataset_name=current_dataset.name,
+                    default_suffix="iFFT",
+                    source_column=requested_real_column,
+                    multiple_columns=multiple_real_columns,
+                )
+                results.append(
+                    self._ifft_batch_summary_row(
+                        source_sheet=source_name,
+                        real_column=requested_real_column,
+                        imaginary_column=requested_imaginary_column,
+                        requested_real_column=requested_real_column,
+                        requested_imaginary_column=requested_imaginary_column,
+                        column_binding_mode=column_binding_mode,
+                        requested_result_sheet=result_dataset_name,
+                        output_sheet="",
+                        status="canceled",
+                        error="Canceled by user before this job was processed.",
+                        elapsed_seconds=0.0,
                     )
                 )
 
@@ -2383,6 +3809,125 @@ class MainWindow(QMainWindow):
             plot_label="Reconstructed real",
         )
 
+    def _fft_batch_preview_rows(
+        self,
+        current_dataset: Dataset,
+        jobs: list[tuple[str, str]],
+        requested_x_column: str | None,
+        requested_result_sheet: str,
+        multiple_signal_columns: bool,
+        column_binding_mode: str,
+    ) -> list[dict[str, object]]:
+        """Return preview rows for FFT jobs."""
+        rows: list[dict[str, object]] = []
+        for source_name, requested_signal_column in jobs:
+            result_dataset_name = self._batch_result_dataset_name(
+                source_name=source_name,
+                requested_name=requested_result_sheet,
+                current_dataset_name=current_dataset.name,
+                default_suffix="FFT",
+                source_column=requested_signal_column,
+                multiple_columns=multiple_signal_columns,
+            )
+            status = "ready"
+            error = ""
+            signal_column = requested_signal_column
+            x_column = requested_x_column or "sample index"
+            try:
+                source_dataset = self._workspace.get_dataset(source_name)
+                resolved_signal = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_signal_column,
+                    binding_mode=column_binding_mode,
+                    field_label="Signal",
+                )
+                resolved_x = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_x_column,
+                    binding_mode=column_binding_mode,
+                    field_label="X/time",
+                )
+                signal_column = resolved_signal or ""
+                x_column = resolved_x or "sample index"
+                if not signal_column:
+                    raise MathOperationError("Choose a signal column.")
+            except Exception as exc:
+                status = "failed"
+                error = str(exc)
+            rows.append(
+                {
+                    "source_sheet": source_name,
+                    "status": status,
+                    "signal_column": signal_column,
+                    "x_column": x_column,
+                    "result_sheet": result_dataset_name,
+                    "column_binding": self._batch_column_binding_label(column_binding_mode),
+                    "error": error,
+                }
+            )
+        return rows
+
+    def _ifft_batch_preview_rows(
+        self,
+        current_dataset: Dataset,
+        jobs: list[tuple[str, int, str, str | None]],
+        requested_result_sheet: str,
+        multiple_real_columns: bool,
+        column_binding_mode: str,
+    ) -> list[dict[str, object]]:
+        """Return preview rows for inverse FFT jobs."""
+        rows: list[dict[str, object]] = []
+        for source_name, _index, requested_real_column, requested_imaginary_column in jobs:
+            result_dataset_name = self._batch_result_dataset_name(
+                source_name=source_name,
+                requested_name=requested_result_sheet,
+                current_dataset_name=current_dataset.name,
+                default_suffix="iFFT",
+                source_column=requested_real_column,
+                multiple_columns=multiple_real_columns,
+            )
+            status = "ready"
+            error = ""
+            real_column = requested_real_column
+            imaginary_column = requested_imaginary_column or "0"
+            try:
+                source_dataset = self._workspace.get_dataset(source_name)
+                resolved_real = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_real_column,
+                    binding_mode=column_binding_mode,
+                    field_label="Real",
+                )
+                resolved_imaginary = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_imaginary_column,
+                    binding_mode=column_binding_mode,
+                    field_label="Imaginary",
+                )
+                real_column = resolved_real or ""
+                imaginary_column = resolved_imaginary or "0"
+                if not real_column:
+                    raise MathOperationError("Choose a real spectrum column.")
+            except Exception as exc:
+                status = "failed"
+                error = str(exc)
+            rows.append(
+                {
+                    "source_sheet": source_name,
+                    "status": status,
+                    "real_column": real_column,
+                    "imaginary_column": imaginary_column,
+                    "result_sheet": result_dataset_name,
+                    "column_binding": self._batch_column_binding_label(column_binding_mode),
+                    "error": error,
+                }
+            )
+        return rows
+
     def _add_signal_batch_summary_dataset(
         self,
         current_dataset: Dataset,
@@ -2390,8 +3935,8 @@ class MainWindow(QMainWindow):
         target_dataset_names: list[str],
         results: list[dict[str, object]],
     ) -> Dataset | None:
-        """Create a cumulative FFT/iFFT batch summary when multiple sheets were selected."""
-        if len(target_dataset_names) <= 1:
+        """Create a cumulative FFT/iFFT batch summary when multiple result rows exist."""
+        if len(results) <= 1:
             return None
         return self._workspace.add_dataset(
             f"{current_dataset.name}_{operation_key}_batch_summary",
@@ -2471,33 +4016,57 @@ class MainWindow(QMainWindow):
         requested_name: str,
         current_dataset_name: str,
         default_suffix: str,
+        source_column: str = "",
+        multiple_columns: bool = False,
     ) -> str:
         """Return a per-source result-sheet name for batch-created datasets."""
         clean_requested = requested_name.strip()
         default_current_name = f"{current_dataset_name}_{default_suffix}"
+        column_name = str(source_column).strip()
+        append_column = bool(multiple_columns and column_name and "{column}" not in clean_requested)
+
+        def with_column(name: str) -> str:
+            if "{column}" in name:
+                return name.replace("{column}", column_name)
+            if append_column:
+                return f"{name}_{column_name}"
+            return name
+
         if not clean_requested:
-            return f"{source_name}_{default_suffix}"
+            return with_column(f"{source_name}_{default_suffix}")
         if "{source}" in clean_requested:
-            return clean_requested.replace("{source}", source_name)
+            return with_column(clean_requested.replace("{source}", source_name))
         if source_name == current_dataset_name:
-            return clean_requested
+            return with_column(clean_requested)
         if clean_requested == default_current_name:
-            return f"{source_name}_{default_suffix}"
-        return f"{source_name}_{clean_requested}"
+            return with_column(f"{source_name}_{default_suffix}")
+        return with_column(f"{source_name}_{clean_requested}")
 
     @staticmethod
     def _fft_operation_comment(
         signal_column: str,
         x_column: str | None,
         window_method: str,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
     ) -> str:
         """Return a compact provenance comment for FFT result sheets."""
-        return f"FFT: signal={signal_column}, x={x_column or 'sample index'}, window={window_method}"
+        return (
+            f"FFT: signal={signal_column}, x={x_column or 'sample index'}, "
+            f"window={window_method}, "
+            f"binding={MainWindow._batch_column_binding_label(column_binding_mode)}"
+        )
 
     @staticmethod
-    def _ifft_operation_comment(real_column: str, imaginary_column: str | None) -> str:
+    def _ifft_operation_comment(
+        real_column: str,
+        imaginary_column: str | None,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
+    ) -> str:
         """Return a compact provenance comment for inverse FFT result sheets."""
-        return f"Inverse FFT: real={real_column}, imaginary={imaginary_column or '0'}"
+        return (
+            f"Inverse FFT: real={real_column}, imaginary={imaginary_column or '0'}, "
+            f"binding={MainWindow._batch_column_binding_label(column_binding_mode)}"
+        )
 
     def _fft_batch_summary_row(
         self,
@@ -2510,6 +4079,9 @@ class MainWindow(QMainWindow):
         status: str,
         error: str,
         elapsed_seconds: float,
+        requested_signal_column: str = "",
+        requested_x_column: str | None = None,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
         source_dataset: Dataset | None = None,
         source_sheet: str = "",
         result_frame: pd.DataFrame | None = None,
@@ -2519,7 +4091,10 @@ class MainWindow(QMainWindow):
         row: dict[str, object] = {
             "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
             "operation": operation,
+            "column_binding": self._batch_column_binding_label(column_binding_mode),
+            "requested_signal_column": requested_signal_column or signal_column,
             "signal_column": signal_column,
+            "requested_x_column": requested_x_column or "sample index",
             "x_column": x_column or "sample index",
             "window": window_method,
             "window_label": WINDOW_METHODS.get(window_method, window_method),
@@ -2601,6 +4176,9 @@ class MainWindow(QMainWindow):
         status: str,
         error: str,
         elapsed_seconds: float,
+        requested_real_column: str = "",
+        requested_imaginary_column: str | None = None,
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
         source_dataset: Dataset | None = None,
         source_sheet: str = "",
         result_frame: pd.DataFrame | None = None,
@@ -2610,7 +4188,10 @@ class MainWindow(QMainWindow):
         row: dict[str, object] = {
             "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
             "operation": "Inverse FFT",
+            "column_binding": self._batch_column_binding_label(column_binding_mode),
+            "requested_real_column": requested_real_column or real_column,
             "real_column": real_column,
+            "requested_imaginary_column": requested_imaginary_column or "0",
             "imaginary_column": imaginary_column or "0",
             "requested_result_sheet": requested_result_sheet,
             "output_sheet": output_sheet,
@@ -2700,89 +4281,795 @@ class MainWindow(QMainWindow):
         if dialog.exec() != StatisticsDialog.Accepted:
             return
 
-        secondary_dataset = None
-        secondary_column = ""
-        multi_columns: list[str] = []
-        try:
-            primary_dataset = self._workspace.get_dataset(dialog.primary_dataset_name())
-            primary_column = dialog.primary_column()
-            if dialog.operation_scope() == "multi":
-                multi_columns = dialog.multi_columns()
-                column_labels = {
-                    column: self._statistics_column_label(primary_dataset, column)
-                    for column in multi_columns
-                }
-                result_frame = run_multicolumn_statistical_analysis(
-                    frame=primary_dataset.frame[multi_columns],
-                    column_labels=column_labels,
-                    operation_key=dialog.operation_key(),
-                )
-            else:
-                secondary_series = None
-                secondary_label = ""
-                if dialog.requires_secondary_column():
-                    secondary_dataset = self._workspace.get_dataset(dialog.secondary_dataset_name())
-                    secondary_column = dialog.secondary_column()
-                    secondary_series = secondary_dataset.frame[secondary_column]
-                    secondary_label = f"{secondary_dataset.name}: {secondary_column}"
+        self._run_statistics_batch(dialog)
 
-                primary_series = primary_dataset.frame[primary_column]
-                result_frame = run_statistical_analysis(
-                    primary=primary_series,
-                    primary_label=f"{primary_dataset.name}: {primary_column}",
-                    operation_key=dialog.operation_key(),
-                    secondary=secondary_series,
-                    secondary_label=secondary_label,
-                )
-            result_dataset = self._workspace.add_dataset(
-                dialog.target_dataset_name() or f"{primary_dataset.name}_statistics",
-                result_frame,
-            )
-            set_dataset_operation_comments(
-                result_dataset,
-                self._statistics_operation_comment(
-                    operation_key=dialog.operation_key(),
-                    primary_dataset=primary_dataset,
-                    primary_column=primary_column,
-                    secondary_dataset=secondary_dataset,
-                    secondary_column=secondary_column,
-                    multi_columns=multi_columns,
-                ),
+    def _run_statistics_batch(self, dialog: StatisticsDialog) -> None:
+        """Run statistics once or as an expanded worksheet/column batch."""
+        try:
+            primary_reference = self._workspace.get_dataset(dialog.primary_dataset_name())
+            secondary_reference = (
+                self._workspace.get_dataset(dialog.secondary_dataset_name())
+                if dialog.requires_secondary_column()
+                else None
             )
         except KeyError as exc:
             QMessageBox.warning(self, "Statistics Failed", f"Selected data is no longer available: {exc}")
             return
-        except MathOperationError as exc:
-            QMessageBox.warning(self, "Statistics Failed", str(exc))
-            return
-        except Exception as exc:
-            QMessageBox.critical(self, "Statistics Failed", str(exc))
+
+        operation_key = dialog.operation_key()
+        operation = STATISTIC_OPERATIONS[operation_key]
+        operation_scope = operation.scope
+        target_dataset_names = dialog.target_dataset_names()
+        column_binding_mode = dialog.column_binding_mode()
+        requested_primary_columns = dialog.primary_columns()
+        requested_secondary_columns = dialog.secondary_columns()
+        requested_multi_columns = dialog.multi_columns()
+        expected_job_count = (
+            len(target_dataset_names)
+            if operation_scope == "multi"
+            else len(target_dataset_names) * len(requested_primary_columns)
+        )
+        multiple_primary_jobs = expected_job_count > len(target_dataset_names)
+        preview_rows = self._statistics_batch_preview_rows(
+            primary_reference=primary_reference,
+            secondary_reference=secondary_reference,
+            target_dataset_names=target_dataset_names,
+            operation_scope=operation_scope,
+            requested_primary_columns=requested_primary_columns,
+            requested_secondary_columns=requested_secondary_columns,
+            requested_multi_columns=requested_multi_columns,
+            requested_result_sheet=dialog.target_dataset_name(),
+            column_binding_mode=column_binding_mode,
+            multiple_primary_jobs=multiple_primary_jobs,
+        )
+        if (len(preview_rows) > 1 or any(row["status"] == "failed" for row in preview_rows)) and not (
+            self._show_batch_preview(
+                "Statistics Batch Preview",
+                preview_rows,
+                [
+                    ("Sheet", "source_sheet"),
+                    ("Status", "status"),
+                    ("Primary", "primary_column"),
+                    ("Secondary/Group", "secondary_column"),
+                    ("Columns", "columns"),
+                    ("Result Sheet", "result_sheet"),
+                    ("Binding", "column_binding"),
+                    ("Details", "error"),
+                ],
+            )
+        ):
             return
 
-        self._refresh_dataset_list(result_dataset.name)
-        if dialog.plot_result_immediately():
+        result_datasets: list[Dataset] = []
+        summary_rows: list[dict[str, object]] = []
+        plot_created = False
+        progress = self._batch_progress_dialog("Statistics Batch", expected_job_count)
+        completed_jobs = 0
+
+        for source_name in target_dataset_names:
             try:
-                self._queue_statistics_companion_plot(
-                    primary_dataset=primary_dataset,
-                    primary_column=primary_column,
-                    secondary_dataset=secondary_dataset,
-                    secondary_column=secondary_column,
-                    result_dataset=result_dataset,
-                    operation_key=dialog.operation_key(),
-                    plot_kind=dialog.statistics_plot_kind(),
-                    multi_columns=multi_columns,
+                source_dataset = self._workspace.get_dataset(source_name)
+            except KeyError as exc:
+                summary_rows.extend(
+                    self._statistics_batch_result_rows(
+                        operation_key=operation_key,
+                        operation_scope=operation_scope,
+                        column_binding_mode=column_binding_mode,
+                        source_sheet=source_name,
+                        secondary_sheet="",
+                        requested_result_sheet="",
+                        output_sheet="",
+                        status="failed",
+                        error=f"Selected data is no longer available: {exc}",
+                        elapsed_seconds=0.0,
+                    )
                 )
-                self._refresh_dataset_list(result_dataset.name)
-                self._tabs.setCurrentWidget(self._plot_tab_widget)
-            except Exception as exc:
-                QMessageBox.warning(
-                    self,
-                    "Statistics Plot",
-                    f"Statistics results were saved, but the companion plot could not be created:\n{exc}",
+                continue
+
+            if operation_scope == "multi":
+                started = time.perf_counter()
+                requested_result_sheet = self._batch_result_dataset_name(
+                    source_name=source_dataset.name,
+                    requested_name=dialog.target_dataset_name(),
+                    current_dataset_name=primary_reference.name,
+                    default_suffix="statistics",
                 )
-        self.statusBar().showMessage(
-            f"Statistics saved as '{result_dataset.name}' ({len(result_dataset.frame)} rows)"
+                if self._batch_progress_canceled(
+                    progress,
+                    completed_jobs,
+                    f"Statistics: {source_dataset.name}",
+                ):
+                    summary_rows.extend(
+                        self._statistics_batch_result_rows(
+                            operation_key=operation_key,
+                            operation_scope=operation_scope,
+                            column_binding_mode=column_binding_mode,
+                            source_sheet=source_dataset.name,
+                            secondary_sheet="",
+                            requested_columns=requested_multi_columns,
+                            requested_result_sheet=requested_result_sheet,
+                            output_sheet="",
+                            status="canceled",
+                            error="Canceled by user before this job was processed.",
+                            elapsed_seconds=0.0,
+                        )
+                    )
+                    completed_jobs += 1
+                    continue
+                try:
+                    multi_columns = self._resolve_batch_columns(
+                        reference_dataset=primary_reference,
+                        target_dataset=source_dataset,
+                        source_columns=requested_multi_columns,
+                        binding_mode=column_binding_mode,
+                        field_label="Statistics column",
+                    )
+                    if len(multi_columns) < 2:
+                        raise MathOperationError("Choose at least two columns for a multiple-column operation.")
+                    column_labels = {
+                        column: self._statistics_column_label(source_dataset, column)
+                        for column in multi_columns
+                    }
+                    result_frame = run_multicolumn_statistical_analysis(
+                        frame=source_dataset.frame[multi_columns],
+                        column_labels=column_labels,
+                        operation_key=operation_key,
+                    )
+                    result_dataset = self._workspace.add_dataset(requested_result_sheet, result_frame)
+                    result_datasets.append(result_dataset)
+                    set_dataset_operation_comments(
+                        result_dataset,
+                        self._statistics_operation_comment(
+                            operation_key=operation_key,
+                            primary_dataset=source_dataset,
+                            primary_column="",
+                            secondary_dataset=None,
+                            secondary_column="",
+                            multi_columns=multi_columns,
+                            column_binding_mode=column_binding_mode,
+                        ),
+                    )
+                    summary_rows.extend(
+                        self._statistics_batch_result_rows(
+                            operation_key=operation_key,
+                            operation_scope=operation_scope,
+                            column_binding_mode=column_binding_mode,
+                            source_sheet=source_dataset.name,
+                            secondary_sheet="",
+                            requested_columns=requested_multi_columns,
+                            columns=multi_columns,
+                            requested_result_sheet=requested_result_sheet,
+                            output_sheet=result_dataset.name,
+                            result_frame=result_frame,
+                            status="ok",
+                            error="",
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                    plot_created = self._queue_statistics_batch_plot(
+                        dialog=dialog,
+                        plot_created=plot_created,
+                        primary_reference=primary_reference,
+                        primary_dataset=source_dataset,
+                        primary_column="",
+                        secondary_dataset=None,
+                        secondary_column="",
+                        result_dataset=result_dataset,
+                        multi_columns=multi_columns,
+                    )
+                except (KeyError, MathOperationError, ValueError) as exc:
+                    summary_rows.extend(
+                        self._statistics_batch_result_rows(
+                            operation_key=operation_key,
+                            operation_scope=operation_scope,
+                            column_binding_mode=column_binding_mode,
+                            source_sheet=source_dataset.name,
+                            secondary_sheet="",
+                            requested_columns=requested_multi_columns,
+                            columns=[],
+                            requested_result_sheet=requested_result_sheet,
+                            output_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                except Exception as exc:
+                    summary_rows.extend(
+                        self._statistics_batch_result_rows(
+                            operation_key=operation_key,
+                            operation_scope=operation_scope,
+                            column_binding_mode=column_binding_mode,
+                            source_sheet=source_dataset.name,
+                            secondary_sheet="",
+                            requested_columns=requested_multi_columns,
+                            columns=[],
+                            requested_result_sheet=requested_result_sheet,
+                            output_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                completed_jobs += 1
+                continue
+
+            for primary_index, requested_primary_column in enumerate(requested_primary_columns):
+                started = time.perf_counter()
+                requested_secondary_column = ""
+                if operation_scope in {"pair", "group"}:
+                    requested_secondary_column = (
+                        requested_secondary_columns[0]
+                        if len(requested_secondary_columns) == 1
+                        else requested_secondary_columns[primary_index]
+                    )
+                requested_result_sheet = self._batch_result_dataset_name(
+                    source_name=source_dataset.name,
+                    requested_name=dialog.target_dataset_name(),
+                    current_dataset_name=primary_reference.name,
+                    default_suffix="statistics",
+                    source_column=requested_primary_column,
+                    multiple_columns=multiple_primary_jobs,
+                )
+                secondary_dataset = None
+                secondary_column = ""
+                if self._batch_progress_canceled(
+                    progress,
+                    completed_jobs,
+                    f"Statistics: {source_dataset.name} / {requested_primary_column}",
+                ):
+                    summary_rows.extend(
+                        self._statistics_batch_result_rows(
+                            operation_key=operation_key,
+                            operation_scope=operation_scope,
+                            column_binding_mode=column_binding_mode,
+                            source_sheet=source_dataset.name,
+                            secondary_sheet="",
+                            requested_primary_column=requested_primary_column,
+                            requested_secondary_column=requested_secondary_column,
+                            requested_result_sheet=requested_result_sheet,
+                            output_sheet="",
+                            status="canceled",
+                            error="Canceled by user before this job was processed.",
+                            elapsed_seconds=0.0,
+                        )
+                    )
+                    completed_jobs += 1
+                    continue
+                try:
+                    primary_column = self._resolve_batch_column(
+                        reference_dataset=primary_reference,
+                        target_dataset=source_dataset,
+                        source_column=requested_primary_column,
+                        binding_mode=column_binding_mode,
+                        field_label="Primary",
+                    )
+                    if primary_column is None:
+                        raise MathOperationError("Choose a primary column.")
+
+                    secondary_series = None
+                    secondary_label = ""
+                    if secondary_reference is not None:
+                        secondary_dataset = self._statistics_secondary_source_dataset(
+                            primary_reference=primary_reference,
+                            secondary_reference=secondary_reference,
+                            source_dataset=source_dataset,
+                            target_dataset_names=target_dataset_names,
+                        )
+                        secondary_column = self._resolve_batch_column(
+                            reference_dataset=secondary_reference,
+                            target_dataset=secondary_dataset,
+                            source_column=requested_secondary_column,
+                            binding_mode=column_binding_mode,
+                            field_label="Secondary/group",
+                        ) or ""
+                        if not secondary_column:
+                            raise MathOperationError("Choose a secondary or group column.")
+                        secondary_series = secondary_dataset.frame[secondary_column]
+                        secondary_label = f"{secondary_dataset.name}: {secondary_column}"
+
+                    result_frame = run_statistical_analysis(
+                        primary=source_dataset.frame[primary_column],
+                        primary_label=f"{source_dataset.name}: {primary_column}",
+                        operation_key=operation_key,
+                        secondary=secondary_series,
+                        secondary_label=secondary_label,
+                    )
+                    result_dataset = self._workspace.add_dataset(requested_result_sheet, result_frame)
+                    result_datasets.append(result_dataset)
+                    set_dataset_operation_comments(
+                        result_dataset,
+                        self._statistics_operation_comment(
+                            operation_key=operation_key,
+                            primary_dataset=source_dataset,
+                            primary_column=primary_column,
+                            secondary_dataset=secondary_dataset,
+                            secondary_column=secondary_column,
+                            multi_columns=[],
+                            column_binding_mode=column_binding_mode,
+                        ),
+                    )
+                    summary_rows.extend(
+                        self._statistics_batch_result_rows(
+                            operation_key=operation_key,
+                            operation_scope=operation_scope,
+                            column_binding_mode=column_binding_mode,
+                            source_sheet=source_dataset.name,
+                            secondary_sheet=secondary_dataset.name if secondary_dataset is not None else "",
+                            requested_primary_column=requested_primary_column,
+                            primary_column=primary_column,
+                            requested_secondary_column=requested_secondary_column,
+                            secondary_column=secondary_column,
+                            requested_result_sheet=requested_result_sheet,
+                            output_sheet=result_dataset.name,
+                            result_frame=result_frame,
+                            status="ok",
+                            error="",
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                    plot_created = self._queue_statistics_batch_plot(
+                        dialog=dialog,
+                        plot_created=plot_created,
+                        primary_reference=primary_reference,
+                        primary_dataset=source_dataset,
+                        primary_column=primary_column,
+                        secondary_dataset=secondary_dataset,
+                        secondary_column=secondary_column,
+                        result_dataset=result_dataset,
+                        multi_columns=[],
+                    )
+                except (KeyError, MathOperationError, ValueError) as exc:
+                    summary_rows.extend(
+                        self._statistics_batch_result_rows(
+                            operation_key=operation_key,
+                            operation_scope=operation_scope,
+                            column_binding_mode=column_binding_mode,
+                            source_sheet=source_dataset.name,
+                            secondary_sheet=secondary_dataset.name if secondary_dataset is not None else "",
+                            requested_primary_column=requested_primary_column,
+                            primary_column="",
+                            requested_secondary_column=requested_secondary_column,
+                            secondary_column=secondary_column,
+                            requested_result_sheet=requested_result_sheet,
+                            output_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                except Exception as exc:
+                    summary_rows.extend(
+                        self._statistics_batch_result_rows(
+                            operation_key=operation_key,
+                            operation_scope=operation_scope,
+                            column_binding_mode=column_binding_mode,
+                            source_sheet=source_dataset.name,
+                            secondary_sheet=secondary_dataset.name if secondary_dataset is not None else "",
+                            requested_primary_column=requested_primary_column,
+                            primary_column="",
+                            requested_secondary_column=requested_secondary_column,
+                            secondary_column=secondary_column,
+                            requested_result_sheet=requested_result_sheet,
+                            output_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                completed_jobs += 1
+
+        if progress is not None:
+            progress.setValue(completed_jobs)
+
+        summary_dataset = None
+        if expected_job_count > 1 or any(row.get("status") != "ok" for row in summary_rows):
+            summary_dataset = self._workspace.add_dataset(
+                f"{primary_reference.name}_statistics_batch_summary",
+                pd.DataFrame(summary_rows),
+            )
+            set_dataset_operation_comments(
+                summary_dataset,
+                f"Statistics batch summary: operation={operation.label}",
+            )
+        wide_summary_dataset = self._statistics_batch_wide_summary_dataset(
+            primary_reference=primary_reference,
+            summary_rows=summary_rows,
         )
+
+        success_count = len(result_datasets)
+        failure_rows = [row for row in summary_rows if row.get("status") != "ok"]
+        selected_name = (
+            result_datasets[0].name
+            if result_datasets
+            else summary_dataset.name if summary_dataset is not None else ""
+        )
+        if selected_name:
+            self._refresh_dataset_list(selected_name)
+        else:
+            self._update_dataset_summary()
+
+        if success_count == 0:
+            detail = "\n".join(
+                f"{row.get('source_sheet', '')}: {row.get('error', '')}"
+                for row in failure_rows[:8]
+            )
+            if summary_dataset is not None:
+                detail = f"{detail}\n\nSummary saved as '{summary_dataset.name}'."
+            QMessageBox.warning(
+                self,
+                "Statistics Failed",
+                detail or "Statistics failed on every selected sheet/column.",
+            )
+            return
+
+        if failure_rows:
+            detail = "\n".join(
+                f"{row.get('source_sheet', '')}: {row.get('error', '')}"
+                for row in failure_rows[:8]
+            )
+            QMessageBox.warning(
+                self,
+                "Statistics Batch",
+                f"Created {success_count} result sheet(s); {len(failure_rows)} job(s) failed.\n\n{detail}",
+            )
+        if summary_dataset is not None:
+            wide_text = (
+                f"; wide summary saved as '{wide_summary_dataset.name}'"
+                if wide_summary_dataset is not None
+                else ""
+            )
+            self.statusBar().showMessage(
+                f"Statistics created {success_count} result sheet(s); "
+                f"summary saved as '{summary_dataset.name}'{wide_text}"
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Statistics saved as '{result_datasets[0].name}' ({len(result_datasets[0].frame)} rows)"
+            )
+
+    def _statistics_secondary_source_dataset(
+        self,
+        primary_reference: Dataset,
+        secondary_reference: Dataset,
+        source_dataset: Dataset,
+        target_dataset_names: list[str],
+    ) -> Dataset:
+        """Return the secondary/group data source for one statistics job."""
+        if (
+            len(target_dataset_names) == 1
+            and source_dataset.name == primary_reference.name
+            and secondary_reference.name != primary_reference.name
+        ):
+            return secondary_reference
+        return source_dataset
+
+    def _statistics_batch_preview_rows(
+        self,
+        primary_reference: Dataset,
+        secondary_reference: Dataset | None,
+        target_dataset_names: list[str],
+        operation_scope: str,
+        requested_primary_columns: list[str],
+        requested_secondary_columns: list[str],
+        requested_multi_columns: list[str],
+        requested_result_sheet: str,
+        column_binding_mode: str,
+        multiple_primary_jobs: bool,
+    ) -> list[dict[str, object]]:
+        """Return preflight preview rows for statistics batch jobs."""
+        rows: list[dict[str, object]] = []
+        for source_name in target_dataset_names:
+            try:
+                source_dataset = self._workspace.get_dataset(source_name)
+            except Exception as exc:
+                rows.append(
+                    {
+                        "source_sheet": source_name,
+                        "status": "failed",
+                        "primary_column": "",
+                        "secondary_column": "",
+                        "columns": "",
+                        "result_sheet": "",
+                        "column_binding": self._batch_column_binding_label(column_binding_mode),
+                        "error": str(exc),
+                    }
+                )
+                continue
+
+            if operation_scope == "multi":
+                result_sheet = self._batch_result_dataset_name(
+                    source_name=source_dataset.name,
+                    requested_name=requested_result_sheet,
+                    current_dataset_name=primary_reference.name,
+                    default_suffix="statistics",
+                )
+                status = "ready"
+                error = ""
+                resolved_columns: list[str] = []
+                try:
+                    resolved_columns = self._resolve_batch_columns(
+                        reference_dataset=primary_reference,
+                        target_dataset=source_dataset,
+                        source_columns=requested_multi_columns,
+                        binding_mode=column_binding_mode,
+                        field_label="Statistics column",
+                    )
+                    if len(resolved_columns) < 2:
+                        raise MathOperationError("Choose at least two columns for a multiple-column operation.")
+                except Exception as exc:
+                    status = "failed"
+                    error = str(exc)
+                rows.append(
+                    {
+                        "source_sheet": source_dataset.name,
+                        "status": status,
+                        "primary_column": "",
+                        "secondary_column": "",
+                        "columns": ", ".join(resolved_columns or requested_multi_columns),
+                        "result_sheet": result_sheet,
+                        "column_binding": self._batch_column_binding_label(column_binding_mode),
+                        "error": error,
+                    }
+                )
+                continue
+
+            for primary_index, requested_primary_column in enumerate(requested_primary_columns):
+                requested_secondary_column = ""
+                if operation_scope in {"pair", "group"}:
+                    requested_secondary_column = (
+                        requested_secondary_columns[0]
+                        if len(requested_secondary_columns) == 1
+                        else requested_secondary_columns[primary_index]
+                    )
+                result_sheet = self._batch_result_dataset_name(
+                    source_name=source_dataset.name,
+                    requested_name=requested_result_sheet,
+                    current_dataset_name=primary_reference.name,
+                    default_suffix="statistics",
+                    source_column=requested_primary_column,
+                    multiple_columns=multiple_primary_jobs,
+                )
+                status = "ready"
+                error = ""
+                primary_column = requested_primary_column
+                secondary_column = requested_secondary_column
+                try:
+                    resolved_primary = self._resolve_batch_column(
+                        reference_dataset=primary_reference,
+                        target_dataset=source_dataset,
+                        source_column=requested_primary_column,
+                        binding_mode=column_binding_mode,
+                        field_label="Primary",
+                    )
+                    primary_column = resolved_primary or ""
+                    if not primary_column:
+                        raise MathOperationError("Choose a primary column.")
+                    if secondary_reference is not None:
+                        secondary_dataset = self._statistics_secondary_source_dataset(
+                            primary_reference=primary_reference,
+                            secondary_reference=secondary_reference,
+                            source_dataset=source_dataset,
+                            target_dataset_names=target_dataset_names,
+                        )
+                        resolved_secondary = self._resolve_batch_column(
+                            reference_dataset=secondary_reference,
+                            target_dataset=secondary_dataset,
+                            source_column=requested_secondary_column,
+                            binding_mode=column_binding_mode,
+                            field_label="Secondary/group",
+                        )
+                        secondary_column = resolved_secondary or ""
+                        if not secondary_column:
+                            raise MathOperationError("Choose a secondary or group column.")
+                except Exception as exc:
+                    status = "failed"
+                    error = str(exc)
+                rows.append(
+                    {
+                        "source_sheet": source_dataset.name,
+                        "status": status,
+                        "primary_column": primary_column,
+                        "secondary_column": secondary_column,
+                        "columns": "",
+                        "result_sheet": result_sheet,
+                        "column_binding": self._batch_column_binding_label(column_binding_mode),
+                        "error": error,
+                    }
+                )
+        return rows
+
+    def _queue_statistics_batch_plot(
+        self,
+        dialog: StatisticsDialog,
+        plot_created: bool,
+        primary_reference: Dataset,
+        primary_dataset: Dataset,
+        primary_column: str,
+        secondary_dataset: Dataset | None,
+        secondary_column: str,
+        result_dataset: Dataset,
+        multi_columns: list[str],
+    ) -> bool:
+        """Create at most one companion plot for a statistics batch."""
+        if plot_created or not dialog.plot_result_immediately():
+            return plot_created
+        if primary_dataset.name != primary_reference.name:
+            return plot_created
+        try:
+            self._queue_statistics_companion_plot(
+                primary_dataset=primary_dataset,
+                primary_column=primary_column,
+                secondary_dataset=secondary_dataset,
+                secondary_column=secondary_column,
+                result_dataset=result_dataset,
+                operation_key=dialog.operation_key(),
+                plot_kind=dialog.statistics_plot_kind(),
+                multi_columns=multi_columns,
+            )
+            self._tabs.setCurrentWidget(self._plot_tab_widget)
+            return True
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Statistics Plot",
+                f"Statistics results were saved, but the companion plot could not be created:\n{exc}",
+            )
+            return True
+
+    def _statistics_batch_result_rows(
+        self,
+        operation_key: str,
+        operation_scope: str,
+        column_binding_mode: str,
+        source_sheet: str,
+        secondary_sheet: str,
+        requested_result_sheet: str,
+        output_sheet: str,
+        status: str,
+        error: str,
+        elapsed_seconds: float,
+        result_frame: pd.DataFrame | None = None,
+        requested_primary_column: str = "",
+        primary_column: str = "",
+        requested_secondary_column: str = "",
+        secondary_column: str = "",
+        requested_columns: list[str] | None = None,
+        columns: list[str] | None = None,
+    ) -> list[dict[str, object]]:
+        """Return annotated cumulative statistics rows for one batch job."""
+        operation = STATISTIC_OPERATIONS[operation_key]
+        base: dict[str, object] = {
+            "source_sheet": source_sheet,
+            "secondary_sheet": secondary_sheet,
+            "operation_key": operation_key,
+            "operation_label": operation.label,
+            "operation_scope": operation_scope,
+            "column_binding": self._batch_column_binding_label(column_binding_mode),
+            "requested_primary_column": requested_primary_column,
+            "primary_column": primary_column,
+            "requested_secondary_column": requested_secondary_column,
+            "secondary_column": secondary_column,
+            "requested_columns": ", ".join(requested_columns or []),
+            "columns": ", ".join(columns or []),
+            "requested_result_sheet": requested_result_sheet,
+            "output_sheet": output_sheet,
+            "status": status,
+            "error": error,
+            "elapsed_seconds": round(float(elapsed_seconds), 6),
+        }
+        if result_frame is None or result_frame.empty:
+            row = dict(base)
+            row["result_row"] = np.nan
+            return [row]
+
+        if operation_key in {"single_zscore", "single_cumulative"}:
+            row = dict(base)
+            row.update(self._statistics_rowwise_result_metrics(result_frame))
+            return [row]
+
+        rows: list[dict[str, object]] = []
+        for result_index, result_row in result_frame.reset_index(drop=True).iterrows():
+            row = dict(base)
+            row["result_row"] = int(result_index)
+            for column_name, value in result_row.items():
+                clean_name = str(column_name)
+                if clean_name in row:
+                    clean_name = f"result_{clean_name}"
+                row[clean_name] = value
+            rows.append(row)
+        return rows
+
+    @staticmethod
+    def _statistics_rowwise_result_metrics(result_frame: pd.DataFrame) -> dict[str, object]:
+        """Return compact batch-summary metrics for row-wise statistics outputs."""
+        metrics: dict[str, object] = {
+            "result_row": "compact",
+            "result_row_count": len(result_frame),
+        }
+        for column_name in [
+            "value",
+            "z_score",
+            "cumulative_count",
+            "cumulative_sum",
+            "cumulative_mean",
+            "cumulative_std",
+            "cumulative_min",
+            "cumulative_max",
+        ]:
+            if column_name not in result_frame:
+                continue
+            values = pd.to_numeric(result_frame[column_name], errors="coerce")
+            values = values.replace([np.inf, -np.inf], np.nan).dropna()
+            metrics[f"{column_name}_finite_count"] = int(len(values))
+            if values.empty:
+                continue
+            metrics[f"{column_name}_first"] = float(values.iloc[0])
+            metrics[f"{column_name}_last"] = float(values.iloc[-1])
+            metrics[f"{column_name}_minimum"] = float(values.min())
+            metrics[f"{column_name}_maximum"] = float(values.max())
+            metrics[f"{column_name}_mean"] = float(values.mean())
+        if "z_score" in result_frame:
+            z_values = pd.to_numeric(result_frame["z_score"], errors="coerce")
+            z_values = z_values.replace([np.inf, -np.inf], np.nan).dropna()
+            metrics["absolute_z_gt_3_count"] = int((np.abs(z_values) > 3).sum())
+        return metrics
+
+    def _statistics_batch_wide_summary_dataset(
+        self,
+        primary_reference: Dataset,
+        summary_rows: list[dict[str, object]],
+    ) -> Dataset | None:
+        """Create a compact wide statistics summary from long metric rows when useful."""
+        if len(summary_rows) <= 1:
+            return None
+        frame = pd.DataFrame(summary_rows)
+        if "metric" not in frame.columns or "value" not in frame.columns:
+            return None
+        metric_rows = frame[
+            (frame.get("status", "") == "ok")
+            & frame["metric"].notna()
+            & (frame["metric"].astype(str) != "")
+        ].copy()
+        if metric_rows.empty:
+            return None
+
+        index_columns = [
+            column
+            for column in [
+                "source_sheet",
+                "primary_column",
+                "secondary_sheet",
+                "secondary_column",
+                "columns",
+                "operation_key",
+                "operation_label",
+            ]
+            if column in metric_rows.columns
+        ]
+        if not index_columns:
+            return None
+        value_wide = (
+            metric_rows.groupby(index_columns + ["metric"], dropna=False)["value"]
+            .first()
+            .unstack("metric")
+            .reset_index()
+        )
+        if "p_value" in metric_rows.columns:
+            p_wide = (
+                metric_rows.groupby(index_columns + ["metric"], dropna=False)["p_value"]
+                .first()
+                .unstack("metric")
+                .add_suffix("_p_value")
+                .reset_index()
+            )
+            value_wide = value_wide.merge(p_wide, on=index_columns, how="left")
+        dataset = self._workspace.add_dataset(
+            f"{primary_reference.name}_statistics_batch_wide_summary",
+            value_wide,
+        )
+        set_dataset_operation_comments(dataset, "Statistics batch wide/pivot summary")
+        return dataset
 
     @staticmethod
     def _statistics_operation_comment(
@@ -2792,6 +5079,7 @@ class MainWindow(QMainWindow):
         secondary_dataset: Dataset | None,
         secondary_column: str,
         multi_columns: list[str],
+        column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
     ) -> str:
         """Return a compact provenance comment for a statistics result sheet."""
         operation_label = STATISTIC_OPERATIONS[operation_key].label
@@ -2801,7 +5089,10 @@ class MainWindow(QMainWindow):
             inputs = f"{primary_dataset.name}: {primary_column}"
             if secondary_dataset is not None and secondary_column:
                 inputs = f"{inputs}; secondary={secondary_dataset.name}: {secondary_column}"
-        return f"Statistics: operation={operation_label}, inputs={inputs}"
+        return (
+            f"Statistics: operation={operation_label}, inputs={inputs}, "
+            f"binding={MainWindow._batch_column_binding_label(column_binding_mode)}"
+        )
 
     def _queue_statistics_companion_plot(
         self,
@@ -3441,6 +5732,12 @@ class MainWindow(QMainWindow):
             default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
             default_x_weight_column=self._preferred_dataset_column(dataset, ("x_error",), fallback_index=None),
             default_y_weight_column=self._preferred_dataset_column(dataset, ("y_error", "error"), fallback_index=None),
+            dataset_names=[
+                candidate.name
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            ],
+            current_dataset_name=dataset.name,
             parent=self,
         )
         if dialog.exec() != FitDialog.Accepted:
@@ -3455,68 +5752,755 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Curve Fit Failed", str(exc))
             return
 
-        try:
-            result = fit_curve(
-                dataset.frame,
-                x_column=dialog.x_column(),
-                y_column=dialog.y_column(),
-                model_key=dialog.model_key(),
-                method=dialog.method(),
-                initial_parameters=initial_parameters,
-                lower_bounds=lower_bounds,
-                upper_bounds=upper_bounds,
-                fixed_parameters=fixed_parameters,
-                weight_column=dialog.weight_column(),
-                weight_mode=dialog.weight_mode(),
-                absolute_sigma=dialog.absolute_sigma(),
-                include_confidence_band=dialog.include_confidence_band(),
-                confidence_level=dialog.confidence_level(),
-                fit_points=dialog.fit_points(),
-                x_weight_column=dialog.x_weight_column(),
-                custom_models=self._workspace.list_custom_fit_models(),
+        self._run_curve_fit_batch(
+            current_dataset=dataset,
+            dialog=dialog,
+            initial_parameters=initial_parameters,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            fixed_parameters=fixed_parameters,
+        )
+
+    def _run_curve_fit_batch(
+        self,
+        current_dataset: Dataset,
+        dialog: FitDialog,
+        initial_parameters: list[float],
+        lower_bounds: list[float | None],
+        upper_bounds: list[float | None],
+        fixed_parameters: list[bool],
+    ) -> None:
+        """Run curve fitting on one or more worksheets and response columns."""
+        target_dataset_names = dialog.target_dataset_names()
+        column_binding_mode = dialog.column_binding_mode()
+        requested_x_column = dialog.x_column()
+        requested_y_columns = dialog.y_columns()
+        requested_x_weight_column = dialog.x_weight_column()
+        requested_weight_columns = dialog.weight_columns()
+        multiple_y_columns = len(requested_y_columns) > 1
+        residual_needed = dialog.create_residual_sheet() or dialog.plot_residuals()
+        custom_models = self._workspace.list_custom_fit_models()
+
+        fit_datasets: list[Dataset] = []
+        current_fit_dataset: Dataset | None = None
+        current_residual_dataset: Dataset | None = None
+        current_fit_source: Dataset | None = None
+        current_fit_result: FitResult | None = None
+        current_fit_x_column = ""
+        current_fit_y_column = ""
+        current_fit_x_weight_column: str | None = None
+        current_fit_weight_column: str | None = None
+        first_fit_result: FitResult | None = None
+        results: list[dict[str, object]] = []
+        parameter_correlation_rows: list[dict[str, object]] = []
+        fit_report_rows: list[dict[str, object]] = []
+        jobs: list[tuple[str, int, str, str | None]] = []
+        for source_name in target_dataset_names:
+            for index, requested_y_column in enumerate(requested_y_columns):
+                requested_weight_column = None
+                if len(requested_weight_columns) == 1:
+                    requested_weight_column = requested_weight_columns[0]
+                elif requested_weight_columns:
+                    requested_weight_column = requested_weight_columns[index]
+                jobs.append((source_name, index, requested_y_column, requested_weight_column))
+        preview_rows = self._fit_batch_preview_rows(
+            current_dataset=current_dataset,
+            dialog=dialog,
+            jobs=jobs,
+            requested_x_column=requested_x_column,
+            requested_x_weight_column=requested_x_weight_column,
+            multiple_y_columns=multiple_y_columns,
+            residual_needed=residual_needed,
+            column_binding_mode=column_binding_mode,
+        )
+        if (len(preview_rows) > 1 or any(row["status"] == "failed" for row in preview_rows)) and not (
+            self._show_batch_preview(
+                "Curve Fit Batch Preview",
+                preview_rows,
+                [
+                    ("Sheet", "source_sheet"),
+                    ("Status", "status"),
+                    ("X", "x_column"),
+                    ("Y", "y_column"),
+                    ("Y Weight", "weight_column"),
+                    ("Fit Sheet", "fit_sheet"),
+                    ("Residual Sheet", "residual_sheet"),
+                    ("Binding", "column_binding"),
+                    ("Details", "error"),
+                ],
             )
-            result_dataset = self._workspace.add_dataset(
-                dialog.target_dataset_name() or f"{dataset.name}_fit",
-                result.fit_frame,
-            )
-            fit_operation_comment = (
-                f"Curve fit: y={dialog.y_column()}, x={dialog.x_column()}, "
-                f"model={result.report.model_name}, method={dialog.method()}"
-            )
-            set_dataset_operation_comments(result_dataset, fit_operation_comment)
-            residual_dataset = None
-            if dialog.create_residual_sheet() or dialog.plot_residuals():
-                residual_dataset = self._workspace.add_dataset(
-                    dialog.residual_dataset_name() or f"{dataset.name}_residuals",
-                    result.residual_frame,
-                )
-                set_dataset_operation_comments(residual_dataset, f"Fit residuals: {fit_operation_comment}")
-        except MathOperationError as exc:
-            QMessageBox.warning(self, "Curve Fit Failed", str(exc))
+        ):
             return
-        except Exception as exc:
-            QMessageBox.critical(self, "Curve Fit Failed", str(exc))
+        progress = self._batch_progress_dialog("Curve Fit Batch", len(jobs))
+        completed_jobs = 0
+
+        for source_name, _index, requested_y_column, requested_weight_column in jobs:
+                if self._batch_progress_canceled(
+                    progress,
+                    completed_jobs,
+                    f"Curve Fit: {source_name} / {requested_y_column}",
+                ):
+                    requested_fit_sheet = self._batch_result_dataset_name(
+                        source_name=source_name,
+                        requested_name=dialog.target_dataset_name(),
+                        current_dataset_name=current_dataset.name,
+                        default_suffix="fit",
+                        source_column=requested_y_column,
+                        multiple_columns=multiple_y_columns,
+                    )
+                    requested_residual_sheet = (
+                        self._batch_result_dataset_name(
+                            source_name=source_name,
+                            requested_name=dialog.residual_dataset_name(),
+                            current_dataset_name=current_dataset.name,
+                            default_suffix="residuals",
+                            source_column=requested_y_column,
+                            multiple_columns=multiple_y_columns,
+                        )
+                        if residual_needed
+                        else ""
+                    )
+                    results.append(
+                        self._fit_batch_summary_row(
+                            source_sheet=source_name,
+                            requested_x_column=requested_x_column,
+                            x_column=requested_x_column,
+                            requested_y_column=requested_y_column,
+                            y_column=requested_y_column,
+                            requested_x_weight_column=requested_x_weight_column,
+                            x_weight_column=requested_x_weight_column,
+                            requested_weight_column=requested_weight_column,
+                            weight_column=requested_weight_column,
+                            column_binding_mode=column_binding_mode,
+                            requested_fit_sheet=requested_fit_sheet,
+                            output_fit_sheet="",
+                            requested_residual_sheet=requested_residual_sheet,
+                            output_residual_sheet="",
+                            status="canceled",
+                            error="Canceled by user before this job was processed.",
+                            elapsed_seconds=0.0,
+                            dialog=dialog,
+                        )
+                    )
+                    completed_jobs += 1
+                    continue
+                started = time.perf_counter()
+                requested_fit_sheet = self._batch_result_dataset_name(
+                    source_name=source_name,
+                    requested_name=dialog.target_dataset_name(),
+                    current_dataset_name=current_dataset.name,
+                    default_suffix="fit",
+                    source_column=requested_y_column,
+                    multiple_columns=multiple_y_columns,
+                )
+                requested_residual_sheet = (
+                    self._batch_result_dataset_name(
+                        source_name=source_name,
+                        requested_name=dialog.residual_dataset_name(),
+                        current_dataset_name=current_dataset.name,
+                        default_suffix="residuals",
+                        source_column=requested_y_column,
+                        multiple_columns=multiple_y_columns,
+                    )
+                    if residual_needed
+                    else ""
+                )
+                try:
+                    source_dataset = self._workspace.get_dataset(source_name)
+                    x_column = self._resolve_batch_column(
+                        reference_dataset=current_dataset,
+                        target_dataset=source_dataset,
+                        source_column=requested_x_column,
+                        binding_mode=column_binding_mode,
+                        field_label="X",
+                    )
+                    y_column = self._resolve_batch_column(
+                        reference_dataset=current_dataset,
+                        target_dataset=source_dataset,
+                        source_column=requested_y_column,
+                        binding_mode=column_binding_mode,
+                        field_label="Y",
+                    )
+                    x_weight_column = self._resolve_batch_column(
+                        reference_dataset=current_dataset,
+                        target_dataset=source_dataset,
+                        source_column=requested_x_weight_column,
+                        binding_mode=column_binding_mode,
+                        field_label="X weight/sigma",
+                    )
+                    weight_column = self._resolve_batch_column(
+                        reference_dataset=current_dataset,
+                        target_dataset=source_dataset,
+                        source_column=requested_weight_column,
+                        binding_mode=column_binding_mode,
+                        field_label="Y weight/sigma",
+                    )
+                    if x_column is None or y_column is None:
+                        raise MathOperationError("Choose X and at least one Y column.")
+
+                    fit_result = fit_curve(
+                        source_dataset.frame,
+                        x_column=x_column,
+                        y_column=y_column,
+                        model_key=dialog.model_key(),
+                        method=dialog.method(),
+                        initial_parameters=initial_parameters,
+                        lower_bounds=lower_bounds,
+                        upper_bounds=upper_bounds,
+                        fixed_parameters=fixed_parameters,
+                        weight_column=weight_column,
+                        weight_mode=dialog.weight_mode(),
+                        absolute_sigma=dialog.absolute_sigma(),
+                        include_confidence_band=dialog.include_confidence_band(),
+                        confidence_level=dialog.confidence_level(),
+                        fit_points=dialog.fit_points(),
+                        x_weight_column=x_weight_column,
+                        custom_models=custom_models,
+                    )
+                    fit_dataset = self._workspace.add_dataset(requested_fit_sheet, fit_result.fit_frame)
+                    fit_datasets.append(fit_dataset)
+                    fit_operation_comment = self._fit_operation_comment(
+                        x_column=x_column,
+                        y_column=y_column,
+                        model_name=fit_result.report.model_name,
+                        method=fit_result.report.method,
+                        x_weight_column=x_weight_column,
+                        weight_column=weight_column,
+                        weight_mode=dialog.weight_mode(),
+                        column_binding_mode=column_binding_mode,
+                    )
+                    set_dataset_operation_comments(fit_dataset, fit_operation_comment)
+
+                    residual_dataset = None
+                    if residual_needed:
+                        residual_dataset = self._workspace.add_dataset(
+                            requested_residual_sheet,
+                            fit_result.residual_frame,
+                        )
+                        set_dataset_operation_comments(
+                            residual_dataset,
+                            f"Fit residuals: {fit_operation_comment}",
+                        )
+
+                    if first_fit_result is None:
+                        first_fit_result = fit_result
+                    if source_dataset.name == current_dataset.name and current_fit_dataset is None:
+                        current_fit_dataset = fit_dataset
+                        current_residual_dataset = residual_dataset
+                        current_fit_source = source_dataset
+                        current_fit_result = fit_result
+                        current_fit_x_column = x_column
+                        current_fit_y_column = y_column
+                        current_fit_x_weight_column = x_weight_column
+                        current_fit_weight_column = weight_column
+
+                    if dialog.create_parameter_correlation_sheet():
+                        parameter_correlation_rows.extend(
+                            self._fit_parameter_correlation_rows(
+                                source_dataset=source_dataset,
+                                result=fit_result,
+                                requested_x_column=requested_x_column,
+                                x_column=x_column,
+                                requested_y_column=requested_y_column,
+                                y_column=y_column,
+                                column_binding_mode=column_binding_mode,
+                                output_fit_sheet=fit_dataset.name,
+                            )
+                        )
+                    fit_report_rows.append(
+                        {
+                            "source_sheet": source_dataset.name,
+                            "requested_y_column": requested_y_column,
+                            "y_column": y_column,
+                            "output_fit_sheet": fit_dataset.name,
+                            "model_name": fit_result.report.model_name,
+                            "method": fit_result.report.method,
+                            "r_squared": fit_result.report.r_squared,
+                            "rmse": fit_result.report.rmse,
+                            "report_text": fit_result.report.to_text(),
+                        }
+                    )
+
+                    results.append(
+                        self._fit_batch_summary_row(
+                            source_dataset=source_dataset,
+                            result=fit_result,
+                            requested_x_column=requested_x_column,
+                            x_column=x_column,
+                            requested_y_column=requested_y_column,
+                            y_column=y_column,
+                            requested_x_weight_column=requested_x_weight_column,
+                            x_weight_column=x_weight_column,
+                            requested_weight_column=requested_weight_column,
+                            weight_column=weight_column,
+                            column_binding_mode=column_binding_mode,
+                            requested_fit_sheet=requested_fit_sheet,
+                            output_fit_sheet=fit_dataset.name,
+                            requested_residual_sheet=requested_residual_sheet,
+                            output_residual_sheet=residual_dataset.name if residual_dataset else "",
+                            status="ok",
+                            error="",
+                            elapsed_seconds=time.perf_counter() - started,
+                        )
+                    )
+                except MathOperationError as exc:
+                    results.append(
+                        self._fit_batch_summary_row(
+                            source_sheet=source_name,
+                            requested_x_column=requested_x_column,
+                            x_column=requested_x_column,
+                            requested_y_column=requested_y_column,
+                            y_column=requested_y_column,
+                            requested_x_weight_column=requested_x_weight_column,
+                            x_weight_column=requested_x_weight_column,
+                            requested_weight_column=requested_weight_column,
+                            weight_column=requested_weight_column,
+                            column_binding_mode=column_binding_mode,
+                            requested_fit_sheet=requested_fit_sheet,
+                            output_fit_sheet="",
+                            requested_residual_sheet=requested_residual_sheet,
+                            output_residual_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=time.perf_counter() - started,
+                            dialog=dialog,
+                        )
+                    )
+                except Exception as exc:
+                    results.append(
+                        self._fit_batch_summary_row(
+                            source_sheet=source_name,
+                            requested_x_column=requested_x_column,
+                            x_column=requested_x_column,
+                            requested_y_column=requested_y_column,
+                            y_column=requested_y_column,
+                            requested_x_weight_column=requested_x_weight_column,
+                            x_weight_column=requested_x_weight_column,
+                            requested_weight_column=requested_weight_column,
+                            weight_column=requested_weight_column,
+                            column_binding_mode=column_binding_mode,
+                            requested_fit_sheet=requested_fit_sheet,
+                            output_fit_sheet="",
+                            requested_residual_sheet=requested_residual_sheet,
+                            output_residual_sheet="",
+                            status="failed",
+                            error=str(exc),
+                            elapsed_seconds=time.perf_counter() - started,
+                            dialog=dialog,
+                        )
+                    )
+                completed_jobs += 1
+
+        if progress is not None:
+            progress.setValue(completed_jobs)
+
+        summary_dataset = None
+        if len(results) > 1:
+            summary_dataset = self._workspace.add_dataset(
+                f"{current_dataset.name}_fit_batch_summary",
+                pd.DataFrame(results),
+            )
+        parameter_correlation_dataset = None
+        if parameter_correlation_rows:
+            correlation_name = (
+                f"{fit_datasets[0].name}_parameter_correlations"
+                if len(results) == 1 and fit_datasets
+                else f"{current_dataset.name}_fit_parameter_correlations"
+            )
+            parameter_correlation_dataset = self._workspace.add_dataset(
+                correlation_name,
+                pd.DataFrame(parameter_correlation_rows),
+            )
+            set_dataset_operation_comments(
+                parameter_correlation_dataset,
+                "Fit parameter covariance/correlation pairs",
+            )
+        report_export_dataset = None
+        if fit_report_rows and len(results) > 1:
+            report_export_dataset = self._workspace.add_dataset(
+                f"{current_dataset.name}_fit_reports",
+                pd.DataFrame(fit_report_rows),
+            )
+            set_dataset_operation_comments(report_export_dataset, "Curve fit text report exports")
+
+        success_count = sum(1 for row in results if row["status"] == "ok")
+        failure_rows = [row for row in results if row["status"] != "ok"]
+        selected_name = ""
+        if current_fit_dataset is not None:
+            selected_name = current_fit_dataset.name
+        elif fit_datasets:
+            selected_name = fit_datasets[0].name
+        elif summary_dataset is not None:
+            selected_name = summary_dataset.name
+
+        if selected_name:
+            self._refresh_dataset_list(selected_name)
+        else:
+            self._update_dataset_summary()
+
+        if success_count == 0:
+            message = "\n".join(
+                f"{row['source_sheet']} / {row['requested_y_column']}: {row['error']}"
+                for row in failure_rows[:8]
+            )
+            if summary_dataset is not None:
+                message = f"{message}\n\nSummary saved as '{summary_dataset.name}'."
+            QMessageBox.warning(
+                self,
+                "Curve Fit Failed",
+                message or "Curve fitting failed on every selected sheet/column.",
+            )
             return
 
-        self._refresh_dataset_list(result_dataset.name)
-        x_error_column = dialog.x_weight_column() if dialog.weight_mode() == "sigma" else ""
-        y_error_column = dialog.weight_column() if dialog.weight_mode() == "sigma" else ""
-        self._plot_tab_widget.queue_fit_plot(
-            source_dataset=dataset,
-            fit_dataset=result_dataset,
-            x_column=dialog.x_column(),
-            y_column=dialog.y_column(),
-            model_name=result.report.model_name,
-            residual_dataset=residual_dataset,
-            show_residuals=dialog.plot_residuals(),
-            x_err_column=x_error_column or "",
-            y_err_column=y_error_column or "",
-        )
-        self._tabs.setCurrentWidget(self._plot_tab_widget)
-        FitReportDialog(result.report.to_text(), self).exec()
+        if current_fit_dataset is not None and current_fit_source is not None and current_fit_result is not None:
+            x_error_column = current_fit_x_weight_column if dialog.weight_mode() == "sigma" else ""
+            y_error_column = current_fit_weight_column if dialog.weight_mode() == "sigma" else ""
+            self._plot_tab_widget.queue_fit_plot(
+                source_dataset=current_fit_source,
+                fit_dataset=current_fit_dataset,
+                x_column=current_fit_x_column,
+                y_column=current_fit_y_column,
+                model_name=current_fit_result.report.model_name,
+                residual_dataset=current_residual_dataset,
+                show_residuals=dialog.plot_residuals(),
+                x_err_column=x_error_column or "",
+                y_err_column=y_error_column or "",
+            )
+            self._tabs.setCurrentWidget(self._plot_tab_widget)
+
+        if len(results) == 1 and first_fit_result is not None:
+            FitReportDialog(first_fit_result.report.to_text(), self).exec()
+
+        if failure_rows:
+            detail = "\n".join(
+                f"{row['source_sheet']} / {row['requested_y_column']}: {row['error']}"
+                for row in failure_rows[:8]
+            )
+            QMessageBox.warning(
+                self,
+                "Curve Fit Batch",
+                f"Created {success_count} fit result(s); {len(failure_rows)} failed.\n\n{detail}",
+            )
+
         self.statusBar().showMessage(
-            f"Fit saved as '{result_dataset.name}' with R^2={result.report.r_squared:.5g}"
+            self._fit_batch_status_message(
+                success_count=success_count,
+                failure_count=len(failure_rows),
+                summary_dataset_name=summary_dataset.name if summary_dataset else "",
+                parameter_correlation_dataset_name=(
+                    parameter_correlation_dataset.name if parameter_correlation_dataset else ""
+                ),
+                first_result=first_fit_result,
+                first_fit_dataset_name=fit_datasets[0].name if fit_datasets else "",
+            )
         )
+
+    def _fit_batch_preview_rows(
+        self,
+        current_dataset: Dataset,
+        dialog: FitDialog,
+        jobs: list[tuple[str, int, str, str | None]],
+        requested_x_column: str,
+        requested_x_weight_column: str | None,
+        multiple_y_columns: bool,
+        residual_needed: bool,
+        column_binding_mode: str,
+    ) -> list[dict[str, object]]:
+        """Return preflight preview rows for curve-fit jobs."""
+        rows: list[dict[str, object]] = []
+        for source_name, _index, requested_y_column, requested_weight_column in jobs:
+            fit_sheet = self._batch_result_dataset_name(
+                source_name=source_name,
+                requested_name=dialog.target_dataset_name(),
+                current_dataset_name=current_dataset.name,
+                default_suffix="fit",
+                source_column=requested_y_column,
+                multiple_columns=multiple_y_columns,
+            )
+            residual_sheet = (
+                self._batch_result_dataset_name(
+                    source_name=source_name,
+                    requested_name=dialog.residual_dataset_name(),
+                    current_dataset_name=current_dataset.name,
+                    default_suffix="residuals",
+                    source_column=requested_y_column,
+                    multiple_columns=multiple_y_columns,
+                )
+                if residual_needed
+                else ""
+            )
+            status = "ready"
+            error = ""
+            x_column = requested_x_column
+            y_column = requested_y_column
+            weight_column = requested_weight_column or ""
+            try:
+                source_dataset = self._workspace.get_dataset(source_name)
+                resolved_x = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_x_column,
+                    binding_mode=column_binding_mode,
+                    field_label="X",
+                )
+                resolved_y = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_y_column,
+                    binding_mode=column_binding_mode,
+                    field_label="Y",
+                )
+                self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_x_weight_column,
+                    binding_mode=column_binding_mode,
+                    field_label="X weight/sigma",
+                )
+                resolved_weight = self._resolve_batch_column(
+                    reference_dataset=current_dataset,
+                    target_dataset=source_dataset,
+                    source_column=requested_weight_column,
+                    binding_mode=column_binding_mode,
+                    field_label="Y weight/sigma",
+                )
+                x_column = resolved_x or ""
+                y_column = resolved_y or ""
+                weight_column = resolved_weight or ""
+                if not x_column or not y_column:
+                    raise MathOperationError("Choose X and at least one Y column.")
+            except Exception as exc:
+                status = "failed"
+                error = str(exc)
+            rows.append(
+                {
+                    "source_sheet": source_name,
+                    "status": status,
+                    "x_column": x_column,
+                    "y_column": y_column,
+                    "weight_column": weight_column,
+                    "fit_sheet": fit_sheet,
+                    "residual_sheet": residual_sheet,
+                    "column_binding": self._batch_column_binding_label(column_binding_mode),
+                    "error": error,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _fit_operation_comment(
+        x_column: str,
+        y_column: str,
+        model_name: str,
+        method: str,
+        x_weight_column: str | None,
+        weight_column: str | None,
+        weight_mode: str,
+        column_binding_mode: str,
+    ) -> str:
+        """Return a provenance comment for fit output datasets."""
+        comment = (
+            f"Curve fit: y={y_column}, x={x_column}, model={model_name}, "
+            f"method={FIT_METHODS.get(method, method)}, "
+            f"binding={MainWindow._batch_column_binding_label(column_binding_mode)}"
+        )
+        if x_weight_column or weight_column:
+            comment = (
+                f"{comment}, x_weight={x_weight_column or 'None'}, "
+                f"y_weight={weight_column or 'None'}, weight_mode={weight_mode}"
+            )
+        return comment
+
+    def _fit_batch_summary_row(
+        self,
+        requested_x_column: str,
+        x_column: str | None,
+        requested_y_column: str,
+        y_column: str | None,
+        requested_x_weight_column: str | None,
+        x_weight_column: str | None,
+        requested_weight_column: str | None,
+        weight_column: str | None,
+        column_binding_mode: str,
+        requested_fit_sheet: str,
+        output_fit_sheet: str,
+        requested_residual_sheet: str,
+        output_residual_sheet: str,
+        status: str,
+        error: str,
+        elapsed_seconds: float,
+        result: FitResult | None = None,
+        source_dataset: Dataset | None = None,
+        source_sheet: str = "",
+        dialog: FitDialog | None = None,
+    ) -> dict[str, object]:
+        """Return one curve-fit batch summary row."""
+        report = result.report if result is not None else None
+        method_key = report.method if report is not None else (dialog.method() if dialog is not None else "")
+        model_key = report.model_key if report is not None else (dialog.model_key() if dialog is not None else "")
+        row: dict[str, object] = {
+            "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
+            "operation": "Curve Fit",
+            "column_binding": self._batch_column_binding_label(column_binding_mode),
+            "requested_x_column": requested_x_column,
+            "x_column": x_column or "",
+            "requested_y_column": requested_y_column,
+            "y_column": y_column or "",
+            "requested_x_weight_column": requested_x_weight_column or "",
+            "x_weight_column": x_weight_column or "",
+            "requested_y_weight_column": requested_weight_column or "",
+            "y_weight_column": weight_column or "",
+            "weight_mode": report.weight_mode if report is not None else (dialog.weight_mode() if dialog else ""),
+            "absolute_sigma": report.absolute_sigma if report is not None else (dialog.absolute_sigma() if dialog else False),
+            "model_key": model_key,
+            "model_name": report.model_name if report is not None else model_key,
+            "method": method_key,
+            "method_label": FIT_METHODS.get(method_key, method_key),
+            "fit_points": dialog.fit_points() if dialog is not None else (len(result.fit_frame) if result is not None else 0),
+            "confidence_level": (
+                report.confidence_level
+                if report is not None
+                else (dialog.confidence_level() if dialog is not None and dialog.include_confidence_band() else 0.0)
+            ),
+            "requested_fit_sheet": requested_fit_sheet,
+            "output_fit_sheet": output_fit_sheet,
+            "requested_residual_sheet": requested_residual_sheet,
+            "output_residual_sheet": output_residual_sheet,
+            "status": status,
+            "error": error,
+            "elapsed_seconds": round(float(elapsed_seconds), 6),
+            "point_count": report.point_count if report is not None else 0,
+            "r_squared": report.r_squared if report is not None else np.nan,
+            "adjusted_r_squared": report.adjusted_r_squared if report is not None else np.nan,
+            "rmse": report.rmse if report is not None else np.nan,
+            "mae": report.mae if report is not None else np.nan,
+            "residual_mean": report.residual_mean if report is not None else np.nan,
+            "residual_std": report.residual_std if report is not None else np.nan,
+            "covariance_available": False,
+            "warnings": "",
+        }
+        if report is None:
+            return row
+
+        covariance = np.asarray(report.covariance, dtype=float)
+        row["covariance_available"] = bool(covariance.size and np.isfinite(covariance).any())
+        row["warnings"] = "; ".join(report.warnings)
+        for name, value, standard_error, lower, upper, fixed in zip(
+            report.parameter_names,
+            report.parameters,
+            report.standard_errors,
+            report.lower_bounds,
+            report.upper_bounds,
+            report.fixed_parameters,
+        ):
+            key = self._fit_summary_key(name)
+            row[f"param_{key}"] = value
+            row[f"stderr_{key}"] = standard_error
+            row[f"lower_{key}"] = lower
+            row[f"upper_{key}"] = upper
+            row[f"fixed_{key}"] = fixed
+        return row
+
+    def _fit_parameter_correlation_rows(
+        self,
+        source_dataset: Dataset,
+        result: FitResult,
+        requested_x_column: str,
+        x_column: str,
+        requested_y_column: str,
+        y_column: str,
+        column_binding_mode: str,
+        output_fit_sheet: str,
+    ) -> list[dict[str, object]]:
+        """Return long-format covariance/correlation rows for one fit report."""
+        report = result.report
+        parameter_names = list(report.parameter_names)
+        covariance = np.asarray(report.covariance, dtype=float)
+        if covariance.shape != (len(parameter_names), len(parameter_names)):
+            return []
+        if not np.isfinite(covariance).any():
+            return []
+
+        variances = np.diag(covariance)
+        rows: list[dict[str, object]] = []
+        for first_index, first_name in enumerate(parameter_names):
+            for second_index in range(first_index, len(parameter_names)):
+                second_name = parameter_names[second_index]
+                covariance_value = float(covariance[first_index, second_index])
+                first_variance = float(variances[first_index])
+                second_variance = float(variances[second_index])
+                correlation = np.nan
+                if (
+                    np.isfinite(covariance_value)
+                    and np.isfinite(first_variance)
+                    and np.isfinite(second_variance)
+                    and first_variance > 0
+                    and second_variance > 0
+                ):
+                    correlation = float(covariance_value / np.sqrt(first_variance * second_variance))
+
+                rows.append(
+                    {
+                        "source_sheet": source_dataset.name,
+                        "output_fit_sheet": output_fit_sheet,
+                        "model_key": report.model_key,
+                        "model_name": report.model_name,
+                        "method": report.method,
+                        "method_label": FIT_METHODS.get(report.method, report.method),
+                        "column_binding": self._batch_column_binding_label(column_binding_mode),
+                        "requested_x_column": requested_x_column,
+                        "x_column": x_column,
+                        "requested_y_column": requested_y_column,
+                        "y_column": y_column,
+                        "parameter_1": first_name,
+                        "parameter_2": second_name,
+                        "parameter_1_index": first_index,
+                        "parameter_2_index": second_index,
+                        "pair_type": "variance" if first_index == second_index else "cross",
+                        "covariance": covariance_value,
+                        "correlation": correlation,
+                    }
+                )
+        return rows
+
+    @staticmethod
+    def _fit_summary_key(parameter_name: str) -> str:
+        """Return a stable summary-column suffix for a fit parameter."""
+        clean = re.sub(r"\W+", "_", str(parameter_name).strip()).strip("_")
+        return clean or "parameter"
+
+    @staticmethod
+    def _fit_batch_status_message(
+        success_count: int,
+        failure_count: int,
+        summary_dataset_name: str,
+        parameter_correlation_dataset_name: str,
+        first_result: FitResult | None,
+        first_fit_dataset_name: str,
+    ) -> str:
+        """Return a concise curve-fit batch status message."""
+        if summary_dataset_name:
+            message = (
+                f"Curve Fit created {success_count} fit result(s), "
+                f"{failure_count} failed; summary saved as '{summary_dataset_name}'"
+            )
+            if parameter_correlation_dataset_name:
+                message = f"{message}; parameter correlations saved as '{parameter_correlation_dataset_name}'"
+            return message
+        if failure_count:
+            message = f"Curve Fit created {success_count} fit result(s), {failure_count} failed"
+            if parameter_correlation_dataset_name:
+                message = f"{message}; parameter correlations saved as '{parameter_correlation_dataset_name}'"
+            return message
+        if first_result is not None and first_fit_dataset_name:
+            message = f"Fit saved as '{first_fit_dataset_name}' with R^2={first_result.report.r_squared:.5g}"
+            if parameter_correlation_dataset_name:
+                message = f"{message}; parameter correlations saved as '{parameter_correlation_dataset_name}'"
+            return message
+        message = f"Curve Fit created {success_count} fit result(s)"
+        if parameter_correlation_dataset_name:
+            message = f"{message}; parameter correlations saved as '{parameter_correlation_dataset_name}'"
+        return message
 
     def _refresh_dataset_after_analysis(self, dataset: Dataset, selected_column: str) -> None:
         """Refresh editor and plot controls after an in-place analysis column edit."""
