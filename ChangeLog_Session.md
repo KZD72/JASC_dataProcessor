@@ -6,7 +6,7 @@
 
 ## 1. Project State
 - **Current Version**: 0.1.0
-- **Last Updated**: 2026-06-08
+- **Last Updated**: 2026-06-09
 - **Current Phase**: Competitive Stage 0 stabilization followed by Competitive Stage 1 dialog-based batch processing and Stage 3 import/connectors hardening; expanded statistics/interpolation and figure-digitizer verification remain pending.
 
 ## 2. Completed Tasks
@@ -31,9 +31,15 @@
 - [x] Promoted the Import From Figure magnifier from the Calibration tab into a shared canvas-side Precision Zoom panel with a Magnifier toolbar toggle, so the cursor-following zoom/readout is available during calibration, manual picking, manual uncertainty assignment, ROI brushing, color sampling, and symbol sampling.
 - [x] Added `ui/data_table.py` with a spreadsheet-like manual entry tab and DataFrame export.
 - [x] Added manual-entry clipboard support for `Ctrl+C`/`Ctrl+V` tabular data blocks.
+- [x] Made manual spreadsheet creation a direct Data-editor workflow: Workspace New Sheet, File > New Blank Sheet (`Ctrl+N`), and the toolbar now create a normal editable worksheet immediately in the central Data tab with default `x`/`y` columns and metadata roles. Added Data Editor Fill Range so users can generate X-style arithmetic sequences directly in saved worksheets.
 - [x] Wired imported and manual datasets into a workspace list and editable data editor.
 - [x] Added `ui/dataframe_model.py` for editing workspace DataFrames through a Qt table model.
+- [x] Compacted the Apply Formula dialog by moving the formula cheatsheet into a scrollable right-side Help panel, trimming fixed editor/list heights, and keeping the main controls in a shorter left-side column.
 - [x] Added selected-sheet export to CSV or tab-delimited TXT.
+- [x] Fixed log-scale plotting warnings by disabling Matplotlib constrained-layout engines in the Qt canvas render path and seeding positive X/Y/Right-Y view limits from plotted data before switching axes to log scale. Horizontal bars, histograms, distributions, and surface plots now contribute the correct data-space values for log-limit seeding.
+- [x] Completed a forensic stabilization pass: empty plot placeholders now reset to linear axes after log-scale views, startup initializes action/button enabled states immediately, Fill Range casts numeric target columns to float before arithmetic writes, FFT reports invalid windows and uneven/non-finite sample spacing as controlled `MathOperationError`s, and interpolation rejects unknown outside-range policies instead of silently falling through.
+- [x] Added categorical label plotting for bar-style charts and the first Pie/Donut plot implementation: text entered in an X/label column is preserved for vertical bars, horizontal bars, pie slices, and donut slices, while numeric label columns still behave as numeric positions. Pie/donut plots use one label column plus one positive numeric value column and render as single-series composition charts.
+- [x] Split the Plot Inspector series selector into Plot family and Subtype dropdowns so XY/categorical, distribution, composition, and 2D map plot types expose only their relevant subtype choices. Added an initial Voronoi Composition chart alongside pie/donut: it uses label/value columns, supports circular/rectangular/polygonal containers, and approximates value-proportional areas with a weighted grid Voronoi partition.
 - [x] Added selected-row deletion for imported and manually created workspace datasets.
 - [x] Added `core/operations.py` with a constrained Python-like expression evaluator for DataFrame columns.
 - [x] Added an Apply Formula dialog for writing expressions into new or existing columns.
@@ -277,7 +283,9 @@
 - [x] Hardened batch Statistics outputs: row-wise z-score/cumulative operations now write compact batch-summary metrics instead of stacking every row into the cumulative sheet, and metric/value outputs create a `{current}_statistics_batch_wide_summary` pivot sheet when useful.
 - [x] Strengthened batch Curve Fit report export: multi-job fit runs now create `{current}_fit_reports` with source sheet, Y column, output fit sheet, model, method, R2/RMSE, and the plain-text fit report for export/filtering.
 - [x] Reworked `Roadmap.md` and `Agent_Instructions.md` around the product decision to defer a formal recipe system. Batch hardening now prioritizes previews, cancel/progress, semantic role matching, workspace undo for in-place non-visible edits, background workers, and richer summaries inside the current operation dialogs.
-
+- [x] Created comprehensive user manual (`JASC_Manual.md`) covering all application features (UI layout, data ingestion, manual editing, column metadata, formulas, signal processing/calculus, interpolation, statistics, curve fitting, plotting, and batch processing).
+- [x] Developed a dynamic PDF compilation script (`generate_pdf_manual.py`) using `fpdf2` to build a beautifully formatted PDF user manual (`JASC_Manual.pdf`) with a cover page, logo integration, dynamic Table of Contents, headers/footers, tables, and alert callouts.
+- [x] Compiled the PDF manual warning-free and verified the output size (`60.6 KB`).
 
 ## 3. Active Bugs / Known Issues
 - [ ] General interpolation workbench is implemented but still needs compile/import, Qt dialog, numerical smoke, and manual GUI tests once a usable Python/Qt runtime is available.
@@ -314,7 +322,7 @@
 13. Manually smoke-test Analysis > Interpolation: 1D generated ranges with all methods and outside policies, 2D generated grids with linear/cubic/piecewise/RBF methods, N-D existing-column and manual query modes, duplicate source-coordinate averaging, generated-grid cap warnings, metadata propagation, and project save/load.
 14. Manually smoke-test Phase 2A plot types on real datasets: Line, Scatter, Line + Markers, Errorbar, Vertical Bar, Horizontal Bar, Area, Histogram, Box Plot, and Violin Plot, including saved plot save/load and invalid column selections.
 15. Continue Competitive Stage 2 metadata/workbook work where it improves batch column matching, source tracking, project organization, and notes/report storage.
-16. Begin plot-type expansion Phase 4 after the first batch workflow is usable: pie and donut charts with label/value column roles, percentage controls, exploded slice controls, and saved-state persistence.
+16. Harden plot-type expansion Phase 4: family/subtype selection, pie/donut label/value charts, and Voronoi Composition now have initial implementations, but still need explicit percentage controls, exploded slice controls, label-density/legend controls, Voronoi geometry controls, metadata role hints, and manual save/load smoke tests.
 17. Start the next advanced-statistics layer after batch statistics exists: two-way/repeated-measures ANOVA design inputs, ANCOVA planning, clustering result datasets, logistic/ROC workflows, and richer statistical advisor/reporting outputs.
 18. Manually smoke-test interpolated 2D maps on irregular X/Y/Z datasets: heatmap, contour, filled contour, linear interpolation, cubic spline interpolation, piecewise cubic interpolation, saved plot save/load, dataset rename, and X/Y locator prediction of Z values.
 19. Continue the interpolated 2D-map follow-ups: regular-grid heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, and contour-level controls.

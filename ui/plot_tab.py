@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.workspace import Dataset, Workspace
-from models.plot_types import PLOT_TYPES, plot_type_label
+from models.plot_types import plot_type_label
 from ui.plot_canvas import SCIENCEPLOTS_AVAILABLE, LocatedPoint, PlotCanvas, PlotLocator, PlotSeries
 
 _LINE_LABELS: dict[str, str] = {
@@ -58,6 +58,27 @@ _SCIENCEPLOTS_STYLE_NAMES = {
     "science", "ieee", "nature", "notebook", "bright", "high-vis", "no-latex",
 }
 _SURFACE_PLOT_TYPES = {"heatmap", "contour", "contourf"}
+_PIE_PLOT_TYPES = {"pie", "donut"}
+_VORONOI_PLOT_TYPES = {"voronoi"}
+_COMPOSITION_PLOT_TYPES = _PIE_PLOT_TYPES | _VORONOI_PLOT_TYPES
+_PLOT_FAMILIES: list[tuple[str, str, tuple[str, ...]]] = [
+    ("xy", "XY / Categorical", ("line", "scatter", "line_marker", "errorbar", "bar", "barh", "area")),
+    ("distribution", "Distribution", ("histogram", "box", "violin")),
+    ("composition", "Composition", ("pie", "donut", "voronoi")),
+    ("surface", "2D Maps", ("heatmap", "contour", "contourf")),
+]
+_PLOT_FAMILY_TYPES = {key: plot_types for key, _label, plot_types in _PLOT_FAMILIES}
+_PLOT_TYPE_TO_FAMILY = {
+    plot_type: family_key
+    for family_key, _label, plot_types in _PLOT_FAMILIES
+    for plot_type in plot_types
+}
+_VORONOI_SHAPES: list[tuple[str, str]] = [
+    ("Circular", "circle"),
+    ("Rectangular", "rectangle"),
+    ("Polygonal", "polygon"),
+]
+_VORONOI_SHAPE_LABELS = {data: label for label, data in _VORONOI_SHAPES}
 _INTERPOLATION_LABELS: dict[str, str] = {
     "linear": "Linear",
     "cubic_spline": "Cubic spline",
@@ -445,9 +466,12 @@ class PlotTab(QWidget):
         self._z_dataset_combo = QComboBox()
         self._z_column_combo = QComboBox()
 
+        self._plot_family_combo = QComboBox()
+        for family_key, family_label, _plot_types in _PLOT_FAMILIES:
+            self._plot_family_combo.addItem(family_label, family_key)
+
         self._plot_type_combo = QComboBox()
-        for plot_type in PLOT_TYPES.values():
-            self._plot_type_combo.addItem(plot_type.label, plot_type.key)
+        self._refresh_plot_type_combo("line")
 
         self._y_axis_combo = QComboBox()
         self._y_axis_combo.addItem("Left", "left")
@@ -517,6 +541,10 @@ class PlotTab(QWidget):
         self._surface_resolution_spin = QSpinBox()
         self._surface_resolution_spin.setRange(10, 500)
         self._surface_resolution_spin.setValue(120)
+
+        self._voronoi_shape_combo = QComboBox()
+        for label, data in _VORONOI_SHAPES:
+            self._voronoi_shape_combo.addItem(label, data)
 
         self._title_edit = QLineEdit()
         self._x_label_edit = QLineEdit()
@@ -645,7 +673,9 @@ class PlotTab(QWidget):
         self._histogram_options_panel = self._build_histogram_options_panel()
         self._distribution_options_panel = self._build_distribution_options_panel()
         self._surface_options_panel = self._build_surface_options_panel()
-        self._add_series_row(sf, "plot_type", "Plot type", self._plot_type_combo)
+        self._voronoi_options_panel = self._build_voronoi_options_panel()
+        self._add_series_row(sf, "plot_family", "Plot family", self._plot_family_combo)
+        self._add_series_row(sf, "plot_type", "Subtype", self._plot_type_combo)
         self._add_series_row(sf, "x_dataset", "X dataset", self._x_dataset_combo)
         self._add_series_row(sf, "x_column", "X column", self._x_column_combo)
         self._add_series_row(sf, "x_error", "X error", self._x_err_column_combo)
@@ -667,6 +697,7 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "histogram_options", None, self._histogram_options_panel)
         self._add_series_row(sf, "distribution_options", None, self._distribution_options_panel)
         self._add_series_row(sf, "surface_options", None, self._surface_options_panel)
+        self._add_series_row(sf, "voronoi_options", None, self._voronoi_options_panel)
         sb = QHBoxLayout()
         sb.addWidget(add_btn); sb.addWidget(update_btn); sb.addWidget(rm_btn); sb.addWidget(clr_btn)
         sf.addRow(sb)
@@ -786,6 +817,7 @@ class PlotTab(QWidget):
         self._z_dataset_combo.currentTextChanged.connect(
             lambda: self._update_column_combo(self._z_dataset_combo, self._z_column_combo, ("z",))
         )
+        self._plot_family_combo.currentIndexChanged.connect(self._handle_plot_family_changed)
         self._plot_type_combo.currentIndexChanged.connect(self._apply_plot_type_defaults)
         self._style_preset_combo.currentIndexChanged.connect(self._render_plot_if_possible)
         self._style_cycle_combo.currentIndexChanged.connect(self._render_plot_if_possible)
@@ -867,6 +899,16 @@ class PlotTab(QWidget):
         layout.addStretch(1)
         return panel
 
+    def _build_voronoi_options_panel(self) -> QWidget:
+        """Return Voronoi composition controls."""
+        panel = QWidget()
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Container"))
+        layout.addWidget(self._voronoi_shape_combo)
+        layout.addStretch(1)
+        return panel
+
     def _add_series_row(
         self,
         form: QFormLayout,
@@ -886,6 +928,7 @@ class PlotTab(QWidget):
     def _connect_axis_label_prefill_signals(self) -> None:
         """Refresh axis-label suggestions when series controls change."""
         for combo in (
+            self._plot_family_combo,
             self._plot_type_combo,
             self._x_dataset_combo,
             self._x_column_combo,
@@ -907,6 +950,31 @@ class PlotTab(QWidget):
         self._distribution_columns_list.itemSelectionChanged.connect(
             self._prefill_axis_labels_from_plot_context
         )
+
+    def _refresh_plot_type_combo(self, preferred: str | None = None) -> None:
+        """Populate the subtype selector with plot types from the selected family."""
+        family_key = str(self._plot_family_combo.currentData() or "xy")
+        plot_types = _PLOT_FAMILY_TYPES.get(family_key, _PLOT_FAMILY_TYPES["xy"])
+        selected = preferred or str(self._plot_type_combo.currentData() or "")
+        if selected not in plot_types:
+            selected = plot_types[0]
+
+        self._plot_type_combo.blockSignals(True)
+        self._plot_type_combo.clear()
+        for plot_type_key in plot_types:
+            self._plot_type_combo.addItem(plot_type_label(plot_type_key), plot_type_key)
+        index = self._plot_type_combo.findData(selected)
+        if index >= 0:
+            self._plot_type_combo.setCurrentIndex(index)
+        self._plot_type_combo.blockSignals(False)
+
+    def _handle_plot_family_changed(self, _index: int = 0) -> None:
+        """Refresh subtype choices after changing the plot family."""
+        current_type = str(self._plot_type_combo.currentData() or "")
+        self._refresh_plot_type_combo(current_type)
+        self._apply_plot_type_defaults()
+        self._prefill_axis_labels_from_plot_context()
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
 
     def _update_column_combo(
         self,
@@ -1030,7 +1098,8 @@ class PlotTab(QWidget):
         self._remove_series_button.setEnabled(bool(self._series_list.selectedItems()))
         self._clear_series_button.setEnabled(bool(self._plot_series))
         self._render_button.setEnabled(bool(self._plot_series))
-        self._add_locator_button.setEnabled(bool(self._plot_series))
+        locator_compatible = any(series.plot_type not in _COMPOSITION_PLOT_TYPES for series in self._plot_series)
+        self._add_locator_button.setEnabled(locator_compatible)
         self._remove_locator_button.setEnabled(bool(self._locator_list.selectedItems()))
         self._clear_locators_button.setEnabled(bool(self._plot_locators))
 
@@ -1090,6 +1159,9 @@ class PlotTab(QWidget):
         clean_state["z_column"] = str(clean_state.get("z_column", "") or "")
         clean_state["interpolation_method"] = str(
             clean_state.get("interpolation_method", "linear") or "linear"
+        )
+        clean_state["voronoi_shape"] = self._normalized_voronoi_shape(
+            str(clean_state.get("voronoi_shape", "circle") or "circle")
         )
         try:
             clean_state["grid_resolution"] = int(clean_state.get("grid_resolution", 120))
@@ -1217,7 +1289,7 @@ class PlotTab(QWidget):
             marker=str(self._marker_combo.currentData() or ""),
             y_axis=(
                 "left"
-                if plot_type in ({"box", "violin"} | _SURFACE_PLOT_TYPES)
+                if plot_type in ({"box", "violin"} | _SURFACE_PLOT_TYPES | _COMPOSITION_PLOT_TYPES)
                 else str(self._y_axis_combo.currentData() or "left")
             ),
             custom_label=self._series_label_edit.text().strip(),
@@ -1234,6 +1306,7 @@ class PlotTab(QWidget):
             distribution_show_outliers=self._distribution_outliers_checkbox.isChecked(),
             interpolation_method=str(self._interpolation_method_combo.currentData() or "linear"),
             grid_resolution=self._surface_resolution_spin.value(),
+            voronoi_shape=str(self._voronoi_shape_combo.currentData() or "circle"),
         )
 
     def _update_selected_series(self) -> None:
@@ -1281,6 +1354,9 @@ class PlotTab(QWidget):
         self._set_distribution_column_selection(
             list(series.distribution_columns) or ([series.y_column] if series.plot_type in {"box", "violin"} else [])
         )
+        family_key = _PLOT_TYPE_TO_FAMILY.get(series.plot_type, "xy")
+        self._set_combo_data(self._plot_family_combo, family_key)
+        self._refresh_plot_type_combo(series.plot_type)
         self._set_combo_data(self._plot_type_combo, series.plot_type)
         self._set_combo_data(self._y_axis_combo, series.y_axis)
         self._series_label_edit.setText(series.custom_label)
@@ -1299,6 +1375,10 @@ class PlotTab(QWidget):
         self._distribution_outliers_checkbox.setChecked(series.distribution_show_outliers)
         self._set_combo_data(self._interpolation_method_combo, series.interpolation_method)
         self._surface_resolution_spin.setValue(series.grid_resolution)
+        self._set_combo_data(
+            self._voronoi_shape_combo,
+            self._normalized_voronoi_shape(series.voronoi_shape),
+        )
         self._update_plot_type_option_visibility()
 
     def _selected_distribution_columns(self) -> list[str]:
@@ -1322,6 +1402,16 @@ class PlotTab(QWidget):
         if index >= 0:
             combo.setCurrentIndex(index)
 
+    @staticmethod
+    def _normalized_voronoi_shape(shape: str) -> str:
+        """Return the UI-supported Voronoi container shape key."""
+        key = str(shape or "circle").strip().lower()
+        if key in {"rect", "rectangle", "rectangular"}:
+            return "rectangle"
+        if key in {"polygon", "polygonal", "poly", "hexagon", "hexagonal"}:
+            return "polygon"
+        return "circle"
+
     def _apply_plot_type_defaults(self) -> None:
         """Apply practical line/marker defaults when the user changes plot type."""
         plot_type = str(self._plot_type_combo.currentData() or "line")
@@ -1335,7 +1425,7 @@ class PlotTab(QWidget):
         elif plot_type == "errorbar":
             self._set_combo_data(self._line_style_combo, "-")
             self._set_combo_data(self._marker_combo, "o")
-        elif plot_type in {"bar", "barh"}:
+        elif plot_type in ({"bar", "barh"} | _COMPOSITION_PLOT_TYPES):
             self._set_combo_data(self._line_style_combo, "")
             self._set_combo_data(self._marker_combo, "")
         elif plot_type == "area":
@@ -1359,7 +1449,15 @@ class PlotTab(QWidget):
     def _update_plot_type_option_visibility(self) -> None:
         """Show only the option rows relevant to the selected plot type."""
         plot_type = str(self._plot_type_combo.currentData() or "line")
-        x_y_types = {"line", "scatter", "line_marker", "errorbar", "bar", "barh", "area"}
+        x_y_types = {
+            "line",
+            "scatter",
+            "line_marker",
+            "errorbar",
+            "bar",
+            "barh",
+            "area",
+        } | _COMPOSITION_PLOT_TYPES
         line_types = {"line", "line_marker", "errorbar", "area"}
         marker_types = {"scatter", "line_marker", "errorbar"}
         distribution_types = {"box", "violin"}
@@ -1383,6 +1481,7 @@ class PlotTab(QWidget):
         self._set_series_row_visible("histogram_options", plot_type == "histogram")
         self._set_series_row_visible("distribution_options", plot_type in distribution_types)
         self._set_series_row_visible("surface_options", plot_type in _SURFACE_PLOT_TYPES)
+        self._set_series_row_visible("voronoi_options", plot_type == "voronoi")
 
         if plot_type == "histogram":
             self._set_series_row_label("y_dataset", "Value dataset")
@@ -1398,8 +1497,18 @@ class PlotTab(QWidget):
             self._set_series_row_label("z_dataset", "Z dataset")
             self._set_series_row_label("z_column", "Z value")
         elif plot_type == "barh":
-            self._set_series_row_label("x_dataset", "Position dataset")
-            self._set_series_row_label("x_column", "Position column")
+            self._set_series_row_label("x_dataset", "Label/position dataset")
+            self._set_series_row_label("x_column", "Label/position column")
+            self._set_series_row_label("y_dataset", "Value dataset")
+            self._set_series_row_label("y_column", "Value column")
+        elif plot_type == "bar":
+            self._set_series_row_label("x_dataset", "X/label dataset")
+            self._set_series_row_label("x_column", "X/label column")
+            self._set_series_row_label("y_dataset", "Y/value dataset")
+            self._set_series_row_label("y_column", "Y/value column")
+        elif plot_type in _COMPOSITION_PLOT_TYPES:
+            self._set_series_row_label("x_dataset", "Label dataset")
+            self._set_series_row_label("x_column", "Label column")
             self._set_series_row_label("y_dataset", "Value dataset")
             self._set_series_row_label("y_column", "Value column")
         else:
@@ -1578,6 +1687,9 @@ class PlotTab(QWidget):
         elif series.plot_type in _SURFACE_PLOT_TYPES:
             x_label = self._column_axis_label(series.x_dataset, series.x_column)
             y_label = self._column_axis_label(series.y_dataset, series.y_column)
+        elif series.plot_type in _COMPOSITION_PLOT_TYPES:
+            x_label = self._column_axis_label(series.x_dataset, series.x_column)
+            y_label = self._column_axis_label(series.y_dataset, series.y_column)
         elif series.plot_type == "barh":
             x_label = self._column_axis_label(series.y_dataset, series.y_column)
             y_label = self._column_axis_label(series.x_dataset, series.x_column)
@@ -1666,12 +1778,19 @@ class PlotTab(QWidget):
             elif s0.plot_type in _SURFACE_PLOT_TYPES:
                 x_label = x_label or self._column_axis_label(s0.x_dataset, s0.x_column)
                 y_label = y_label or self._column_axis_label(s0.y_dataset, s0.y_column)
+            elif s0.plot_type in _COMPOSITION_PLOT_TYPES:
+                x_label = x_label or self._column_axis_label(s0.x_dataset, s0.x_column)
+                y_label = y_label or self._column_axis_label(s0.y_dataset, s0.y_column)
             elif s0.plot_type == "barh":
                 x_label = x_label or self._column_axis_label(s0.y_dataset, s0.y_column)
                 y_label = y_label or self._column_axis_label(s0.x_dataset, s0.x_column)
             else:
                 x_label = x_label or self._column_axis_label(s0.x_dataset, s0.x_column)
-            non_y_axis_types = {"histogram", "barh", "box", "violin"} | _SURFACE_PLOT_TYPES
+            non_y_axis_types = (
+                {"histogram", "barh", "box", "violin"}
+                | _SURFACE_PLOT_TYPES
+                | _COMPOSITION_PLOT_TYPES
+            )
             if s0.plot_type in non_y_axis_types:
                 pass
             elif s0.y_axis == "right":
@@ -1748,6 +1867,14 @@ class PlotTab(QWidget):
                 _INTERPOLATION_LABELS.get(series.interpolation_method, series.interpolation_method),
                 f"{series.grid_resolution} grid",
             ])
+        elif series.plot_type in _COMPOSITION_PLOT_TYPES:
+            bits.extend([
+                f"labels: {series.x_column}",
+                f"values: {series.y_column}",
+            ])
+            if series.plot_type == "voronoi":
+                shape = _VORONOI_SHAPE_LABELS.get(series.voronoi_shape, series.voronoi_shape)
+                bits.append(f"{shape} container")
         else:
             bits.extend([
                 _LINE_LABELS.get(series.line_style, series.line_style or "None"),

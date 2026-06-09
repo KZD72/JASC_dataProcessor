@@ -97,6 +97,8 @@ def interpolate_dataset(
         raise MathOperationError("Choose at least one coordinate column.")
     if not clean_value.strip():
         raise MathOperationError("Choose a value column to interpolate.")
+    if fill_policy not in FILL_POLICIES:
+        raise MathOperationError(f"Unknown interpolation outside-range policy: {fill_policy}")
     if clean_value in clean_coordinates:
         raise MathOperationError("The value column must be different from the coordinate columns.")
     if len(set(clean_coordinates)) != len(clean_coordinates):

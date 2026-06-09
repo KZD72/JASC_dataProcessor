@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGraphicsEllipseItem,
     QGraphicsLineItem,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QSpinBox,
     QStackedWidget,
@@ -2929,7 +2931,8 @@ class ColumnExpressionDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Apply Formula")
         self.setModal(True)
-        self.setMinimumWidth(560)
+        self.setMinimumSize(900, 520)
+        self.resize(980, 560)
         self._column_formulas = column_formulas or {}
         self._current_dataset_name = current_dataset_name
         self._last_loaded_formula = ""
@@ -2965,7 +2968,7 @@ class ColumnExpressionDialog(QDialog):
         self._column_binding_combo = batch_column_binding_combo()
 
         self._expression_edit = QPlainTextEdit()
-        self._expression_edit.setFixedHeight(90)
+        self._expression_edit.setFixedHeight(80)
         self._expression_edit.setPlaceholderText(
             'Examples: col1 + col2, x + y, sin(x), sqrt(col("Voltage"))'
         )
@@ -2986,11 +2989,14 @@ class ColumnExpressionDialog(QDialog):
         self._formula_hint = QLabel()
         self._formula_hint.setWordWrap(True)
         self._formula_hint.setTextFormat(Qt.RichText)
+        self._formula_hint.setMaximumHeight(54)
 
         self._cheatsheet = QLabel(self._build_cheatsheet(column_names))
         self._cheatsheet.setWordWrap(True)
         self._cheatsheet.setTextFormat(Qt.RichText)
         self._cheatsheet.setOpenExternalLinks(False)
+        self._cheatsheet.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._cheatsheet.setMargin(8)
 
         self._selected_rows_checkbox = QCheckBox("Apply only to selected rows")
         self._selected_rows_checkbox.setEnabled(selected_rows_available)
@@ -2998,7 +3004,8 @@ class ColumnExpressionDialog(QDialog):
 
         self._dataset_list = QListWidget()
         self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
-        self._dataset_list.setMinimumHeight(110)
+        self._dataset_list.setMinimumHeight(72)
+        self._dataset_list.setMaximumHeight(105)
         for dataset_name in dataset_names or [current_dataset_name]:
             if not dataset_name:
                 continue
@@ -3013,6 +3020,7 @@ class ColumnExpressionDialog(QDialog):
             "Position matching treats source columns as col1, col2, ... on every target sheet."
         )
         self._batch_hint.setWordWrap(True)
+        self._batch_hint.setMaximumHeight(58)
 
         form = QFormLayout()
         form.addRow("Target column", self._target_combo)
@@ -3031,9 +3039,29 @@ class ColumnExpressionDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
+        controls_panel = QWidget()
+        controls_layout = QVBoxLayout(controls_panel)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.addLayout(form)
+        controls_layout.addStretch(1)
+
+        help_scroll = QScrollArea()
+        help_scroll.setWidgetResizable(True)
+        help_scroll.setFrameShape(QFrame.NoFrame)
+        help_scroll.setWidget(self._cheatsheet)
+
+        help_group = QGroupBox("Help")
+        help_group.setMinimumWidth(300)
+        help_group.setMaximumWidth(380)
+        help_layout = QVBoxLayout(help_group)
+        help_layout.addWidget(help_scroll)
+
+        body = QHBoxLayout()
+        body.addWidget(controls_panel, 3)
+        body.addWidget(help_group, 2)
+
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(self._cheatsheet)
+        layout.addLayout(body, 1)
         layout.addWidget(buttons)
 
         self._target_combo.currentTextChanged.connect(self._load_formula_for_target)

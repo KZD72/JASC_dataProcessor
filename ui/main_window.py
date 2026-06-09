@@ -90,7 +90,7 @@ from math_engine.statistics import (
     run_multicolumn_statistical_analysis,
     run_statistical_analysis,
 )
-from ui.data_table import DataTableWidget
+from ui.data_table import RangeFillDialog
 from ui.dataframe_model import DataFrameTableModel
 from ui.dialogs import (
     BATCH_COLUMN_BINDING_NAME,
@@ -159,12 +159,10 @@ class MainWindow(QMainWindow):
 
         # Plot state moved to PlotTab
 
-        self._manual_table = DataTableWidget()
-        self._manual_table.dataset_submitted.connect(self._add_manual_dataset)
-
         self._tabs = QTabWidget()
         self._tabs.currentChanged.connect(self._sync_inspector_to_current_tab)
-        self._tabs.addTab(self._build_dataset_editor(), "Data")
+        self._data_tab_widget = self._build_dataset_editor()
+        self._tabs.addTab(self._data_tab_widget, "Data")
         self._plot_tab_widget = PlotTab(self._workspace, parent=self, external_options=True)
         self._plot_tab_widget.status_message.connect(self.statusBar().showMessage)
         self._plot_tab_widget.plot_rendered.connect(self._update_plot_action_state)
@@ -180,6 +178,7 @@ class MainWindow(QMainWindow):
         self._create_actions()
         self._apply_visual_style()
         self._sync_inspector_to_current_tab()
+        self._update_dataset_summary()
         self.statusBar().showMessage("Ready")
 
     def _build_workspace_dock(self) -> None:
@@ -196,14 +195,16 @@ class MainWindow(QMainWindow):
         dataset_layout = QVBoxLayout(dataset_page)
         dataset_layout.addWidget(self._dataset_list)
         self._dataset_buttons_panel = QWidget()
-        dataset_buttons = QHBoxLayout(self._dataset_buttons_panel)
+        dataset_buttons = QVBoxLayout(self._dataset_buttons_panel)
         dataset_buttons.setContentsMargins(0, 0, 0, 0)
+        self._new_dataset_button = QPushButton("New Sheet")
+        self._new_dataset_button.clicked.connect(self._create_blank_sheet)
         self._rename_dataset_button = QPushButton("Rename")
         self._rename_dataset_button.clicked.connect(self._rename_current_dataset)
         self._remove_dataset_button = QPushButton("Remove")
         self._remove_dataset_button.clicked.connect(self._delete_current_dataset)
-        dataset_buttons.addWidget(self._rename_dataset_button)
-        dataset_buttons.addWidget(self._remove_dataset_button)
+        dataset_buttons.addWidget(self._new_dataset_button)
+        dataset_buttons.addLayout(self._button_row(self._rename_dataset_button, self._remove_dataset_button))
         dataset_layout.addWidget(self._dataset_buttons_panel)
 
         plot_page = QWidget()
@@ -234,11 +235,10 @@ class MainWindow(QMainWindow):
         self._inspector_dock = dock
 
     def _build_data_inspector(self) -> QWidget:
-        """Build the Data-mode inspector with sheet actions, analysis, and manual entry."""
+        """Build the Data-mode inspector with sheet editing and analysis actions."""
         inspector_tabs = QTabWidget()
         inspector_tabs.addTab(self._build_sheet_actions_panel(), "Sheet")
         inspector_tabs.addTab(self._build_analysis_actions_panel(), "Analysis")
-        inspector_tabs.addTab(self._manual_table, "Manual Entry")
         return inspector_tabs
 
     def _build_sheet_actions_panel(self) -> QWidget:
@@ -264,6 +264,8 @@ class MainWindow(QMainWindow):
         self._editor_remove_button.clicked.connect(self._delete_current_dataset)
         self._editor_export_button = QPushButton("Export")
         self._editor_export_button.clicked.connect(self._export_current_dataset)
+        self._editor_fill_range_button = QPushButton("Fill Range")
+        self._editor_fill_range_button.clicked.connect(self._fill_dataset_range)
         self._editor_metadata_button = QPushButton("Column Metadata")
         self._editor_metadata_button.clicked.connect(self._edit_column_metadata)
 
@@ -273,7 +275,8 @@ class MainWindow(QMainWindow):
         layout.addLayout(self._button_row(self._editor_delete_rows_button, self._editor_delete_columns_button))
         layout.addLayout(self._button_row(self._editor_add_column_button, self._editor_insert_column_button))
         layout.addLayout(self._button_row(self._editor_rename_button, self._editor_remove_button))
-        layout.addLayout(self._button_row(self._editor_export_button, self._editor_metadata_button))
+        layout.addLayout(self._button_row(self._editor_fill_range_button, self._editor_metadata_button))
+        layout.addWidget(self._editor_export_button)
         layout.addStretch(1)
         return panel
 
@@ -366,6 +369,86 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._dataset_table)
         return editor
 
+    def _create_blank_sheet(self) -> None:
+        """Create a normal editable blank worksheet in the Data tab."""
+        frame = pd.DataFrame(
+            {
+                "x": pd.Series([float("nan")] * 25, dtype="float64"),
+                "y": pd.Series([float("nan")] * 25, dtype="float64"),
+            }
+        )
+        try:
+            dataset = self._workspace.add_dataset("Sheet", frame)
+        except Exception as exc:
+            QMessageBox.critical(self, "New Sheet Failed", str(exc))
+            return
+
+        dataset.metadata_for_column("x").role = "x"
+        dataset.metadata_for_column("x").comment = "Default X column for a blank worksheet."
+        dataset.metadata_for_column("y").role = "y"
+        dataset.metadata_for_column("y").comment = "Default Y column for a blank worksheet."
+
+        self._tabs.setCurrentWidget(self._data_tab_widget)
+        self._workspace_dock.setVisible(True)
+        self._set_workspace_section_visible(True)
+        self._inspector_dock.setVisible(True)
+        self._sync_plot_options_action(True)
+        self._sync_inspector_to_current_tab()
+        self._refresh_dataset_list(dataset.name)
+        self._select_dataset_range(0, 0, min(25, len(dataset.frame)), min(2, len(dataset.frame.columns)))
+        self.statusBar().showMessage(f"Created blank sheet {dataset.name}")
+
+    def _fill_dataset_range(self) -> None:
+        """Fill or create a dataset column with an arithmetic sequence."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(self, "Fill Range", "Select a dataset before filling a range.")
+            return
+
+        selected_columns = self._selected_dataset_columns()
+        selected_rows = self._selected_dataset_rows()
+        default_column = "x"
+        if selected_columns:
+            default_column = str(dataset.frame.columns[selected_columns[0]])
+        elif "x" in dataset.frame.columns:
+            default_column = "x"
+        elif len(dataset.frame.columns) > 0:
+            default_column = str(dataset.frame.columns[0])
+
+        default_start_row = selected_rows[0] + 1 if selected_rows else 1
+        default_count = len(selected_rows) if selected_rows else max(len(dataset.frame), 25)
+        dialog = RangeFillDialog(
+            column_names=[str(column) for column in dataset.frame.columns],
+            default_column=default_column,
+            default_start_row=default_start_row,
+            default_count=default_count,
+            parent=self,
+        )
+        if dialog.exec() != RangeFillDialog.Accepted:
+            return
+
+        try:
+            column_name = self._dataset_model.fill_range(
+                target_column=dialog.target_column(),
+                start_row=dialog.start_row(),
+                count=dialog.count(),
+                start_value=dialog.start_value(),
+                step=dialog.step(),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Fill Range Failed", str(exc))
+            return
+
+        if column_name.lower() in {"x", "time", "t"}:
+            dataset.metadata_for_column(column_name).role = "x"
+        dataset.prune_column_metadata()
+        self._resize_dataset_columns_to_contents(dataset)
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self._update_dataset_summary()
+        column_index = list(dataset.frame.columns).index(column_name)
+        self._select_dataset_range(dialog.start_row() - 1, column_index, dialog.count(), 1)
+        self.statusBar().showMessage(f"Filled {dialog.count()} value(s) in {dataset.name}.{column_name}")
+
     def _create_actions(self) -> None:
         """Create menus, toolbar actions, and long-lived action references."""
         file_menu = self.menuBar().addMenu("&File")
@@ -381,6 +464,12 @@ class MainWindow(QMainWindow):
         save_project_as_action = file_menu.addAction("Save Project &As...")
         save_project_as_action.setShortcut("Ctrl+Shift+S")
         save_project_as_action.triggered.connect(self._save_project_as)
+
+        file_menu.addSeparator()
+
+        new_sheet_action = file_menu.addAction("New &Blank Sheet")
+        new_sheet_action.setShortcut("Ctrl+N")
+        new_sheet_action.triggered.connect(self._create_blank_sheet)
 
         file_menu.addSeparator()
 
@@ -468,6 +557,11 @@ class MainWindow(QMainWindow):
 
         data_menu.addSeparator()
 
+        fill_range_action = data_menu.addAction("&Fill Range...")
+        fill_range_action.triggered.connect(self._fill_dataset_range)
+
+        data_menu.addSeparator()
+
         column_metadata_action = data_menu.addAction("Column &Metadata...")
         column_metadata_action.triggered.connect(self._edit_column_metadata)
 
@@ -523,6 +617,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(save_project_as_action)
         toolbar.addAction(close_project_action)
         toolbar.addSeparator()
+        toolbar.addAction(new_sheet_action)
         toolbar.addAction(import_action)
         toolbar.addAction(import_figure_action)
         toolbar.addAction(export_action)
@@ -531,6 +626,7 @@ class MainWindow(QMainWindow):
         self._export_action = export_action
         self._save_project_action = save_project_action
         self._save_project_as_action = save_project_as_action
+        self._new_sheet_action = new_sheet_action
         self._undo_action = undo_action
         self._redo_action = redo_action
         self._delete_rows_action = delete_rows_action
@@ -539,6 +635,7 @@ class MainWindow(QMainWindow):
         self._delete_dataset_action = delete_dataset_action
         self._add_column_action = add_column_action
         self._insert_column_action = insert_column_action
+        self._fill_range_action = fill_range_action
         self._column_metadata_action = column_metadata_action
         self._apply_formula_action = apply_formula_action
         self._import_figure_action = import_figure_action
@@ -934,31 +1031,6 @@ class MainWindow(QMainWindow):
         self._refresh_dataset_list(dataset.name)
         self.statusBar().showMessage(
             f"Imported {dataset.name} from figure: {len(dataset.frame)} extracted point(s)"
-        )
-
-    def _add_manual_dataset(self, name: str, frame: object) -> None:
-        """Add a manually-entered DataFrame to the workspace."""
-        if not isinstance(frame, pd.DataFrame):
-            QMessageBox.critical(self, "Manual Entry Error", "Manual entry did not produce a DataFrame.")
-            return
-
-        if not self._confirm_large_dataset(
-            frame,
-            title="Large Manual Dataset",
-            source_label=name,
-        ):
-            self.statusBar().showMessage("Manual dataset cancelled")
-            return
-
-        try:
-            dataset = self._workspace.add_dataset(name, frame)
-        except Exception as exc:
-            QMessageBox.critical(self, "Manual Entry Error", str(exc))
-            return
-
-        self._refresh_dataset_list(dataset.name)
-        self.statusBar().showMessage(
-            f"Saved {dataset.name}: {len(dataset.frame)} rows, {len(dataset.frame.columns)} columns"
         )
 
     def _parse_optional_float(self, text: str, label: str) -> tuple[float | None, list[str]]:
@@ -7041,6 +7113,7 @@ class MainWindow(QMainWindow):
         self._add_column_action.setEnabled(has_dataset)
         self._add_row_action.setEnabled(has_dataset)
         self._insert_column_action.setEnabled(has_dataset)
+        self._fill_range_action.setEnabled(has_dataset)
         self._column_metadata_action.setEnabled(has_dataset)
         self._insert_row_action.setEnabled(has_dataset)
         self._apply_formula_action.setEnabled(has_dataset)
@@ -7062,6 +7135,7 @@ class MainWindow(QMainWindow):
         self._editor_rename_button.setEnabled(has_dataset)
         self._editor_remove_button.setEnabled(has_dataset)
         self._editor_export_button.setEnabled(has_dataset)
+        self._editor_fill_range_button.setEnabled(has_dataset)
         self._editor_metadata_button.setEnabled(has_dataset)
         for button in getattr(self, "_analysis_buttons", []):
             button.setEnabled(has_dataset)

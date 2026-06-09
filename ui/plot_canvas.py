@@ -10,6 +10,7 @@ import pandas as pd
 from matplotlib import style as mpl_style
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from matplotlib.path import Path as MplPath
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
 
@@ -23,6 +24,10 @@ except ImportError:
 
 
 _SURFACE_PLOT_TYPES = {"heatmap", "contour", "contourf"}
+_PIE_PLOT_TYPES = {"pie", "donut"}
+_VORONOI_PLOT_TYPES = {"voronoi"}
+_COMPOSITION_PLOT_TYPES = _PIE_PLOT_TYPES | _VORONOI_PLOT_TYPES
+_CATEGORICAL_X_PLOT_TYPES = {"bar", "barh"} | _COMPOSITION_PLOT_TYPES
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,7 @@ class PlotSeries:
     distribution_show_outliers: bool = True
     interpolation_method: str = "linear"
     grid_resolution: int = 120
+    voronoi_shape: str = "circle"
 
     @property
     def label(self) -> str:
@@ -129,7 +135,7 @@ class PlotCanvas(QWidget):
         """Create the Matplotlib figure, toolbar, and empty plot placeholder."""
         super().__init__(parent)
 
-        self.figure = Figure(figsize=(7.0, 4.8), constrained_layout=True)
+        self.figure = Figure(figsize=(7.0, 4.8), constrained_layout=False)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.axes = self.figure.add_subplot(111)
@@ -216,7 +222,7 @@ class PlotCanvas(QWidget):
         """Render selected workspace series with active Matplotlib style settings."""
         self._remove_right_axes()
         self.figure.clear()
-        self.figure.set_constrained_layout(True)
+        self._disable_layout_engine()
         self.figure.set_size_inches(figure_width, figure_height, forward=True)
         self.axes = self.figure.add_subplot(111)
         self.right_axes = None
@@ -224,7 +230,11 @@ class PlotCanvas(QWidget):
         skipped_messages: list[str] = []
         located_points: list[LocatedPoint] = []
         plotted_count = 0
-        uses_right_axis = any(series.y_axis == "right" for series in series_list)
+        x_axis_values: list[np.ndarray] = []
+        left_y_axis_values: list[np.ndarray] = []
+        right_y_axis_values: list[np.ndarray] = []
+        uses_composition_plot = any(series.plot_type in _COMPOSITION_PLOT_TYPES for series in series_list)
+        uses_right_axis = not uses_composition_plot and any(series.y_axis == "right" for series in series_list)
         if uses_right_axis:
             self.right_axes = self.axes.twinx()
 
@@ -232,6 +242,13 @@ class PlotCanvas(QWidget):
         plotted_surface_values: dict[int, _SurfaceValues] = {}
 
         for series_index, series in enumerate(series_list):
+            if uses_composition_plot and series.plot_type not in _COMPOSITION_PLOT_TYPES:
+                skipped_messages.append(f"{series.label}: composition plots cannot be mixed with XY series")
+                continue
+            if uses_composition_plot and plotted_count:
+                skipped_messages.append(f"{series.label}: only one composition series can be rendered at a time")
+                continue
+
             series_y_scale = right_y_scale if series.y_axis == "right" else y_scale
             target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
             if series.plot_type in _SURFACE_PLOT_TYPES:
@@ -255,6 +272,8 @@ class PlotCanvas(QWidget):
                     continue
 
                 plotted_surface_values[series_index] = surface_values
+                x_axis_values.append(surface_values.x_values)
+                left_y_axis_values.append(surface_values.y_values)
                 plotted_count += 1
                 continue
 
@@ -275,6 +294,8 @@ class PlotCanvas(QWidget):
                     values_by_column=values_by_column,
                     column_labels=column_labels,
                 )
+                x_axis_values.append(np.arange(1, len(values_by_column) + 1, dtype=float))
+                left_y_axis_values.extend(value.to_numpy(dtype=float) for value in values_by_column)
                 plotted_count += 1
                 continue
 
@@ -290,7 +311,7 @@ class PlotCanvas(QWidget):
                 continue
 
             if x_values.empty or y_values.empty:
-                skipped_messages.append(f"{series.label}: no numeric points to plot")
+                skipped_messages.append(f"{series.label}: no plottable points")
                 continue
 
             plot_kwargs = {
@@ -320,19 +341,54 @@ class PlotCanvas(QWidget):
                 x_scale=x_scale,
                 y_scale=series_y_scale,
             )
-            if series.plot_type != "histogram":
+            if series.plot_type not in ({"histogram"} | _COMPOSITION_PLOT_TYPES):
                 plotted_series_values[series_index] = (x_values, y_values, series)
+            self._record_axis_values(
+                series=series,
+                x_values=x_values,
+                y_values=y_values,
+                x_axis_values=x_axis_values,
+                left_y_axis_values=left_y_axis_values,
+                right_y_axis_values=right_y_axis_values,
+            )
             plotted_count += 1
 
+        if not plotted_count:
+            self._draw_empty_state(clear_axes=False)
+            self.canvas.draw()
+            return PlotResult(
+                plotted_count=0,
+                skipped_messages=skipped_messages,
+                located_points=[],
+            )
+
         self.axes.set_title(title)
+        if uses_composition_plot:
+            self.axes.set_xlabel("")
+            self.axes.set_ylabel("")
+            self.axes.set_aspect("equal")
+            self.axes.grid(False)
+            self.canvas.draw()
+            return PlotResult(
+                plotted_count=plotted_count,
+                skipped_messages=skipped_messages,
+                located_points=[],
+            )
+
         self.axes.set_xlabel(x_label)
         self.axes.set_ylabel(y_label)
+        if x_scale == "log":
+            self._seed_positive_axis_limits(self.axes, "x", x_axis_values)
+        if y_scale == "log":
+            self._seed_positive_axis_limits(self.axes, "y", left_y_axis_values)
         self.axes.set_xscale(x_scale)
         self.axes.set_yscale(y_scale)
         self.axes.grid(grid_enabled, alpha=0.25)
 
         if self.right_axes is not None:
             self.right_axes.set_ylabel(right_y_label)
+            if right_y_scale == "log":
+                self._seed_positive_axis_limits(self.right_axes, "y", right_y_axis_values)
             self.right_axes.set_yscale(right_y_scale)
             self.right_axes.grid(False)
 
@@ -350,10 +406,7 @@ class PlotCanvas(QWidget):
         )
         skipped_messages.extend(locator_messages)
 
-        if plotted_count:
-            self._draw_legend(legend_enabled, legend_position)
-        else:
-            self._draw_empty_state(clear_axes=False)
+        self._draw_legend(legend_enabled, legend_position)
 
         self.canvas.draw()
         return PlotResult(
@@ -367,6 +420,105 @@ class PlotCanvas(QWidget):
         self._draw_empty_state()
         self.canvas.draw_idle()
 
+    def _disable_layout_engine(self) -> None:
+        """Disable Matplotlib layout engines before manual Qt canvas drawing."""
+        set_layout_engine = getattr(self.figure, "set_layout_engine", None)
+        if callable(set_layout_engine):
+            set_layout_engine(None)
+        else:
+            self.figure.set_constrained_layout(False)
+
+    def _record_axis_values(
+        self,
+        series: PlotSeries,
+        x_values: pd.Series,
+        y_values: pd.Series,
+        x_axis_values: list[np.ndarray],
+        left_y_axis_values: list[np.ndarray],
+        right_y_axis_values: list[np.ndarray],
+    ) -> None:
+        """Record data-space values used to seed valid log-axis limits."""
+        if series.plot_type in _COMPOSITION_PLOT_TYPES:
+            return
+
+        target_y_values = right_y_axis_values if series.y_axis == "right" else left_y_axis_values
+        if series.plot_type == "histogram":
+            x_axis_values.append(self._numeric_axis_array(y_values))
+            target_y_values.append(self._histogram_axis_counts(y_values, series))
+            return
+
+        if series.plot_type == "barh":
+            x_axis_values.append(self._numeric_axis_array(y_values))
+            target_y_values.append(self._numeric_axis_array(x_values))
+            return
+
+        x_axis_values.append(self._numeric_axis_array(x_values))
+        target_y_values.append(self._numeric_axis_array(y_values))
+
+    @staticmethod
+    def _numeric_axis_array(values: pd.Series) -> np.ndarray:
+        """Return numeric axis values, preserving nonnumeric labels as NaN."""
+        return pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+
+    @staticmethod
+    def _histogram_axis_counts(values: pd.Series, series: PlotSeries) -> np.ndarray:
+        """Return positive histogram-axis values for log-limit seeding."""
+        numeric_values = values.to_numpy(dtype=float)
+        if numeric_values.size == 0:
+            return np.asarray([], dtype=float)
+        try:
+            counts, _bin_edges = np.histogram(numeric_values, bins=max(series.histogram_bins, 1))
+        except ValueError:
+            return np.asarray([], dtype=float)
+        counts = counts.astype(float)
+        if series.histogram_cumulative:
+            counts = np.cumsum(counts)
+        return counts
+
+    def _seed_positive_axis_limits(
+        self,
+        axes: Any,
+        axis_name: str,
+        value_groups: list[np.ndarray],
+    ) -> None:
+        """Set positive view limits before switching an axis to log scale."""
+        limits = self._positive_axis_limits(value_groups)
+        if limits is None:
+            limits = (0.1, 1.0)
+        if axis_name == "x":
+            axes.set_xlim(*limits)
+        else:
+            axes.set_ylim(*limits)
+
+    @staticmethod
+    def _positive_axis_limits(value_groups: list[np.ndarray]) -> tuple[float, float] | None:
+        """Return padded positive min/max limits from one or more value arrays."""
+        if not value_groups:
+            return None
+        arrays = [
+            np.asarray(group, dtype=float).ravel()
+            for group in value_groups
+            if np.asarray(group).size
+        ]
+        if not arrays:
+            return None
+        values = np.concatenate(arrays)
+        if values.size == 0:
+            return None
+        values = values[np.isfinite(values) & (values > 0)]
+        if values.size == 0:
+            return None
+
+        lower = float(np.min(values))
+        upper = float(np.max(values))
+        if not np.isfinite(lower) or not np.isfinite(upper) or lower <= 0 or upper <= 0:
+            return None
+        if lower == upper:
+            return max(lower / 10.0, np.nextafter(0.0, 1.0)), upper * 10.0
+
+        padding = max((upper / lower) ** 0.05, 1.02)
+        return max(lower / padding, np.nextafter(0.0, 1.0)), upper * padding
+
     def _series_values(
         self,
         workspace: Workspace,
@@ -374,7 +526,7 @@ class PlotCanvas(QWidget):
         x_scale: str,
         y_scale: str,
     ) -> tuple[pd.Series, pd.Series, pd.Series | None, pd.Series | None]:
-        """Return aligned numeric X/Y values and their errors for a plot series."""
+        """Return aligned X/Y values and their errors for a plot series."""
         y_frame = workspace.get_dataset(series.y_dataset).frame
 
         if series.plot_type == "histogram":
@@ -387,6 +539,14 @@ class PlotCanvas(QWidget):
                 return pd.Series(dtype=float), pd.Series(dtype=float), None, None
             x_values = pd.Series(np.arange(len(y_values)), dtype=float)
             return x_values, y_values.reset_index(drop=True), None, None
+
+        if series.plot_type in _CATEGORICAL_X_PLOT_TYPES:
+            return self._categorical_x_series_values(
+                workspace=workspace,
+                series=series,
+                x_scale=x_scale,
+                y_scale=y_scale,
+            )
 
         x_frame = workspace.get_dataset(series.x_dataset).frame
         if series.x_column not in x_frame.columns:
@@ -418,10 +578,16 @@ class PlotCanvas(QWidget):
 
         aligned = pd.DataFrame(cols).dropna()
 
-        if x_scale == "log":
-            aligned = aligned[aligned["x"] > 0]
-        if y_scale == "log":
-            aligned = aligned[aligned["y"] > 0]
+        if series.plot_type == "barh":
+            if x_scale == "log":
+                aligned = aligned[aligned["y"] > 0]
+            if y_scale == "log":
+                aligned = aligned[aligned["x"] > 0]
+        else:
+            if x_scale == "log":
+                aligned = aligned[aligned["x"] > 0]
+            if y_scale == "log":
+                aligned = aligned[aligned["y"] > 0]
 
         if aligned.empty:
             return pd.Series(dtype=float), pd.Series(dtype=float), None, None
@@ -429,6 +595,95 @@ class PlotCanvas(QWidget):
         x_err_out = aligned["x_err"] if "x_err" in aligned.columns else None
         y_err_out = aligned["y_err"] if "y_err" in aligned.columns else None
         return aligned["x"], aligned["y"], x_err_out, y_err_out
+
+    def _categorical_x_series_values(
+        self,
+        workspace: Workspace,
+        series: PlotSeries,
+        x_scale: str,
+        y_scale: str,
+    ) -> tuple[pd.Series, pd.Series, pd.Series | None, pd.Series | None]:
+        """Return label/value pairs for categorical chart types."""
+        x_frame = workspace.get_dataset(series.x_dataset).frame
+        y_frame = workspace.get_dataset(series.y_dataset).frame
+        if series.x_column not in x_frame.columns:
+            raise ValueError(f"missing label column '{series.x_column}'")
+        if series.y_column not in y_frame.columns:
+            raise ValueError(f"missing value column '{series.y_column}'")
+
+        labels = x_frame[series.x_column]
+        values = pd.to_numeric(y_frame[series.y_column], errors="coerce").replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
+        point_count = min(len(labels), len(values))
+        if point_count == 0:
+            return pd.Series(dtype=object), pd.Series(dtype=float), None, None
+
+        aligned = pd.DataFrame(
+            {
+                "label": labels.iloc[:point_count].to_numpy(),
+                "value": values.iloc[:point_count].to_numpy(),
+            }
+        )
+        aligned["label_text"] = aligned["label"].map(self._format_category_label)
+        aligned = aligned[(aligned["label_text"] != "") & aligned["value"].notna()].copy()
+
+        if series.plot_type in _COMPOSITION_PLOT_TYPES:
+            aligned = aligned[aligned["value"] > 0]
+            return (
+                aligned["label_text"].reset_index(drop=True),
+                aligned["value"].reset_index(drop=True),
+                None,
+                None,
+            )
+
+        if series.plot_type == "bar":
+            if x_scale == "log":
+                aligned["axis_label"] = pd.to_numeric(aligned["label"], errors="coerce")
+                aligned = aligned[aligned["axis_label"] > 0]
+            else:
+                aligned["axis_label"] = self._category_axis_values(
+                    aligned["label"],
+                    aligned["label_text"],
+                )
+            if y_scale == "log":
+                aligned = aligned[aligned["value"] > 0]
+        else:
+            if x_scale == "log":
+                aligned = aligned[aligned["value"] > 0]
+            if y_scale == "log":
+                aligned["axis_label"] = pd.to_numeric(aligned["label"], errors="coerce")
+                aligned = aligned[aligned["axis_label"] > 0]
+            else:
+                aligned["axis_label"] = self._category_axis_values(
+                    aligned["label"],
+                    aligned["label_text"],
+                )
+
+        if aligned.empty:
+            return pd.Series(dtype=object), pd.Series(dtype=float), None, None
+        return (
+            aligned["axis_label"].reset_index(drop=True),
+            aligned["value"].reset_index(drop=True),
+            None,
+            None,
+        )
+
+    @staticmethod
+    def _category_axis_values(labels: pd.Series, label_text: pd.Series) -> pd.Series:
+        """Return numeric labels when possible, otherwise text labels for categorical axes."""
+        numeric_labels = pd.to_numeric(labels, errors="coerce")
+        if numeric_labels.notna().all():
+            return numeric_labels.astype(float)
+        return label_text.astype(str)
+
+    @staticmethod
+    def _format_category_label(value: object) -> str:
+        """Return a clean string label for categorical charts."""
+        if pd.isna(value):
+            return ""
+        return str(value).strip()
 
     def _surface_values(
         self,
@@ -621,6 +876,33 @@ class PlotCanvas(QWidget):
             )
             return
 
+        if plot_type in _COMPOSITION_PLOT_TYPES:
+            values = y_values.to_numpy(dtype=float)
+            labels = [self._format_category_label(value) for value in x_values]
+            if values.size == 0 or not np.isfinite(values).all() or np.sum(values) <= 0:
+                raise ValueError("composition plots need at least one positive finite value")
+            if plot_type in _PIE_PLOT_TYPES:
+                wedgeprops: dict[str, object] = {"edgecolor": "white"}
+                if plot_type == "donut":
+                    wedgeprops["width"] = 0.38
+                target_axes.pie(
+                    values,
+                    labels=labels,
+                    autopct="%1.1f%%",
+                    startangle=90,
+                    counterclock=False,
+                    wedgeprops=wedgeprops,
+                )
+                target_axes.axis("equal")
+            else:
+                self._draw_voronoi_composition(
+                    target_axes=target_axes,
+                    labels=labels,
+                    values=values,
+                    shape=series.voronoi_shape,
+                )
+            return
+
         if plot_type == "area":
             line_kwargs = dict(plot_kwargs)
             line_kwargs["label"] = "_nolegend_"
@@ -648,6 +930,236 @@ class PlotCanvas(QWidget):
             return
 
         target_axes.plot(x_values, y_values, **plot_kwargs)
+
+    def _draw_voronoi_composition(
+        self,
+        target_axes: Any,
+        labels: list[str],
+        values: np.ndarray,
+        shape: str,
+    ) -> None:
+        """Draw a grid-weighted Voronoi-style composition chart."""
+        values = np.asarray(values, dtype=float)
+        valid = np.isfinite(values) & (values > 0)
+        labels = [label for label, keep in zip(labels, valid) if keep]
+        values = values[valid]
+        if values.size == 0 or np.sum(values) <= 0:
+            raise ValueError("Voronoi composition needs at least one positive finite value")
+
+        shape_key = self._normalized_voronoi_shape(shape)
+        resolution = self._voronoi_grid_resolution(len(values))
+        grid_x, grid_y, mask = self._voronoi_container_grid(shape_key, resolution)
+        points = np.column_stack([grid_x[mask], grid_y[mask]])
+        if points.size == 0:
+            raise ValueError("Voronoi container has no plottable area")
+
+        seeds = self._voronoi_seed_points(len(values), shape_key)
+        assignments = self._weighted_voronoi_assignments(points, seeds, values)
+        assignment_grid = np.full(grid_x.shape, np.nan, dtype=float)
+        assignment_grid[mask] = assignments.astype(float)
+        masked_assignments = np.ma.masked_invalid(assignment_grid)
+
+        colors = [f"C{index % 10}" for index in range(len(values))]
+        levels = np.arange(len(values) + 1, dtype=float) - 0.5
+        target_axes.contourf(
+            grid_x,
+            grid_y,
+            masked_assignments,
+            levels=levels,
+            colors=colors,
+            alpha=0.92,
+            antialiased=True,
+        )
+        if len(values) > 1:
+            target_axes.contour(
+                grid_x,
+                grid_y,
+                masked_assignments,
+                levels=np.arange(0.5, len(values), dtype=float),
+                colors="white",
+                linewidths=0.7,
+            )
+
+        self._draw_voronoi_container_outline(target_axes, shape_key)
+        self._label_voronoi_regions(
+            target_axes=target_axes,
+            points=points,
+            assignments=assignments,
+            labels=labels,
+            values=values,
+        )
+        target_axes.set_xlim(-1.05, 1.05)
+        target_axes.set_ylim(-1.05, 1.05)
+        target_axes.set_xticks([])
+        target_axes.set_yticks([])
+        target_axes.set_aspect("equal")
+        target_axes.grid(False)
+        target_axes.set_frame_on(False)
+
+    @staticmethod
+    def _normalized_voronoi_shape(shape: str) -> str:
+        """Return the supported Voronoi container shape key."""
+        key = str(shape or "circle").strip().lower()
+        if key in {"rect", "rectangle", "rectangular"}:
+            return "rectangle"
+        if key in {"polygon", "polygonal", "poly", "hexagon", "hexagonal"}:
+            return "polygon"
+        return "circle"
+
+    @staticmethod
+    def _voronoi_grid_resolution(item_count: int) -> int:
+        """Keep the weighted grid responsive as composition item counts grow."""
+        if item_count <= 20:
+            return 170
+        if item_count <= 60:
+            return 140
+        if item_count <= 150:
+            return 100
+        return 70
+
+    def _voronoi_container_grid(
+        self,
+        shape: str,
+        resolution: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return a square grid and a mask for the requested composition container."""
+        axis = np.linspace(-1.0, 1.0, max(int(resolution), 20))
+        grid_x, grid_y = np.meshgrid(axis, axis)
+        if shape == "rectangle":
+            mask = np.ones(grid_x.shape, dtype=bool)
+        elif shape == "polygon":
+            vertices = self._polygon_container_vertices()
+            path = MplPath(vertices)
+            mask = path.contains_points(np.column_stack([grid_x.ravel(), grid_y.ravel()]))
+            mask = mask.reshape(grid_x.shape)
+        else:
+            mask = (grid_x * grid_x + grid_y * grid_y) <= 1.0
+        return grid_x, grid_y, mask
+
+    @staticmethod
+    def _polygon_container_vertices() -> np.ndarray:
+        """Return vertices for the default polygonal Voronoi container."""
+        angles = np.linspace(np.pi / 2.0, np.pi / 2.0 + 2.0 * np.pi, 7)[:-1]
+        return np.column_stack([np.cos(angles), np.sin(angles)])
+
+    @staticmethod
+    def _voronoi_seed_points(item_count: int, shape: str) -> np.ndarray:
+        """Place deterministic seeds inside the selected Voronoi container."""
+        if item_count <= 1:
+            return np.array([[0.0, 0.0]], dtype=float)
+
+        index = np.arange(item_count, dtype=float)
+        golden_angle = np.pi * (3.0 - np.sqrt(5.0))
+        radius = np.sqrt((index + 0.5) / item_count)
+        max_radius = 0.74 if shape in {"circle", "polygon"} else 0.82
+        angles = index * golden_angle
+        points = np.column_stack([
+            np.cos(angles) * radius * max_radius,
+            np.sin(angles) * radius * max_radius,
+        ])
+        if shape == "rectangle":
+            points[:, 0] *= 1.15
+            points[:, 1] *= 0.95
+        return points
+
+    def _weighted_voronoi_assignments(
+        self,
+        points: np.ndarray,
+        seeds: np.ndarray,
+        values: np.ndarray,
+    ) -> np.ndarray:
+        """Assign grid points to nearby seeds while matching value-proportional areas."""
+        point_count = len(points)
+        seed_count = len(seeds)
+        target_counts = self._proportional_voronoi_counts(values, point_count)
+        distances = np.sum((points[:, None, :] - seeds[None, :, :]) ** 2, axis=2)
+        order = np.argsort(distances, axis=None)
+
+        assignments = np.full(point_count, -1, dtype=int)
+        remaining = target_counts.astype(int).copy()
+        assigned_count = 0
+        for flat_index in order:
+            point_index = int(flat_index // seed_count)
+            seed_index = int(flat_index % seed_count)
+            if assignments[point_index] >= 0 or remaining[seed_index] <= 0:
+                continue
+            assignments[point_index] = seed_index
+            remaining[seed_index] -= 1
+            assigned_count += 1
+            if assigned_count >= point_count:
+                break
+
+        if assigned_count < point_count:
+            missing = np.flatnonzero(assignments < 0)
+            assignments[missing] = np.argmin(distances[missing], axis=1)
+        return assignments
+
+    @staticmethod
+    def _proportional_voronoi_counts(values: np.ndarray, point_count: int) -> np.ndarray:
+        """Return integer grid-cell counts proportional to the composition values."""
+        weights = values / np.sum(values)
+        raw_counts = weights * point_count
+        counts = np.floor(raw_counts).astype(int)
+        remainder = int(point_count - np.sum(counts))
+        if remainder > 0:
+            order = np.argsort(raw_counts - counts)[::-1]
+            for index in order[:remainder]:
+                counts[index] += 1
+        elif remainder < 0:
+            order = np.argsort(raw_counts - counts)
+            for index in order:
+                if remainder == 0:
+                    break
+                removable = min(counts[index], -remainder)
+                counts[index] -= removable
+                remainder += removable
+        return counts
+
+    def _draw_voronoi_container_outline(self, target_axes: Any, shape: str) -> None:
+        """Draw the visible boundary of the Voronoi composition container."""
+        if shape == "rectangle":
+            x_values = [-1.0, 1.0, 1.0, -1.0, -1.0]
+            y_values = [-1.0, -1.0, 1.0, 1.0, -1.0]
+        elif shape == "polygon":
+            vertices = self._polygon_container_vertices()
+            closed = np.vstack([vertices, vertices[0]])
+            x_values = closed[:, 0]
+            y_values = closed[:, 1]
+        else:
+            angles = np.linspace(0.0, 2.0 * np.pi, 361)
+            x_values = np.cos(angles)
+            y_values = np.sin(angles)
+        target_axes.plot(x_values, y_values, color="black", linewidth=0.9)
+
+    @staticmethod
+    def _label_voronoi_regions(
+        target_axes: Any,
+        points: np.ndarray,
+        assignments: np.ndarray,
+        labels: list[str],
+        values: np.ndarray,
+    ) -> None:
+        """Place compact labels at the grid centroid of readable Voronoi regions."""
+        total = float(np.sum(values))
+        item_count = len(values)
+        for index, (label, value) in enumerate(zip(labels, values)):
+            percentage = 100.0 * float(value) / total if total > 0 else 0.0
+            if item_count > 18 and percentage < 3.0:
+                continue
+            region_points = points[assignments == index]
+            if region_points.size == 0:
+                continue
+            centroid = np.mean(region_points, axis=0)
+            text = f"{label}\n{percentage:.1f}%" if item_count <= 30 else f"{percentage:.1f}%"
+            target_axes.text(
+                float(centroid[0]),
+                float(centroid[1]),
+                text,
+                ha="center",
+                va="center",
+                fontsize=8 if item_count <= 18 else 7,
+                color="black",
+            )
 
     def _draw_surface_by_type(
         self,
@@ -845,6 +1357,8 @@ class PlotCanvas(QWidget):
         if clear_axes:
             self.axes.clear()
 
+        self.axes.set_xscale("linear")
+        self.axes.set_yscale("linear")
         self.axes.set_title("")
         self.axes.set_xlabel("")
         self.axes.set_ylabel("")

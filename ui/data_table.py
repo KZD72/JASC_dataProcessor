@@ -399,7 +399,7 @@ class DataTableWidget(QWidget):
 
 
 class RangeFillDialog(QDialog):
-    """Dialog for filling a manual-entry column with an arithmetic sequence."""
+    """Dialog for filling a column with an arithmetic sequence."""
 
     def __init__(
         self,

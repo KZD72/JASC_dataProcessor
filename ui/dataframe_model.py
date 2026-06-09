@@ -394,6 +394,70 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return unique_name
 
+    def fill_range(
+        self,
+        target_column: str,
+        start_row: int,
+        count: int,
+        start_value: float,
+        step: float,
+    ) -> str:
+        """Fill or create a column with an arithmetic sequence."""
+        if self._dataset is None:
+            raise ValueError("No dataset is selected.")
+        if count <= 0:
+            raise ValueError("Range fill requires at least one row.")
+
+        clean_name = target_column.strip() or "x"
+        start_index = max(0, start_row - 1)
+        end_index = start_index + count
+
+        self.capture_undo_state()
+        self.beginResetModel()
+        try:
+            frame = self._dataset.frame
+            if clean_name in frame.columns:
+                column_name = clean_name
+            else:
+                column_name = self._make_unique_column_name(clean_name)
+                frame[column_name] = pd.Series(
+                    [float("nan")] * len(frame),
+                    index=frame.index,
+                    dtype="float64",
+                )
+                self._dataset.formulas.pop(column_name, None)
+                self._dataset.column_metadata.pop(column_name, None)
+
+            while len(frame) < end_index:
+                frame.loc[len(frame)] = pd.Series(
+                    [
+                        float("nan") if is_numeric_dtype(frame[column]) else pd.NA
+                        for column in frame.columns
+                    ],
+                    index=frame.columns,
+                )
+
+            if is_numeric_dtype(frame[column_name]):
+                frame[column_name] = pd.to_numeric(
+                    frame[column_name],
+                    errors="coerce",
+                ).astype("float64")
+
+            values = [start_value + offset * step for offset in range(count)]
+            column_position = list(frame.columns).index(column_name)
+            for offset, value in enumerate(values):
+                frame.iat[start_index + offset, column_position] = value
+            self._dataset.formulas.pop(column_name, None)
+            set_column_operation_comment(
+                self._dataset,
+                str(column_name),
+                f"Range fill: start={start_value:g}, step={step:g}, rows={start_row}-{end_index}",
+            )
+            return str(column_name)
+        finally:
+            self.endResetModel()
+            self.history_changed.emit()
+
     def apply_expression(
         self,
         target_column: str,

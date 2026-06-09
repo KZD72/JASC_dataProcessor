@@ -135,7 +135,10 @@ def fft_dataset(
         y_values = y.dropna().to_numpy(dtype=float)
         spacing = 1.0
 
-    window = signal.get_window(window_method, len(y_values), fftbins=True)
+    try:
+        window = signal.get_window(window_method, len(y_values), fftbins=True)
+    except ValueError as exc:
+        raise MathOperationError(f"Unknown FFT window method: {window_method}") from exc
     transformed = scipy_fft.fft(y_values * window)
     frequencies = scipy_fft.fftfreq(len(y_values), d=spacing)
 
@@ -239,9 +242,16 @@ def _sample_spacing(x: np.ndarray) -> float:
     spacing = np.diff(x)
     if len(spacing) == 0:
         raise MathOperationError("At least two X values are required.")
-    if np.any(spacing == 0):
+    if not np.isfinite(spacing).all():
+        raise MathOperationError("X values must be finite.")
+    absolute_spacing = np.abs(spacing)
+    if np.any(absolute_spacing == 0):
         raise MathOperationError("X values must not contain duplicate positions.")
-    return float(np.median(np.abs(spacing)))
+    representative_spacing = float(np.median(absolute_spacing))
+    tolerance = max(1.0e-12, representative_spacing * 1.0e-3)
+    if np.any(np.abs(absolute_spacing - representative_spacing) > tolerance):
+        raise MathOperationError("X values must be evenly spaced for this operation.")
+    return representative_spacing
 
 
 def _target_column_name(target_column: str, fallback: str) -> str:

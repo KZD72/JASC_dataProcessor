@@ -38,12 +38,27 @@ PLOT_TYPES: dict[str, PlotType] = {
     "bar": PlotType(
         key="bar",
         label="Vertical Bar",
-        description="Bar chart using X positions and Y heights.",
+        description="Bar chart using X/category labels or numeric positions and Y heights.",
     ),
     "barh": PlotType(
         key="barh",
         label="Horizontal Bar",
-        description="Horizontal bar chart using X positions and Y widths.",
+        description="Horizontal bar chart using X/category labels or numeric positions and Y widths.",
+    ),
+    "pie": PlotType(
+        key="pie",
+        label="Pie",
+        description="Pie chart using X/category labels and Y/value slices.",
+    ),
+    "donut": PlotType(
+        key="donut",
+        label="Donut",
+        description="Donut chart using X/category labels and Y/value slices.",
+    ),
+    "voronoi": PlotType(
+        key="voronoi",
+        label="Voronoi Composition",
+        description="Voronoi-style composition map using X/category labels and Y/value magnitudes.",
     ),
     "area": PlotType(
         key="area",
