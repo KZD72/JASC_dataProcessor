@@ -1,5 +1,7 @@
-PySide6
-pandas
-numpy
-matplotlib
-scipy
+PySide6>=6.6,<7
+pandas>=2.1,<3
+numpy>=1.26,<2
+matplotlib>=3.8,<4
+scipy>=1.12,<2
+odrpack>=0.5,<1
+SciencePlots>=2.2,<3

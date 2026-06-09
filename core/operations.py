@@ -118,6 +118,7 @@ _NUMPY_FUNCTION_NAMES = {
 _NUMPY_CONSTANT_NAMES = {"e", "inf", "nan", "pi"}
 _NUMPY_FFT_FUNCTION_NAMES = {"fft", "fftfreq", "fftshift", "ifft", "ifftshift"}
 _NUMPY_LINALG_FUNCTION_NAMES = {"norm"}
+_NUMPY_RANDOM_FUNCTION_NAMES = {"rand", "randn", "randint", "random", "choice", "normal", "uniform"}
 
 _SCIPY_SPECIAL_FUNCTION_NAMES = {
     "airy",
@@ -229,15 +230,18 @@ class _SafeNamespace:
     """Small attribute namespace exposing only explicitly listed members."""
 
     def __init__(self, display_name: str, members: dict[str, object]) -> None:
+        """Store explicitly allowed namespace members for expression access."""
         self._display_name = display_name
         self._members = members
 
     def __getattr__(self, name: str) -> object:
+        """Return an allowed member or reject unavailable attributes."""
         if name in self._members:
             return self._members[name]
         raise AttributeError(f"{self._display_name}.{name} is not available in formulas.")
 
     def attribute_paths(self, prefix: tuple[str, ...]) -> set[tuple[str, ...]]:
+        """Return every allowed dotted attribute path below a prefix."""
         paths: set[tuple[str, ...]] = set()
         for name, value in self._members.items():
             path = (*prefix, name)
@@ -247,6 +251,7 @@ class _SafeNamespace:
         return paths
 
     def callable_attribute_paths(self, prefix: tuple[str, ...]) -> set[tuple[str, ...]]:
+        """Return allowed dotted attribute paths whose final value is callable."""
         paths: set[tuple[str, ...]] = set()
         for name, value in self._members.items():
             path = (*prefix, name)
@@ -311,6 +316,7 @@ def evaluate_expression(frame: pd.DataFrame, expression: str) -> pd.Series:
 
 
 def _build_environment(frame: pd.DataFrame) -> dict[str, object]:
+    """Build the names visible to the expression evaluator."""
     numpy_namespace = _build_numpy_namespace()
     scipy_namespace = _build_scipy_namespace()
 
@@ -338,14 +344,21 @@ def _build_environment(frame: pd.DataFrame) -> dict[str, object]:
         if _is_safe_identifier(str(column_name)) and str(column_name) not in environment:
             environment[str(column_name)] = frame[column_name]
 
+    for index, column_name in enumerate(frame.columns, start=1):
+        alias = f"col{index}"
+        if alias not in environment or str(column_name) == alias:
+            environment[alias] = frame[column_name]
+
     return environment
 
 
 def _callable_names(environment: dict[str, object]) -> set[str]:
+    """Return top-level environment names that may be called."""
     return {name for name, value in environment.items() if callable(value)}
 
 
 def _attribute_names(environment: dict[str, object]) -> set[tuple[str, ...]]:
+    """Return all allowed attribute paths exposed through safe namespaces."""
     names: set[tuple[str, ...]] = set()
     for name, value in environment.items():
         if isinstance(value, _SafeNamespace):
@@ -354,6 +367,7 @@ def _attribute_names(environment: dict[str, object]) -> set[tuple[str, ...]]:
 
 
 def _callable_attribute_names(environment: dict[str, object]) -> set[tuple[str, ...]]:
+    """Return safe namespace attribute paths that may be called."""
     names: set[tuple[str, ...]] = set()
     for name, value in environment.items():
         if isinstance(value, _SafeNamespace):
@@ -362,6 +376,7 @@ def _callable_attribute_names(environment: dict[str, object]) -> set[tuple[str, 
 
 
 def _build_numpy_namespace() -> _SafeNamespace:
+    """Create the curated NumPy namespace available in formulas."""
     members = {name: getattr(np, name) for name in _NUMPY_FUNCTION_NAMES}
     members.update({name: getattr(np, name) for name in _NUMPY_CONSTANT_NAMES})
     members["fft"] = _SafeNamespace(
@@ -372,10 +387,15 @@ def _build_numpy_namespace() -> _SafeNamespace:
         "np.linalg",
         {name: getattr(np.linalg, name) for name in _NUMPY_LINALG_FUNCTION_NAMES},
     )
+    members["random"] = _SafeNamespace(
+        "np.random",
+        {name: getattr(np.random, name) for name in _NUMPY_RANDOM_FUNCTION_NAMES},
+    )
     return _SafeNamespace("np", members)
 
 
 def _build_scipy_namespace() -> _SafeNamespace:
+    """Create the curated SciPy namespace available in formulas."""
     special = _SafeNamespace(
         "scipy.special",
         {name: getattr(scipy_special, name) for name in _SCIPY_SPECIAL_FUNCTION_NAMES},
@@ -404,6 +424,7 @@ def _build_scipy_namespace() -> _SafeNamespace:
 
 
 def _column_by_name(frame: pd.DataFrame, name: object) -> pd.Series:
+    """Return a DataFrame column by exact display name."""
     column_name = str(name)
     if column_name not in frame.columns:
         raise ExpressionError(f"Column '{column_name}' does not exist.")
@@ -411,6 +432,7 @@ def _column_by_name(frame: pd.DataFrame, name: object) -> pd.Series:
 
 
 def _target_index(frame: pd.DataFrame, row_positions: Sequence[int] | None) -> pd.Index:
+    """Return the DataFrame index targeted by an expression application."""
     if row_positions is None:
         return frame.index
 
@@ -422,6 +444,7 @@ def _target_index(frame: pd.DataFrame, row_positions: Sequence[int] | None) -> p
 
 
 def _coerce_result_to_series(result: object, index: pd.Index) -> pd.Series:
+    """Normalize scalar or one-dimensional expression output to a Series."""
     if isinstance(result, pd.Series):
         return result.reindex(index)
 
@@ -451,6 +474,7 @@ def _coerce_result_to_series(result: object, index: pd.Index) -> pd.Series:
 
 
 def _is_safe_identifier(name: str) -> bool:
+    """Return whether a column name can be exposed as a bare expression name."""
     return name.isidentifier() and not keyword.iskeyword(name) and not name.startswith("_")
 
 
@@ -464,26 +488,31 @@ class _ExpressionValidator(ast.NodeVisitor):
         attribute_names: set[tuple[str, ...]],
         callable_attribute_names: set[tuple[str, ...]],
     ) -> None:
+        """Store the name and callable allowlists used during AST validation."""
         self._allowed_names = allowed_names
         self._callable_names = callable_names
         self._attribute_names = attribute_names
         self._callable_attribute_names = callable_attribute_names
 
     def generic_visit(self, node: ast.AST) -> None:
+        """Reject AST node types outside the constrained expression language."""
         if not isinstance(node, _ALLOWED_NODE_TYPES):
             raise ExpressionError(f"Unsupported expression element: {type(node).__name__}.")
         super().generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
+        """Reject references to names outside the safe environment."""
         if node.id not in self._allowed_names:
             raise ExpressionError(f"Unknown name '{node.id}'.")
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
+        """Validate binary operations and reject caret exponent mistakes."""
         if isinstance(node.op, ast.BitXor):
             raise ExpressionError("Use ** for powers. The ^ operator is not exponentiation in Python.")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
+        """Validate calls against allowed top-level and dotted callables."""
         if isinstance(node.func, ast.Name):
             if node.func.id not in self._callable_names:
                 raise ExpressionError(f"'{node.func.id}' is not callable in expressions.")
@@ -501,11 +530,17 @@ class _ExpressionValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
+        """Validate safe dotted attribute access."""
+        if node.attr.startswith("_"):
+            raise ExpressionError(
+                f"Access to private attributes is not allowed: .{node.attr}"
+            )
         path = self._attribute_path(node)
         if path not in self._attribute_names:
             raise ExpressionError(f"{'.'.join(path)} is not available in formulas.")
 
     def _attribute_path(self, node: ast.Attribute) -> tuple[str, ...]:
+        """Convert an AST attribute chain into a tuple path."""
         path: list[str] = [node.attr]
         current = node.value
         while isinstance(current, ast.Attribute):

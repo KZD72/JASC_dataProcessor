@@ -135,7 +135,10 @@ def fft_dataset(
         y_values = y.dropna().to_numpy(dtype=float)
         spacing = 1.0
 
-    window = signal.get_window(window_method, len(y_values), fftbins=True)
+    try:
+        window = signal.get_window(window_method, len(y_values), fftbins=True)
+    except ValueError as exc:
+        raise MathOperationError(f"Unknown FFT window method: {window_method}") from exc
     transformed = scipy_fft.fft(y_values * window)
     frequencies = scipy_fft.fftfreq(len(y_values), d=spacing)
 
@@ -184,6 +187,7 @@ def _xy_values(
     y_column: str,
     minimum_points: int,
 ) -> tuple[pd.Series, pd.Series]:
+    """Return aligned numeric X/Y values after validating point count and spacing."""
     x = _numeric_column(frame, x_column, minimum_points=minimum_points)
     y = _numeric_column(frame, y_column, minimum_points=minimum_points)
     aligned = pd.DataFrame({"x": x, "y": y}).dropna()
@@ -201,6 +205,7 @@ def _xy_values(
 
 
 def _numeric_column(frame: pd.DataFrame, column: str | None, minimum_points: int) -> pd.Series:
+    """Coerce one DataFrame column to numeric values and validate point count."""
     if not column:
         raise MathOperationError("Choose a data column.")
     if column not in frame.columns:
@@ -213,6 +218,7 @@ def _numeric_column(frame: pd.DataFrame, column: str | None, minimum_points: int
 
 
 def _central_difference(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Return central-difference derivative values with one-sided endpoints."""
     values = np.full(len(y), np.nan)
     values[1:-1] = (y[2:] - y[:-2]) / (x[2:] - x[:-2])
     values[0] = (y[1] - y[0]) / (x[1] - x[0])
@@ -221,6 +227,7 @@ def _central_difference(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def _savgol_derivative(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Return a Savitzky-Golay smoothed first derivative."""
     spacing = _sample_spacing(x)
     window_length = min(len(y) if len(y) % 2 == 1 else len(y) - 1, 11)
     if window_length < 3:
@@ -231,14 +238,23 @@ def _savgol_derivative(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def _sample_spacing(x: np.ndarray) -> float:
+    """Return representative sample spacing for FFT and Savitzky-Golay methods."""
     spacing = np.diff(x)
     if len(spacing) == 0:
         raise MathOperationError("At least two X values are required.")
-    if np.any(spacing == 0):
+    if not np.isfinite(spacing).all():
+        raise MathOperationError("X values must be finite.")
+    absolute_spacing = np.abs(spacing)
+    if np.any(absolute_spacing == 0):
         raise MathOperationError("X values must not contain duplicate positions.")
-    return float(np.median(np.abs(spacing)))
+    representative_spacing = float(np.median(absolute_spacing))
+    tolerance = max(1.0e-12, representative_spacing * 1.0e-3)
+    if np.any(np.abs(absolute_spacing - representative_spacing) > tolerance):
+        raise MathOperationError("X values must be evenly spaced for this operation.")
+    return representative_spacing
 
 
 def _target_column_name(target_column: str, fallback: str) -> str:
+    """Return a clean target column name or a generated fallback."""
     clean_target = target_column.strip()
     return clean_target or fallback

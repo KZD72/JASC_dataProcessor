@@ -6,8 +6,8 @@
 
 ## 1. Project State
 - **Current Version**: 0.1.0
-- **Last Updated**: 2026-05-12
-- **Current Phase**: Phase 3 (Basic Math & Signal Processing)
+- **Last Updated**: 2026-06-09
+- **Current Phase**: Competitive Stage 0 stabilization followed by Competitive Stage 1 dialog-based batch processing and Stage 3 import/connectors hardening; expanded statistics/interpolation and figure-digitizer verification remain pending.
 
 ## 2. Completed Tasks
 - [x] Initial project definition, tech stack selection, and requirements gathering.
@@ -17,11 +17,29 @@
 - [x] Implemented `core/workspace.py` for managing multiple named DataFrames.
 - [x] Implemented `core/file_io.py` for `.csv` and `.txt` imports using selectable delimiter and header options.
 - [x] Added `ui/dialogs.py` with an import-options dialog.
+- [x] Added an initial File > Import From Figure workflow: common raster image selection, zoom/pan canvas, four-point X/Y axis calibration, linear/log axis transforms, manual point picking, threshold-based dark-pixel auto trace, extracted-data preview, workspace dataset creation, X/Y metadata roles, pixel/source columns, and operation provenance comments.
+- [x] Improved Import From Figure precision and assisted extraction: wheel zoom is pointer-centered with explicit Fit/1:1/Zoom controls, the Calibration tab has a live magnifier with pixel/data readout, Auto Trace can be restricted with translucent ROI brush marks, and tracing can use either dark-threshold matching or a sampled/selected trace color with tolerance. Figure-derived datasets now include trace mode, trace color, and ROI mark provenance columns.
+- [x] Added symbol-center extraction to Import From Figure: the detector uses the current dark/color trace rule and optional ROI brush, finds connected symbol blobs, filters them by min/max pixel area, computes weighted barycenters, shows detected centers on the canvas, previews symbol area/size, and exports symbol diagnostics alongside calibrated X/Y coordinates.
+- [x] Added sampled-template symbol matching to Import From Figure for symbols touching model/fit lines: users can sample one marker by clicking its center for auto-grown dot/symbol sampling or by drag-selecting a box, the dialog learns foreground/background, marker color, tolerance, and weighted template support, then runs normalized template matching inside the scan/ROI area with match-score threshold, overlap/min-separation control, non-maximum suppression, and template-support center refinement. Exported rows now include symbol match score and template size diagnostics.
+- [x] Hardened sampled-symbol capture for simple dots: Sample Symbol now uses mouse release/drag events, has a configurable Sample radius for one-click center sampling, auto-finds the connected foreground component near the click, pads it with local background, previews dragged sample boxes, and expands tiny rectangles instead of failing with a false "3 x 3 pixels" warning.
+- [x] Softened Import From Figure ROI brush marks so they use a more transparent green fill without an outline, keeping underlying plot data visible while painting scan regions.
+- [x] Polished Import From Figure marker/layout ergonomics: detected symbol centers now draw as small purple X marks instead of large filled circles, and the Extraction tab now uses nested Manual/ROI, Auto Trace, and Symbols tabs so controls stay compact without stealing excessive canvas width.
+- [x] Reworked Import From Figure automatic extraction layout so the ROI brush sits above shared Curves/Lines and Symbols tabs, making it clearer that both automatic extraction modes use the same painted region. Added symbol shape priors for sampled-template detection (`Auto`, dot/circle, X cross, plus cross, square, diamond, triangle up/down) so sampled crosses or other marker shapes can suppress model-line pixels that touch the symbol.
+- [x] Made Import From Figure manual point picking explicit: calibration, color sampling, and symbol sampling now return to an idle picking state instead of silently arming manual point creation; canvas clicks add manual points only in Manual Mode. Added Stop Picking and Undo Last manual-point controls, and added Triangle down to the predefined symbol-shape priors.
+- [x] Added a visible Import From Figure mode banner beside the canvas so users can see whether clicks currently calibrate, pan, manually pick, paint ROI, sample color, sample symbols, or do nothing. Symbol extraction now exports estimated `x_uncertainty`, `y_uncertainty`, `pixel_x_uncertainty`, and `pixel_y_uncertainty` values based on half the detected/template symbol size with a 0.5 px floor, converted through the current linear/log calibration.
+- [x] Extended Import From Figure manual picking with per-point uncertainty assignment: users can choose the target manual point, then define uncertainty by clicking one radius boundary point or four boundary/error-bar points around it. Assigned manual uncertainty is previewed as blue error bars and exported through the same pixel/data uncertainty columns. Symbol numeric controls now reserve explicit arrow-button space so suffix/edit fields should not overlap the up/down controls.
+- [x] Promoted the Import From Figure magnifier from the Calibration tab into a shared canvas-side Precision Zoom panel with a Magnifier toolbar toggle, so the cursor-following zoom/readout is available during calibration, manual picking, manual uncertainty assignment, ROI brushing, color sampling, and symbol sampling.
 - [x] Added `ui/data_table.py` with a spreadsheet-like manual entry tab and DataFrame export.
 - [x] Added manual-entry clipboard support for `Ctrl+C`/`Ctrl+V` tabular data blocks.
+- [x] Made manual spreadsheet creation a direct Data-editor workflow: Workspace New Sheet, File > New Blank Sheet (`Ctrl+N`), and the toolbar now create a normal editable worksheet immediately in the central Data tab with default `x`/`y` columns and metadata roles. Added Data Editor Fill Range so users can generate X-style arithmetic sequences directly in saved worksheets.
 - [x] Wired imported and manual datasets into a workspace list and editable data editor.
 - [x] Added `ui/dataframe_model.py` for editing workspace DataFrames through a Qt table model.
+- [x] Compacted the Apply Formula dialog by moving the formula cheatsheet into a scrollable right-side Help panel, trimming fixed editor/list heights, and keeping the main controls in a shorter left-side column.
 - [x] Added selected-sheet export to CSV or tab-delimited TXT.
+- [x] Fixed log-scale plotting warnings by disabling Matplotlib constrained-layout engines in the Qt canvas render path and seeding positive X/Y/Right-Y view limits from plotted data before switching axes to log scale. Horizontal bars, histograms, distributions, and surface plots now contribute the correct data-space values for log-limit seeding.
+- [x] Completed a forensic stabilization pass: empty plot placeholders now reset to linear axes after log-scale views, startup initializes action/button enabled states immediately, Fill Range casts numeric target columns to float before arithmetic writes, FFT reports invalid windows and uneven/non-finite sample spacing as controlled `MathOperationError`s, and interpolation rejects unknown outside-range policies instead of silently falling through.
+- [x] Added categorical label plotting for bar-style charts and the first Pie/Donut plot implementation: text entered in an X/label column is preserved for vertical bars, horizontal bars, pie slices, and donut slices, while numeric label columns still behave as numeric positions. Pie/donut plots use one label column plus one positive numeric value column and render as single-series composition charts.
+- [x] Split the Plot Inspector series selector into Plot family and Subtype dropdowns so XY/categorical, distribution, composition, and 2D map plot types expose only their relevant subtype choices. Added an initial Voronoi Composition chart alongside pie/donut: it uses label/value columns, supports circular/rectangular/polygonal containers, and approximates value-proportional areas with a weighted grid Voronoi partition.
 - [x] Added selected-row deletion for imported and manually created workspace datasets.
 - [x] Added `core/operations.py` with a constrained Python-like expression evaluator for DataFrame columns.
 - [x] Added an Apply Formula dialog for writing expressions into new or existing columns.
@@ -67,6 +85,18 @@
 - [x] Added a full fit report dialog with fitted parameters, standard errors, covariance matrix, R^2, adjusted R^2, RMSE, MAE, and residual statistics.
 - [x] Curve fitting now creates a new workspace result sheet and immediately plots raw data against the fitted curve.
 - [x] Fixed cross-dataset plot-series labels so labels no longer fall through when X and Y come from different sheets.
+- [x] Extracted plotting into `ui/plot_tab.py` and removed stale embedded plot code from `ui/main_window.py`.
+- [x] Fixed workspace refresh after project open and dataset deletion so the data editor selects a valid sheet or clears itself.
+- [x] Fixed plot state cleanup after project open, dataset rename, and dataset deletion.
+- [x] Fixed the Plot tab scatter shortcut so it actually creates marker-only series.
+- [x] Project saves now append `.jasc` when the user enters a filename without an extension.
+- [x] Added Phase 4 fitting refinements: editable parameter initial values, lower/upper bounds, and fixed/free parameter controls.
+- [x] Added weighted fitting through optional sigma/error or weight columns, including absolute-sigma handling.
+- [x] Added confidence-band generation for fitted curves and confidence-band plotting in the plot canvas.
+- [x] Added residual-sheet generation and optional residual plotting on the right Y axis for curve fits.
+- [x] Added Phase 3 "plot result immediately" shortcuts for derivative, integral, FFT, and inverse FFT workflows.
+- [x] Added per-series custom labels, line width, marker size, and edit/update controls in the Plot tab.
+- [x] Exposed dataset Rename/Remove actions through sidebar buttons, the Data menu, and the main toolbar.
 - [x] Ran smoke checks:
   - `python -m py_compile main.py ui/main_window.py ui/plot_canvas.py ui/dialogs.py ui/data_table.py ui/dataframe_model.py core/workspace.py core/file_io.py core/operations.py math_engine/__init__.py math_engine/calculus.py`
   - Core CSV import/workspace smoke test.
@@ -96,17 +126,208 @@
   - Phase 4 main-window fit handler smoke test.
   - DataFrame model selected-column deletion smoke test.
   - Main-window selected-column deletion smoke test.
+  - Main-window project-open refresh regression smoke test.
+  - Main-window dataset-delete editor-clearing smoke test.
+  - Plot tab scatter shortcut regression smoke test.
+  - Project save suffix smoke test.
+  - Fit handler smoke test using the extracted `PlotTab`.
+  - Advanced curve-fit smoke test for bounds, fixed parameters, sigma weights, confidence bands, and residual output.
+  - Enhanced fitting/options dialog smoke test.
+  - Plot tab series add/edit smoke test for custom labels and style sizing.
+  - Main-window curve-fit handler smoke test with residual sheet and residual overlay.
+  - Derivative plot shortcut smoke test.
+  - FFT plot shortcut smoke test.
+  - Plot canvas legend-toggle and confidence-band smoke test.
+  - Workspace menu/sidebar action enablement smoke test.
+- [x] Added saved plot workspace state with named plot definitions.
+- [x] Added a Saved Plots sidebar section and Plot menu actions for saving, loading, and removing current plot definitions.
+- [x] Saved plot definitions now persist through `.jasc` project save/load metadata.
+- [x] Saved plot definitions include series, locators, axes labels, scales, ranges, grid/legend settings, and figure size.
+- [x] Dataset renames update saved plot dataset references.
+- [x] Updated README project-persistence wording to include saved plots instead of fit reports.
+- [x] Updated README Python minimum version to 3.10+ to match current type-hint syntax.
+- [x] Polished saved plot editing so selecting a saved plot loads it into the Plot tab as the active editable plot.
+- [x] Restored/generated plots now select the first queued trace so Series controls reflect the editable trace instead of stale controls from the previous plot.
+- [x] Added File > Close Project to clear the current workspace, saved plots, active plot, and editor state without exiting the app.
+- [x] Added an initial visual polish stylesheet with stronger button hover/pressed states, clearer list selection, tab framing, table headers, and section labels.
+- [x] Removed duplicated Data Editor action buttons so sheet operations are concentrated in the main toolbar and menus.
+- [x] Added hide/show controls for Workspace Datasheets and Saved Plots so the Data Input/manual-entry area can expand.
+- [x] Added a Plot Options hide/show control so the Matplotlib canvas can use the full plot workspace.
+- [x] Manual Entry columns now keep an interactive default width and use horizontal scrolling instead of shrinking to fit all columns.
+- [x] Plot Options now opens at a wider usable default size and can be reset with the new View menu.
+- [x] Added View > Reset View to Default (`Ctrl+Shift+R`) to restore sidebar sections, splitters, and plot option visibility.
+- [x] Removed the non-functional "Scatter" shortcut button from the Plot tab.
+- [x] Fixed Manual Entry button layout in the sidebar to prevent text from being cut off.
+- [x] Reorganized the main toolbar into logical groups: Data Editor options (Add/Delete/Rename/Export) and Math Operations (Formula/Calculus/FFT/Fit).
+- [x] Added "Add Row" capability to the Data Editor and integrated it into the toolbar and Data menu, with proper enablement state tied to dataset availability.
+- [x] Renamed "Export Sheet" to "Export Dataset" across the UI for consistency.
+- [x] Added support for an application window icon, loading from the `resources/logo.png` directory.
+- [x] Implemented X and Y error bar plotting support in `PlotCanvas` and `PlotTab`.
+- [x] Integrated `scipy.odr` to allow fitting that accounts for both X and Y uncertainties. The `FitDialog` now dynamically switches to Orthogonal Distance Regression when an X error column is selected.
+- [x] Exposed `np.random` submodule functions (rand, randn, normal, choice, etc.) inside the Apply Formula editor.
+- [x] Added Manual Entry "Fill Range" for generating arithmetic X-style columns with start value, step, start row, and row count.
+- [x] Replaced Manual Entry "Fill Formula" with "Table Size" because formula generation belongs in the Data Editor manipulation workflow after saving the manual sheet.
+- [x] Added Manual Entry "Table Size" for setting explicit row and column counts.
+- [x] Reworked Manual Entry controls into stacked rows with minimum button widths so button labels remain readable in the sidebar.
+- [x] Rebalanced the GUI into clearer zones: project/import plus analysis shortcuts in the main toolbar, dataset editing actions in the Data Editor header, and plot actions in the Plot tab header.
+- [x] Added checkable View menu actions for sidebar, Workspace Datasheets, Saved Plots, and Plot Options visibility, with Reset View restoring all panels.
+- [x] Removed saved-plot action buttons from the sidebar so Saved Plots is primarily navigation and plot management lives with the Plot tab.
+- [x] Removed the redundant sidebar Import tab now that import is available from the File menu and main toolbar; the sidebar data-entry area is dedicated to Manual Entry.
+- [x] Performed a codebase-wide documentation pass and added missing docstrings for Python classes, public methods, private helpers, Qt slots, model functions, and dialog accessors.
+- [x] Fixed `ui/dataframe_model.py` by importing `QObject`, which is used by the table model constructor annotation.
+- [x] Hardened `.jasc` project loading so dataset names remain consistent with the workspace's unique-name registry even if a project file contains duplicate or conflicting dataset names.
+- [x] Reviewed the previous fitting changes and fixed X-uncertainty fitting by routing X error columns through SciPy ODR with proper `sx` handling instead of reading from the Y-weight column.
+- [x] Curve-fit reports now list X and Y uncertainty/weight columns separately, and residual sheets include `x_sigma` when X uncertainty is used.
+- [x] Immediate fit plots now carry selected sigma-mode X/Y error columns into the source data overlay as error bars.
+- [x] Confirmed `np.random` remains available in the safe formula namespace and restored its example in the formula cheatsheet.
+- [x] Updated ODR fitting to prefer the maintained external `odrpack` backend, added `odrpack` to `requirements.txt`, increased the ODR iteration budget, and retained a quiet `scipy.odr` fallback for older environments.
+- [x] Added a Roadmap item for project-saved custom fit models built from safe NumPy/SciPy expressions.
+- [x] Added expression-based custom fit model definitions with validation, parameter names, initial values, and compilation into the existing `FitModel` workflow.
+- [x] Added `Analysis > Custom Fit Models...` for adding, editing, duplicating, validating, and removing project custom fit models.
+- [x] Custom fit models now appear in the standard Curve Fit dialog and are passed through the existing curve-fit engine, reports, result sheets, and plot workflow.
+- [x] `.jasc` project files now save and load custom fit model definitions.
+- [x] Added `math_engine/statistics.py` with single-column summaries, quantiles, distribution diagnostics, normality tests, outlier checks, z-score/cumulative series, correlations, regression, agreement metrics, and paired/independent-sample tests.
+- [x] Added `Analysis > Statistics...` with primary/secondary sheet and column selection so statistical reports can compare columns inside one sheet or across different workspace sheets.
+- [x] Statistics outputs are saved as new workspace datasets for inspection, export, plotting, and project persistence.
+- [x] Refactored the main GUI shell into docked Workspace and Inspector panels so the central Data/Plot work area is less congested.
+- [x] Moved manual entry out of the workspace navigator and into the Data Inspector as its own tab.
+- [x] Moved plot controls into the external Plot Inspector so the plot canvas gets the central space.
+- [x] Reduced the main toolbar to project/import/export actions and grouped data/analysis actions inside the Data Inspector.
+- [x] Added current project path tracking so `Ctrl+S` saves back to the opened/saved `.jasc` file, with `Save Project As...` for choosing a new path.
+- [x] Added Data Editor undo/redo history (`Ctrl+Z`/`Ctrl+Y`) for cell edits, row/column insert/delete, formula application, and in-place derivative/integral result columns.
+- [x] Added the full multi-phase plot-type expansion plan to `Roadmap.md`, covering bar, histogram, box, violin, pie/donut, heatmap, density, contour, candlestick/OHLC, and subplot layouts.
+- [x] Started plot-type expansion Phase 1 by adding `models/plot_types.py`, a Plot Inspector plot-type selector, saved-plot persistence for plot type, and explicit Line/Scatter/Line + Markers/Errorbar rendering paths.
+- [x] Continued plot-type expansion with X/Y-compatible reporting plots: vertical bar, horizontal bar, area/fill, and histogram.
+- [x] Added saved per-series plot options for bar width, fill alpha, histogram bin count, histogram density, and cumulative histogram mode, with Plot Inspector controls shown only for relevant plot types.
+- [x] Reworked the Plot Inspector Series tab so each plot type hides non-applicable controls and relabels column-role fields where needed, e.g. Histogram uses Value dataset/column and hides line, marker, axis, and error controls.
+- [x] Completed plot-type expansion Phase 3 by adding Box Plot and Violin Plot to the plot-type registry.
+- [x] Added Plot Inspector multi-column capture for distribution plots, including a value-column multi-select list and mean, median, and outlier/extrema toggles.
+- [x] Added Matplotlib boxplot and violinplot rendering paths with saved per-series distribution-column and display-option persistence.
+- [x] Updated plot labels and queued-series summaries so box/violin distribution plots use categorical column labels instead of X/Y column wording.
+- [x] Added `SciencePlots` to runtime requirements for journal-style Matplotlib rendering.
+- [x] Added Plot Inspector style controls for SciencePlots presets, color cycles, LaTeX/no-LaTeX mode, and custom comma-separated style tokens.
+- [x] Saved plot definitions now persist selected plot style settings, and the live canvas re-renders inside a Matplotlib style context so the selected style is visible immediately.
+- [x] Added Data Editor clipboard shortcuts: `Ctrl+C` copies selected workspace cells as tab-delimited text, and `Ctrl+V` pastes tab-delimited blocks at the active cell.
+- [x] Data Editor paste now expands rows/columns as needed, clears stale formula metadata on overwritten columns, and participates in the existing `Ctrl+Z`/`Ctrl+Y` undo/redo history.
+- [x] Added Data Inspector and Data menu actions for inserting rows and columns before the current selection, with undo/redo support through the existing dataset history.
+- [x] Added a Data Editor right-click context menu on cells and column headers with Undo, Redo, Copy Values, Paste Values, Copy Column(s), and Paste Column(s).
+- [x] Added whole-column copy/paste through a custom Qt clipboard MIME payload that preserves column headers, inserts new columns before the selected/current column, and participates in undo/redo history.
+- [x] Documented the interpolated 2D-map implementation plan: X/Y/Z coordinate-column plots, linear/cubic-spline/piecewise-cubic interpolation, and coordinate locators that predict Z values from X/Y inputs.
+- [x] Started interpolated 2D-map implementation with new Interpolated Heatmap, Contour, and Filled Contour plot types.
+- [x] Added Plot Inspector X/Y/Z role controls, interpolation method selection, grid resolution, and saved-state fields for interpolated 2D maps.
+- [x] Added 2D map rendering paths in `PlotCanvas` using SciPy linear, cubic-spline, and piecewise-cubic interpolation onto a regular grid.
+- [x] Extended plot locators so 2D map series can accept X/Y coordinates and report predicted Z values on the rendered map.
+- [x] Reviewed the current application functionality against official Origin/OriginPro and SigmaPlot v16 feature areas.
+- [x] Updated `Roadmap.md` with a current capability baseline, official competitive reference links, an Origin/SigmaPlot-style gap matrix, and a staged competitive implementation roadmap.
+- [x] Added a near-term recommended order that starts with a stabilization/test gate, then completes Phase 2A plotting, then builds workbook metadata, import/export, graph templates, analysis, fitting, automation, reporting, performance, and packaging capabilities.
+- [x] Started the metadata foundation, now tracked under Competitive Stage 2, by adding lightweight per-column metadata: role, unit, long name, and comment.
+- [x] Added a Data Editor `Column Metadata...` workflow through the Data menu, Data Inspector, and dataset right-click context menu.
+- [x] Persisted column metadata in `.jasc` project files and included it in Data Editor undo/redo snapshots.
+- [x] Data Editor column headers now expose role/unit/long-name/comment metadata in tooltips alongside formula metadata.
+- [x] Whole-column in-app clipboard copy/paste now preserves column metadata through the existing custom MIME payload.
+- [x] Plot controls and analysis/fitting dialogs now use column roles as hints for default X/Y/Z/error selections where safe.
+- [x] Plot axis labels now use column long names and units when the user leaves labels blank.
+- [x] Column Metadata now shows the real column name as an editable field, so users can rename columns from the metadata table.
+- [x] Double-clicking a Data Editor column header now opens Column Metadata focused on that column.
+- [x] Column renames from the metadata workflow are undoable, carry formulas and metadata to the new name, and retarget active/saved plot column references.
+- [x] Plot Inspector axis label fields now visibly prefill from column long-name/unit metadata instead of applying metadata labels only during render.
+- [x] Axis-label prefills are tracked as automatic values so metadata/series changes can update blank or auto-filled labels without overwriting labels typed manually by the user.
+- [x] Added `math_engine/interpolation.py` for reusable 1D, 2D, and N-D interpolation/prediction operations.
+- [x] Added `Analysis > Interpolation...` and a Data Inspector Interpolation button that create new prediction datasets from the selected sheet.
+- [x] Added `InterpolationDialog` with dimensionality, source coordinate columns, value column, interpolation method, outside-range policy, smoothing, RBF epsilon, query mode, generated range/grid, existing query columns, manual coordinates, and result-sheet controls.
+- [x] Supported 1D interpolation methods: linear, nearest neighbor, cubic spline, PCHIP, Akima, and smoothing spline.
+- [x] Supported 2D interpolation methods: nearest neighbor, linear scattered, cubic spline, piecewise cubic, smooth bivariate spline, and radial basis functions.
+- [x] Supported N-D interpolation methods: nearest neighbor, linear scattered, and radial basis functions.
+- [x] Interpolation outputs now preserve useful column metadata where possible and name prediction columns as `{value_column}_interpolated`.
+- [x] Generated interpolation query ranges/grids are capped at 1,000,000 points and duplicate source coordinates are averaged before interpolation.
+- [x] Added optional companion plots to the Statistics workflow through a new "Create companion plot" checkbox and scope-aware plot-kind selector.
+- [x] Statistics companion plots now support single-column histograms with normal-curve overlays, single-column box/violin plots, z-score/cumulative result-series plots, two-column scatter plots, scatter plus regression line, box/violin comparisons, and Bland-Altman plots.
+- [x] Added `PlotTab.queue_plot_series()` so analysis workflows can hand prebuilt plot queues to the existing editable/savable Plot tab.
+- [x] Updated the advanced-statistics roadmap to prioritize group-aware dialogs and companion plot templates before ANOVA, nonparametric, PCA, clustering, logistic/ROC, survival, and distribution-fitting families.
+- [x] Fixed the SciPy 1.17+ `stats.anderson` FutureWarning by explicitly requesting Anderson-Darling p-values with `method="interpolate"` when supported, while preserving legacy critical-value output for older SciPy versions.
+- [x] Expanded the Statistics workbench with a grouped/factor scope using a numeric value column plus a group column.
+- [x] Added grouped statistics operations: complete grouped report, descriptive summary by group, assumption checks, one-way ANOVA, Kruskal-Wallis, Tukey HSD post-hoc comparisons, and pairwise Mann-Whitney tests with Holm-adjusted p-values.
+- [x] Statistics grouped companion plots now create box or violin plots by group through generated helper datasets.
+- [x] Added a multi-column Statistics scope with selectable columns from one sheet.
+- [x] Added multi-column statistics operations: complete report, per-column descriptive/distribution summary, pairwise Pearson/Spearman/Kendall correlations, covariance values, and standardized PCA summaries.
+- [x] Statistics multi-column companion plots now support selected-column box/violin plots, Pearson correlation heatmaps, and PCA explained-variance bar charts.
+- [x] Reprioritized `Roadmap.md` so operation recipes, batch processing, batch logs, and cumulative outputs are Competitive Stage 1 immediately after stabilization.
+- [x] Added a detailed batch-processing implementation plan covering formula/calculated columns, derivative/integral, FFT/iFFT, interpolation, statistics, curve fitting, plotting, and future peak/signal/data-preparation workflows.
+- [x] Updated `Agent_Instructions.md` so future agents treat batch recipes and cumulative statistics/fitting outputs as the next major product leap before broad plot/import expansion.
+- [x] Started the first batch-processing implementation slice in `Apply Formula`: the formula dialog now lets users choose target worksheets, applies the same expression to each selected sheet, preserves formula metadata, and creates a formula batch summary dataset for multi-sheet runs.
+- [x] Improved formula authoring by adding positional aliases such as `col1`, `col2`, etc. to the formula engine and insert controls in the Apply Formula dialog for either `colN` aliases or exact `col("Column Name")` references.
+- [x] Generated formula, derivative/integral, interpolation, FFT/iFFT, statistics, and curve-fit outputs now write an `Operation: ...` provenance line into output column metadata comments while preserving existing user comment text.
+- [x] Added formula batch overwrite safeguards: target-column conflicts are resolved through an explicit policy, unique new output columns are the default, overwrite/update mode requires confirmation, and formula batch summary sheets record requested target, actual target, conflict state, and output action.
+- [x] Added large-dataset safeguards: imports warn before reading large files, loaded/manual datasets warn when cell count or memory estimate is high, project open warns about large stored sheets, and the Data Editor skips full column auto-sizing for large sheets.
+- [x] Added the first backend-boundary slice in `core/data_backends.py`: backend labels, `DatasetProfile`, large-data thresholds, DataFrame/file size profiling, and shared byte formatting. `MainWindow` now uses this module for large-file warnings, large-dataset warnings, project large-sheet notices, and size-aware Data Editor column auto-sizing.
+- [x] Added a persisted dataset backend label to `Dataset`/`.jasc` metadata, defaulting old and new in-memory worksheets to `pandas`; non-Pandas backends will be surfaced in the Data Editor summary once introduced.
+- [x] Updated `Roadmap.md` and `Agent_Instructions.md` so full DuckDB/PyArrow/Parquet large-dataset mode follows the first usable batch workflow, while the lightweight backend/profile boundary is maintained now to prevent batch recipes from assuming every source is an editable Pandas DataFrame.
+- [x] Added the first PyInstaller-aware parallel batch execution layer in `core/batch_processing.py`: top-level formula worker functions, pickle-friendly task/result dataclasses, Auto/Sequential/Parallel execution decisions, worker-count limits, elapsed-time reporting, and sequential fallback if process startup fails.
+- [x] Extended Apply Formula batch runs with execution controls. Whole-sheet non-visible targets can now run through worker processes, while the active sheet stays on the visible model path for undo/redo. Formula batch summary sheets now include per-sheet execution mode and elapsed seconds.
+- [x] Added `multiprocessing.freeze_support()` in `main.py` and moved Qt imports inside `main()` so future Windows/PyInstaller worker processes do not import the full UI shell at child-process startup.
+- [x] Started the second batch-processing implementation slice for calculus operations: `Derivative` and `Integral` now expose target worksheet selection, multi-Y selection, the same unique/stop/overwrite target-column policy used by formulas, sequential per-sheet/per-Y execution, active-sheet plotting when available, operation provenance metadata comments, and cumulative summary datasets with source sheet, requested/resolved Y column, bindings, method, output action, row/finite counts, min/max/mean, status/error text, and elapsed seconds.
+- [x] Started the third batch-processing implementation slice for signal transforms: `FFT` and `Inverse FFT` now expose target worksheet selection, multi-column signal/spectrum selection, create one result sheet per source/column result, support `{source}` and `{column}` result-sheet naming, preserve operation metadata comments, plot the active-source result when available, and create cumulative quality/log summaries with output sheets, sample/reconstruction counts, dominant FFT frequency/amplitude, spectral power, reconstructed real-signal metrics, status/error text, and elapsed seconds.
+- [x] Fixed an FFT batch-summary crash when using a selected window: `MainWindow` now imports `WINDOW_METHODS` before using it to write readable FFT window labels in the cumulative summary.
+- [x] Performed a quick license compatibility pass against the current `LICENSE`, `requirements.txt`, and source imports. The project is GPL-3.0; current direct runtime dependencies are GPL-compatible at a high level, with PySide6/Qt packaging notices and source/license obligations remaining the main distribution checklist item.
+- [x] Started the fourth batch-processing implementation slice for interpolation: `Interpolation` now exposes target worksheet selection, repeats coordinate/method/query settings across selected sheets, expands over selected value columns, creates one prediction sheet per source/value result, supports `{source}` and `{column}` result-sheet naming, preserves interpolation metadata and operation comments, and creates cumulative quality/log summaries.
+- [x] Removed the automatic combined interpolation prediction sheet. For interpolation batches, raw stacked prediction points are redundant and potentially heavy; cumulative sheets should be reserved for comparable operation results such as fit parameters/metrics, statistics, integrated totals, or multi-column calculated outputs.
+- [x] Added a shared batch column-matching choice to Apply Formula, Derivative/Integral, FFT/iFFT, Interpolation, Curve Fit, and Statistics. Users can now match inputs by exact column name or by source-sheet column position (`col1`, `col2`, ...); batch summaries record the binding mode plus requested/resolved input columns where applicable.
+- [x] Added multi-column batch expansion for Derivative/Integral, FFT/iFFT, and Interpolation. Users can now select multiple Y/signal/real/value columns per target sheet; batch execution expands to one sheet-column job per selection, result names support `{column}` with automatic per-column suffixing when needed, and cumulative summaries record one row per source sheet and selected column or spectrum pair.
+- [x] Started the curve-fitting batch implementation slice. `Curve Fit` now supports target worksheet selection, multi-Y/response selection, exact-name or column-position binding for X/Y/error inputs, none/one/shared or one-per-Y Y-weight pairing, per-source/per-Y fit and residual output sheets, `{source}`/`{column}` output naming, first active-source fit plotting, operation metadata comments, and a cumulative `{current}_fit_batch_summary` with one row per sheet/Y fit containing parameters, standard errors, bounds/fixed flags, covariance availability, fit metrics, warnings, status/error text, elapsed seconds, and output sheet names.
+- [x] Compacted the Curve Fit dialog layout after batch controls made it too tall: Source and Model panels now sit side by side, parameters remain visible in the model panel, and Uncertainty, Output, and Batch settings live in a tabbed options area using the same underlying controls.
+- [x] Added an optional Curve Fit output checkbox for parameter covariance/correlation diagnostics. When enabled, fitting creates a long-format parameter covariance/correlation sheet; batch fitting creates a cumulative `{current}_fit_parameter_correlations` sheet with source sheet, Y column, parameter pair, covariance, normalized correlation, and `pair_type` for filtering cross-parameter terms.
+- [x] Completed the initial batch-statistics implementation slice. `Statistics` now supports target worksheet selection, multiple primary/value columns for single and grouped operations, one-or-matched secondary column selection for two-column operations, exact-name or column-position binding, per-source/per-column result sheets, `{source}`/`{column}` result naming, operation metadata comments, first active-source companion plotting, and a cumulative `{current}_statistics_batch_summary` with long-format source/input/result/status rows.
+- [x] Updated `Roadmap.md` and `Agent_Instructions.md` so the next feature stage is an image/figure data extraction import module: raster import, axis calibration, manual/assisted point extraction, preview, provenance, and output to normal workspace datasets.
+- [x] Added a reusable `BatchPreviewDialog` and wired preflight previews into Formula, Derivative/Integral, FFT/iFFT, Interpolation, Statistics, and Curve Fit batch runs. Multi-job or failing preflights now show requested/resolved inputs, output targets, binding mode, and blocking errors before any batch output is written.
+- [x] Added cancelable modal progress for sequential batch runs across Formula, Derivative/Integral, FFT/iFFT, Interpolation, Statistics, and Curve Fit. Canceled jobs are recorded in cumulative summaries where practical. This keeps the GUI event loop responsive with `QApplication.processEvents()` but is not yet a true background worker/thread architecture.
+- [x] Hardened batch Statistics outputs: row-wise z-score/cumulative operations now write compact batch-summary metrics instead of stacking every row into the cumulative sheet, and metric/value outputs create a `{current}_statistics_batch_wide_summary` pivot sheet when useful.
+- [x] Strengthened batch Curve Fit report export: multi-job fit runs now create `{current}_fit_reports` with source sheet, Y column, output fit sheet, model, method, R2/RMSE, and the plain-text fit report for export/filtering.
+- [x] Reworked `Roadmap.md` and `Agent_Instructions.md` around the product decision to defer a formal recipe system. Batch hardening now prioritizes previews, cancel/progress, semantic role matching, workspace undo for in-place non-visible edits, background workers, and richer summaries inside the current operation dialogs.
+- [x] Created comprehensive user manual (`JASC_Manual.md`) covering all application features (UI layout, data ingestion, manual editing, column metadata, formulas, signal processing/calculus, interpolation, statistics, curve fitting, plotting, and batch processing).
+- [x] Developed a dynamic PDF compilation script (`generate_pdf_manual.py`) using `fpdf2` to build a beautifully formatted PDF user manual (`JASC_Manual.pdf`) with a cover page, logo integration, dynamic Table of Contents, headers/footers, tables, and alert callouts.
+- [x] Compiled the PDF manual warning-free and verified the output size (`60.6 KB`).
 
 ## 3. Active Bugs / Known Issues
-- [ ] No application bugs found in smoke testing.
-- [ ] `git` is not available in the current shell, so worktree status could not be checked.
+- [ ] General interpolation workbench is implemented but still needs compile/import, Qt dialog, numerical smoke, and manual GUI tests once a usable Python/Qt runtime is available.
+- [ ] Statistics companion plot, multi-column, and grouped-statistics support is implemented but still needs compile/import, Qt dialog, numerical, and manual plot smoke tests once a usable Python/Qt runtime is available.
+- [ ] Interpolated 2D-map support is implemented but still needs compile/import, Qt, and manual rendering smoke tests once a usable Python/Qt runtime is available.
+- [ ] Column metadata support is implemented but still needs compile/import, Qt, save/load, undo/redo, copy/paste, and role-hint smoke tests once a usable Python/Qt runtime is available.
+- [ ] Formula batch application is an initial slice: selected-row mode is current-sheet only, non-visible target sheets are updated directly without workspace-level undo history when explicit overwrite/update is confirmed, semantic role-based mapping is not implemented yet, and cancelable progress only covers the sequential portion of formula runs.
+- [ ] Derivative/integral batch application is an initial sequential slice: worksheets can preview and match X/Y inputs by exact name or position and expand over multiple selected Y columns, but semantic role-based mapping, non-visible sheet undo history, per-source result-sheet mode, background workers, and parallel worker execution are not implemented yet.
+- [ ] FFT/iFFT batch application is an initial sequential slice: worksheets can preview and match signal/spectrum inputs by exact name or position and expand over multiple selected signal/real spectrum columns, but result sheets are always new workspace datasets, semantic role mapping/background workers/parallel workers are not implemented, and spectral diagnostics are still basic summary metrics.
+- [ ] Interpolation batch application is an initial sequential slice: worksheets can preview and match coordinate/value/query inputs by exact name or position and expand over multiple selected value columns, but semantic role mapping/background workers/parallel workers are not implemented, and cumulative output is intentionally limited to a compact quality/log summary rather than stacked raw predictions.
+- [ ] Statistics batch application is an initial sequential slice: worksheets can preview and match primary/secondary/group/multi-column inputs by exact name or position and expand over selected value columns, and compact wide/row-wise guards are started, but semantic role mapping/background workers/parallel workers and broader advanced-statistics families are not implemented yet.
+- [ ] Curve-fitting batch application is an initial sequential slice: worksheets can preview and match X/Y/X-error/Y-error inputs by exact name or position and expand over multiple selected response columns, with summary/correlation/report export sheets, but semantic role mapping/background workers/parallel workers, global/shared-parameter fitting, and richer fit-report plots are not implemented yet.
+- [ ] Import From Figure is an initial digitizer slice: it supports raster loading, pointer-centered zoom/magnifier, four-point linear/log calibration, manual point picking, ROI brush scan restriction, dark/color-assisted auto trace, connected-symbol barycenter extraction, and sampled-template symbol matching, but still needs compile/import checks, Qt/manual smoke tests, editable point cleanup, stronger overlap splitting, multi-curve segmentation, homography/perspective warping correction, axis de-skew/twist correction, OCR/tick assistance, and uncertainty/error capture.
+- [ ] Formula batch parallel execution is process-based and still synchronous from the GUI perspective. It can speed compatible whole-sheet batches, but DataFrames/Series must be pickled into and out of worker processes, so small batches or very large in-memory sheets may run faster or safer sequentially. True background job UI is still pending.
+- [ ] Large-dataset support is still in-memory Pandas plus profiling/warnings, not chunked/lazy. Undo snapshots still deep-copy the visible dataset, so very large sheets can consume substantial memory during edits and in-place analysis. Full DuckDB/PyArrow/Parquet-backed large datasets remain planned after the first usable batch workflow unless backend dispatch becomes a blocker sooner.
+- [ ] Python compile/import and Qt smoke checks were not rerun after the latest Data Editor, interpolated 2D-map, metadata, interpolation-workbench, statistics companion-plot, formula-batch, calculus-batch, FFT/iFFT-batch, interpolation-batch, curve-fit-batch/layout, batch-statistics, batch-preview/progress, formula-authoring, large-dataset safeguard, and figure-digitizer changes because `python` resolves to the Microsoft Store launcher and currently fails with "A specified logon session does not exist"; `py` is not installed.
+- [ ] Required analytical-model list mentions arbitrary n-th degree polynomial fitting, but the current fit registry only has linear, quadratic, and cubic polynomial models.
+- [ ] There is no automated test suite or PyInstaller/spec packaging file in the repository yet.
+- [ ] Before distributing a packaged `.exe`, generate a dependency/SBOM report and include third-party license notices for direct and bundled transitive dependencies, especially PySide6/Qt components.
 
 ## 4. Next Steps for Current/New Session (To-Do)
-1. Run `python main.py` in a normal desktop session and manually test derivative, integral, FFT, iFFT, selected-column deletion, and curve fitting on real datasets.
-2. Add Phase 4 refinements: parameter bounds, fixed/free parameter controls, weighted fits, and optional confidence-band plotting.
-3. Add optional "plot result immediately" shortcuts for Phase 3 outputs.
-4. Add richer plot controls such as scatter-only mode, legend toggle/location, and per-series labels.
-5. Add workspace management actions such as rename/remove dataset.
+1. Start Competitive Stage 0 from `Roadmap.md`: install or activate a usable Python runtime, add repeatable smoke tests, and verify the current Data Editor/context-menu, metadata, interpolation, statistics, and 2D-map changes.
+2. Start Competitive Stage 1 from `Roadmap.md`: harden the current dialog-based batch workflows with semantic role matching, standardized preflight previews, backend capability checks, batch run result/log structures, and true background workers where needed. Do not add a formal recipe system unless the product direction changes.
+3. Finish the formula/calculated-column batch MVP by adding semantic role/position fallback, backend-aware compatibility fields, workspace-level undo/history for non-visible target sheets, and cancel/progress coverage for parallel worker runs.
+4. Harden formula/calculus batch MVPs with semantic role matching, workspace-level undo/history for non-visible target sheets, background workers, and optional parallel execution where safe.
+5. Manually smoke-test all batch previews and cancelable progress: formula, derivative, integral, FFT, iFFT, interpolation, statistics, and curve fit with exact-name and column-position binding, success/failure/cancel cases, and generated cumulative summaries.
+6. Manually smoke-test batch statistics: single-column reports over multiple sheets/columns, pair statistics with one shared secondary and matched secondary selections, grouped statistics with one group column, multi-column statistics, row-wise z-score/cumulative compact summaries, wide pivot summaries, companion plot creation for the active source, and cumulative failure/cancel rows.
+7. Harden curve fitting with a focused global/shared-parameter fitting module and richer fit-report plotting/export controls.
+8. Harden the image/figure data extraction import module: smoke-test raster loading, pointer-centered zoom/magnifier, pan controls, four-point X/Y calibration, linear/log transforms, manual point extraction, ROI brush auto-trace restriction, selected-color tracing, connected-symbol barycenter detection, sampled-template symbol matching over model-line crossings and overlapping markers, extracted-data preview, workspace dataset output, metadata/provenance, and project save/load; then add editable point cleanup, stronger overlap splitting, multi-curve segmentation, homography/perspective warping correction, OCR/tick assistance, and uncertainty/error capture.
+9. Add batch plot-template application and graph export queues once column mapping can use name, role, and position.
+10. Manually smoke-test column metadata: edit roles/units/long names/comments, rename columns from the metadata table, open metadata by double-clicking a column header, undo/redo metadata and rename edits, save/load `.jasc`, delete metadata-bearing columns, copy/paste metadata-bearing columns, and confirm plot/math/fitting defaults honor X/Y/Z/error roles.
+11. Manually smoke-test Plot Inspector metadata labels: select metadata-bearing X/Y/Z columns, add/update/load plots, run derivative/integral/FFT/fit plot shortcuts, and confirm Axes fields show long-name/unit labels while preserving manually typed axis labels.
+12. Manually smoke-test Analysis > Statistics companion plots plus multi-column and grouped operations: auto single-column histogram/normal overlay, box, violin, z-score result series, cumulative result series, two-column scatter, regression line, Bland-Altman, multi-column correlation/PCA outputs and plots, grouped ANOVA/Kruskal/Tukey/Mann-Whitney outputs, and grouped/cross-sheet box/violin helper dataset creation.
+13. Manually smoke-test Analysis > Interpolation: 1D generated ranges with all methods and outside policies, 2D generated grids with linear/cubic/piecewise/RBF methods, N-D existing-column and manual query modes, duplicate source-coordinate averaging, generated-grid cap warnings, metadata propagation, and project save/load.
+14. Manually smoke-test Phase 2A plot types on real datasets: Line, Scatter, Line + Markers, Errorbar, Vertical Bar, Horizontal Bar, Area, Histogram, Box Plot, and Violin Plot, including saved plot save/load and invalid column selections.
+15. Continue Competitive Stage 2 metadata/workbook work where it improves batch column matching, source tracking, project organization, and notes/report storage.
+16. Harden plot-type expansion Phase 4: family/subtype selection, pie/donut label/value charts, and Voronoi Composition now have initial implementations, but still need explicit percentage controls, exploded slice controls, label-density/legend controls, Voronoi geometry controls, metadata role hints, and manual save/load smoke tests.
+17. Start the next advanced-statistics layer after batch statistics exists: two-way/repeated-measures ANOVA design inputs, ANCOVA planning, clustering result datasets, logistic/ROC workflows, and richer statistical advisor/reporting outputs.
+18. Manually smoke-test interpolated 2D maps on irregular X/Y/Z datasets: heatmap, contour, filled contour, linear interpolation, cubic spline interpolation, piecewise cubic interpolation, saved plot save/load, dataset rename, and X/Y locator prediction of Z values.
+19. Continue the interpolated 2D-map follow-ups: regular-grid heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, and contour-level controls.
+20. Resolve documentation/requirement drift: arbitrary n-th degree polynomial fitting.
+21. Write the PyInstaller setup script for building the standalone `.exe`.
 
 ## 5. Architectural Context Notes
 - File parsing lives in `core/file_io.py`; Qt file selection and dialogs live in the UI layer.
@@ -114,15 +335,64 @@
 - Manual entry converts columns to numeric dtype only when every non-empty value in that column is numeric.
 - Manual entry clipboard paste starts at the active cell and expands the table as needed.
 - The workspace data editor writes cell edits directly to the selected dataset's DataFrame.
+- The workspace Data Editor supports `Ctrl+C`/`Ctrl+V` tab-delimited clipboard transfer. Pasted blocks grow rows/columns when needed and are captured by the dataset undo stack.
+- The workspace Data Editor context menu is installed on both the table viewport and horizontal header. Right-clicking an unselected cell or column makes it the active target before showing Undo/Redo and value/column clipboard actions.
+- Whole-column copy/paste uses a custom Qt MIME payload, `application/x-jasc-dataframe-columns`, so in-app copies preserve headers and column metadata. Plain tab-delimited clipboard text can still be pasted as generated `Pasted Column N` columns.
+- Column metadata is stored per dataset as role, unit, long name, and comment. Supported role keys are `x`, `y`, `z`, `error`, `x_error`, `y_error`, `group`, `label`, and `weight`.
+- Column metadata is persisted in `.jasc` project metadata, participates in Data Editor undo/redo snapshots, and is pruned when columns are deleted.
+- Data Editor column-header tooltips combine column metadata and stored formula text. Plot axis labels prefer long name plus unit when labels are blank.
+- Current role hints are lightweight: PlotTab prefers tagged X/Y/Z/error columns for selectors, while derivative/integral/FFT/curve-fit dialogs use tagged columns as initial defaults.
+- PlotTab now writes metadata-derived axis labels into the Axes controls themselves. The automatic-label tracker updates blank/auto-filled labels when metadata or series choices change but leaves manually edited labels in place.
+- Column rename is currently handled through `ColumnMetadataDialog` rather than a separate rename dialog. `DataFrameTableModel.apply_column_metadata()` updates DataFrame column names, formula keys, and column metadata in one undoable operation.
+- Data Editor horizontal-header double-click opens Column Metadata focused on the clicked column. Rename maps are propagated to active plot series and saved plot definitions through `PlotTab.rename_column_references()` and `Workspace.rename_column_references_in_plots()`.
+- General interpolation logic lives in `math_engine/interpolation.py`; keep SciPy interpolation details there and let the UI pass selected columns, method, parameters, and query points.
+- `InterpolationDialog` supports three query modes: generated range/grid for 1D/2D, existing coordinate columns for 1D/2D/N-D, and manual coordinate rows for 1D/2D/N-D.
+- `MainWindow._run_interpolation()` creates a new workspace dataset rather than editing the source dataset. It propagates coordinate metadata and sets the prediction column metadata from the source value column.
+- Interpolation methods currently include 1D linear/nearest/cubic spline/PCHIP/Akima/smoothing spline; 2D nearest/linear/cubic spline/piecewise cubic/smooth bivariate spline/RBF; and N-D nearest/linear/RBF.
+- Generated interpolation queries are capped at 1,000,000 points to avoid accidental huge result sheets.
+- Statistics companion plots are optional in `StatisticsDialog`. Auto plots currently choose histograms for single report metrics, result-series plots for z-score/cumulative outputs, regression plots for linear regression, Bland-Altman plots for agreement, correlation heatmaps/PCA variance plots for multi-column results, and box plots for independent-sample/grouped comparisons.
+- `MainWindow._queue_statistics_companion_plot()` may create helper datasets for normal-curve overlays, regression lines, Bland-Altman mean/difference data, or cross-sheet comparison columns. These helper datasets are regular workspace datasets and should be tested with save/load.
+- `PlotTab.queue_plot_series()` is the preferred public helper for future analysis workflows that need to replace the current plot queue with prebuilt `PlotSeries` instances.
+- Statistics grouped operations use `StatisticOperation.scope == "group"` and reuse the secondary selector as the group/factor column. The engine expects a numeric primary/value column and a categorical secondary/group column.
+- Statistics multi-column operations use `StatisticOperation.scope == "multi"` and the Statistics dialog multi-select list. The engine expects two or more numeric columns from the primary sheet.
+- Grouped statistics currently include one-way ANOVA, Kruskal-Wallis, Tukey HSD, pairwise Mann-Whitney with Holm-adjusted p-values, Levene/Brown-Forsythe and Bartlett equal-variance checks, and per-group Shapiro-Wilk normality checks.
+- Grouped statistics companion plots create wide helper datasets with one column per group so existing box/violin plot rendering can be reused.
+- Batch processing is now the next major roadmap priority. Treat it as dialog-based worksheet selection, visible column mapping, preflight previews, per-source outputs, cumulative outputs, progress/cancel, and batch logs.
+- Batch inputs should bind by explicit user choice first: current dialogs expose exact-name and column-position matching; the next mapping layer should add semantic role matching. Any automatic fallback or ambiguous mapping must be shown to the user before execution.
+- Batch statistics and curve fitting must produce cumulative long-format sheets in addition to per-source outputs. Formula/calculus batches should update each target sheet and produce cumulative run summaries.
+- Statistics now uses `StatisticsDialog` plus `MainWindow._run_statistics_batch()` for both one-shot and multi-target execution. The dialog exposes multi-select primary/value columns, multi-select secondary columns for pair operations, a single group column for grouped operations, multi-column scope selection, target worksheets, exact-name/position binding, preflight previews, and cancelable progress. The cumulative summary stacks annotated result rows, compacts row-wise z-score/cumulative outputs, and can create a wide metric pivot summary. Follow-ups should add semantic role mapping, background workers, and optional parallel workers.
+- The image/figure data extraction workflow now lives in `FigureDigitizerDialog` and `MainWindow._import_from_figure()`. It imports common raster images, displays them in a zoomable/pannable `QGraphicsView`, calibrates X/Y from four picked points, supports linear/log transforms, records manual, auto-trace, connected-symbol centroid, and sampled-template symbol points, previews extracted rows, and writes normal workspace datasets with `x`/`y` roles plus pixel/source/trace/ROI/symbol provenance columns. The current auto trace can scan dark pixels or a selected color inside the calibrated bounds, optionally restricted by painted ROI brush marks. Connected-symbol detection uses connected matched-pixel components and weighted barycenters. Sampled-template matching learns one marker from a user-selected box and is the preferred path when markers touch model lines. Treat this as a seed for future editable point cleanup, stronger overlap splitting, multi-curve segmentation, and homography/warping correction rather than a finished digitizer.
+- Future operation families should not be considered batch-complete until they define compatibility checks, preview rows, per-source outputs, cumulative outputs, and batch-log fields.
+- Batch parallelism must stay PyInstaller-friendly: keep worker functions at module top level, keep task/result dataclasses pickle-friendly, and never pass Qt objects, bound methods, lambdas, open file handles, or workspace/model objects into process workers. The active Data Editor sheet should keep using model methods until workspace-level undo exists for batch edits.
+- Data Editor "Add" row/column actions append to the end; "Insert" row/column actions insert before the first selected row/column, or append when nothing is selected.
 - Export currently writes UTF-8 CSV or tab-delimited TXT without the DataFrame index.
-- Formula expressions expose valid Python-identifier columns directly (`x + y`) and all columns through `col("Column Name")`.
+- Formula expressions expose valid Python-identifier columns directly (`x + y`), positional aliases such as `col1` and `col2` when they do not conflict with existing names, and all columns through exact references like `col("Column Name")`.
+- Apply Formula includes column-reference insertion controls so users can select a column and insert either its positional alias or an exact-name `col("...")` expression instead of manually typing long column names.
+- Apply Formula protects existing target columns by default. Its target-exists policy can create unique new output columns, stop on conflicts, or explicitly overwrite/update existing columns after a confirmation; multi-sheet summary datasets include requested/actual targets and output actions.
+- Derivative and Integral now use the same worksheet-selection and target-column conflict policy pattern as Apply Formula. `MainWindow._run_column_math_batch()` is the current sequential template for the next batch families: exact-name/position column matching, multi-Y expansion, per-sheet/per-column try/except, active-sheet undo path, generated operation metadata, tidy cumulative summary dataset, and explicit known gaps.
+- FFT and Inverse FFT now use worksheet-selection and per-source/per-column result-sheet creation through `MainWindow._run_fft_batch()` and `_run_ifft_batch()`. Result-sheet names support `{source}` and `{column}` for custom batch naming; if the default current-sheet name is left unchanged, other sources use `{source}_FFT` or `{source}_iFFT`, with automatic selected-column suffixing for multi-column runs. Signal/spectrum inputs can be matched by exact name or source column position.
+- Interpolation now uses worksheet-selection and per-source/per-value result-sheet creation through `MainWindow._run_interpolation_batch()`. Generated/manual query points are shared across selected sheets; existing-column query mode reads query columns from each source sheet independently after exact-name/position binding. Batch interpolation now creates per-source/per-value prediction sheets plus a quality/log summary only, with no automatic stacked raw prediction sheet.
+- Curve Fit now uses worksheet-selection and per-source/per-Y result-sheet creation through `MainWindow._run_curve_fit_batch()`. X/Y/X-error/Y-error inputs can be matched by exact name or source column position. Y weight/sigma selection supports none, one shared selected column, or one selected weight column per selected Y column. Fit/residual result names support `{source}` and `{column}` and auto-suffix multi-Y runs. The cumulative fit summary is one row per sheet/Y fit with parameter/metric columns for direct comparison.
+- `FitDialog` uses a compact two-panel plus tabbed-options layout: Source and Model are side by side, while Uncertainty, Output, and Batch controls are in tabs. Keep future fitting controls in those panels/tabs rather than returning to a tall single-column form.
+- Optional fit covariance/correlation output is controlled by `FitDialog.create_parameter_correlation_sheet()`. The generated sheet is long-format, not a square matrix, so batch runs can compare parameter cross-correlations across source sheets and response columns. Filter `pair_type == "cross"` for off-diagonal parameter correlations.
+- Generated formula, derivative/integral, interpolation, FFT/iFFT, statistics, and curve-fit outputs store their latest operation in output column metadata comments using `Operation: ...`; existing non-operation comment lines are preserved.
+- Large file/dataset safeguards are centralized in `core/data_backends.py`: file imports warn above 100 MiB, DataFrame additions warn above 2,000,000 cells or 250 MiB estimated DataFrame memory, project open reports large stored sheets, and Data Editor auto-sizing is skipped above 250,000 cells.
+- `core/data_backends.DatasetProfile` plus the persisted `Dataset.backend` label are the first backend boundary. Keep future batch compatibility checks, source-backend labels, large-data import previews, and materialize/query decisions routed through this layer rather than duplicating size/backend checks in UI modules.
+- Full large-dataset mode should use Pandas for normal editable sheets and DuckDB plus PyArrow/Parquet for read-only or limited-edit large datasets with preview/query/sample/materialize workflows. Do not globally replace Pandas with Modin/Dask/Polars.
 - Formula expressions include common NumPy functions/constants such as `sin`, `log`, `sqrt`, `where`, `pi`, and `np.pi`; arbitrary imports, attribute access, and statements are intentionally blocked.
 - Formula exponentiation uses Python syntax (`**`); `^` is intentionally rejected to avoid accidental bitwise-XOR results.
 - Formula metadata is currently in-memory project state: it is retained while the app session/dataset exists, but it is not yet exported with CSV/TXT files.
 - Formula namespaces expose a curated NumPy/SciPy math/signal/stat/integration subset, including examples such as `np.gradient(x)`, `scipy.special.erf(x)`, `scipy.signal.savgol_filter(y, 11, 3)`, `stats.zscore(x)`, and `integrate.cumulative_trapezoid(y, x, initial=0)`.
 - File-oriented helpers such as `np.load` are intentionally unavailable in formulas.
-- Plotting lives in `ui/plot_canvas.py`; main-window controls collect workspace column mappings and pass `PlotSeries` objects to the canvas.
+- Plotting UI and plot state live in `ui/plot_tab.py`; rendering primitives live in `ui/plot_canvas.py`.
+- Saved plot definitions live in `Workspace` as JSON-friendly state dictionaries and are serialized in `.jasc` project metadata under `plots`.
 - Cross-dataset plots currently align X/Y data by row order and truncate to the shorter column length before dropping non-numeric/blank points.
+- SciencePlots styles are configured from the Plot Inspector Axes tab and passed to `PlotCanvas.plot_series()` as style names. The canvas rebuilds its axes inside `matplotlib.style.context(...)` so styles affect live rendering, not only saved plot metadata.
+- SciencePlots LaTeX rendering is disabled by default by appending `no-latex` whenever a SciencePlots preset is used and "Use LaTeX text" is unchecked.
+- Box and violin plots use the selected Y/data dataset plus a saved `distribution_columns` list instead of X/Y column pairing. Their saved per-series options include mean, median, and outlier/extrema toggles.
+- Interpolated 2D maps should use explicit X coordinate, Y coordinate, and Z/value column roles. Saved plot state should keep these roles plus interpolation method, grid resolution, and locator X/Y coordinates.
+- The current interpolated 2D-map implementation renders irregular X/Y/Z point clouds as heatmap, contour, or filled contour by interpolating onto a regular grid in `PlotCanvas`.
+- Interpolated 2D-map dataset references include `x_dataset`, `y_dataset`, and `z_dataset`; workspace dataset renames update all three saved-plot references.
 - Right-axis plotting is controlled per queued series; moving an already queued series currently means removing it and adding it again with the desired axis.
 - Plot ranges are optional blank min/max fields; blank entries leave that side auto-scaled.
 - Plot locators perform piecewise linear interpolation on the plotted numeric data after X/Y log-scale filtering and mark the computed point on the correct axis.
@@ -134,4 +404,9 @@
 - Curve fitting is implemented as the first Phase 4 pass, with model/method selection, fitted-curve datasets, immediate overlay plotting, and full text reports.
 - Phase 4 curve fitting saves fitted curve points as a new workspace dataset with `fit_x` and `fit_y` columns.
 - Running a fit replaces the current plot queue with the source data and fitted curve so the overlay is visible immediately.
-- Fit initial-parameter text accepts comma, semicolon, or whitespace-separated numbers; leaving it blank uses automatic guesses based on the selected data.
+- Fit parameters are edited in a table with initial values, optional lower/upper bounds, and fixed/free checkboxes.
+- Curve fitting can use an optional sigma/error column or weight column; weight mode converts weights to sigma as `1/sqrt(weight)`.
+- Custom fit models are project-scoped definitions made of a model name, expression, parameter names, and default initial values. They compile into the same `FitModel` structure used by built-in models.
+- Custom fit model expressions use `x` for the independent variable and expose a deterministic safe NumPy/SciPy subset. Random generation remains available for data formulas, not for fit model evaluation.
+- Confidence bands are stored as `fit_lower` and `fit_upper` in the fitted-curve dataset when enabled.
+- Residual outputs are stored as a separate dataset with `x`, `observed`, `fitted`, and `residual` columns when enabled.
