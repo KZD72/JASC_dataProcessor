@@ -19,7 +19,7 @@ from scipy.interpolate import (
     interp1d,
 )
 
-from math_engine.calculus import MathOperationError
+from math_engine.calculus import MathOperationError, validate_numeric_column_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,10 +174,12 @@ def query_points_from_columns(frame: pd.DataFrame, columns: list[str]) -> np.nda
     if missing:
         raise MathOperationError("Missing query column(s): " + ", ".join(missing))
 
-    data = pd.DataFrame({
-        column: pd.to_numeric(frame[column], errors="coerce")
-        for column in clean_columns
-    }).replace([np.inf, -np.inf], np.nan).dropna()
+    numeric_columns: dict[str, pd.Series] = {}
+    for column in clean_columns:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        validate_numeric_column_metadata(frame, column, values)
+        numeric_columns[column] = values
+    data = pd.DataFrame(numeric_columns).replace([np.inf, -np.inf], np.nan).dropna()
     if data.empty:
         raise MathOperationError("Query columns do not contain any complete numeric coordinate rows.")
     return data.to_numpy(dtype=float)
@@ -215,10 +217,12 @@ def _source_points(
     if missing:
         raise MathOperationError("Missing source column(s): " + ", ".join(missing))
 
-    data = pd.DataFrame({
-        column: pd.to_numeric(frame[column], errors="coerce")
-        for column in [*coordinate_columns, value_column]
-    }).replace([np.inf, -np.inf], np.nan).dropna()
+    numeric_columns: dict[str, pd.Series] = {}
+    for column in [*coordinate_columns, value_column]:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        validate_numeric_column_metadata(frame, column, values)
+        numeric_columns[column] = values
+    data = pd.DataFrame(numeric_columns).replace([np.inf, -np.inf], np.nan).dropna()
     if data.empty:
         raise MathOperationError("Source columns do not contain complete numeric coordinate/value rows.")
 

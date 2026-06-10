@@ -9,6 +9,8 @@ import pandas as pd
 from scipy import fft as scipy_fft
 from scipy import integrate, signal
 
+from core.workspace import COLUMN_NUMERIC_TYPES, dataframe_column_metadata
+
 
 class MathOperationError(ValueError):
     """Raised when a math operation cannot be performed on the selected data."""
@@ -212,9 +214,31 @@ def _numeric_column(frame: pd.DataFrame, column: str | None, minimum_points: int
         raise MathOperationError(f"Column '{column}' does not exist.")
 
     values = pd.to_numeric(frame[column], errors="coerce")
+    validate_numeric_column_metadata(frame, column, values)
     if values.notna().sum() < minimum_points:
         raise MathOperationError(f"Column '{column}' needs at least {minimum_points} numeric value(s).")
     return values
+
+
+def validate_numeric_column_metadata(frame: pd.DataFrame, column: object, values: pd.Series) -> None:
+    """Reject numeric math operations on columns explicitly marked as text."""
+    metadata = dataframe_column_metadata(frame, column)
+    if metadata.value_type == "text":
+        raise MathOperationError(
+            f"Column '{column}' is marked Text in metadata; choose a Numeric/Scientific column "
+            "or update the column metadata."
+        )
+    if metadata.value_type not in COLUMN_NUMERIC_TYPES:
+        return
+
+    source = frame[column]
+    meaningful = source.notna() & (source.astype(str).str.strip() != "")
+    invalid = meaningful & values.isna()
+    if invalid.any():
+        example = str(source[invalid].iloc[0])
+        raise MathOperationError(
+            f"Column '{column}' is marked numeric but contains non-numeric text such as '{example}'."
+        )
 
 
 def _central_difference(x: np.ndarray, y: np.ndarray) -> np.ndarray:

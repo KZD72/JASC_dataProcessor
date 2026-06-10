@@ -49,7 +49,13 @@ from PySide6.QtWidgets import (
 from scipy import ndimage, signal
 
 from core.file_io import ImportOptions
-from core.workspace import COLUMN_ROLE_OPTIONS, ColumnMetadata, column_role_label
+from core.workspace import (
+    COLUMN_ROLE_OPTIONS,
+    COLUMN_TYPE_OPTIONS,
+    ColumnMetadata,
+    column_role_label,
+    normalize_display_precision,
+)
 from math_engine.curve_fitting import FIT_METHODS
 from math_engine.calculus import DERIVATIVE_METHODS, INTEGRATION_METHODS, WINDOW_METHODS
 from math_engine.interpolation import (
@@ -2806,16 +2812,26 @@ class ColumnMetadataDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Column Metadata")
         self.setModal(True)
-        self.resize(860, 420)
+        self.resize(1080, 460)
         self._column_names = list(column_names)
 
-        self._table = QTableWidget(len(self._column_names), 5)
-        self._table.setHorizontalHeaderLabels(["Column name", "Role", "Unit", "Long name", "Comment"])
+        self._table = QTableWidget(len(self._column_names), 7)
+        self._table.setHorizontalHeaderLabels([
+            "Column name",
+            "Role",
+            "Type",
+            "Precision",
+            "Unit",
+            "Long name",
+            "Comment",
+        ])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(True)
 
@@ -2832,14 +2848,33 @@ class ColumnMetadataDialog(QDialog):
                 role_combo.setCurrentIndex(role_index)
             self._table.setCellWidget(row, 1, role_combo)
 
-            self._table.setItem(row, 2, QTableWidgetItem(metadata.unit))
-            self._table.setItem(row, 3, QTableWidgetItem(metadata.long_name))
-            self._table.setItem(row, 4, QTableWidgetItem(metadata.comment))
+            type_combo = QComboBox()
+            for type_key, type_label in COLUMN_TYPE_OPTIONS:
+                type_combo.addItem(type_label, type_key)
+            type_index = type_combo.findData(metadata.value_type)
+            if type_index >= 0:
+                type_combo.setCurrentIndex(type_index)
+            self._table.setCellWidget(row, 2, type_combo)
+
+            precision_spin = QSpinBox()
+            precision_spin.setRange(-1, 15)
+            precision_spin.setSpecialValueText("Auto")
+            precision_spin.setValue(
+                metadata.display_precision
+                if metadata.display_precision is not None
+                else -1
+            )
+            self._table.setCellWidget(row, 3, precision_spin)
+
+            self._table.setItem(row, 4, QTableWidgetItem(metadata.unit))
+            self._table.setItem(row, 5, QTableWidgetItem(metadata.long_name))
+            self._table.setItem(row, 6, QTableWidgetItem(metadata.comment))
 
         hint = QLabel(
             "Edit the column name here to rename the dataset column. "
-            "Roles are used as hints by plot, fitting, and future analysis dialogs. "
-            "Units and long names appear in table tooltips and can be used for cleaner plot labels."
+            "Roles are used as hints by plot, fitting, and analysis dialogs. "
+            "Types control display and explicit numeric/text validation. "
+            "Units and long names appear in table tooltips and plot labels."
         )
         hint.setWordWrap(True)
 
@@ -2867,12 +2902,22 @@ class ColumnMetadataDialog(QDialog):
             role = ""
             if isinstance(role_widget, QComboBox):
                 role = str(role_widget.currentData() or "")
+            type_widget = self._table.cellWidget(row, 2)
+            value_type = ""
+            if isinstance(type_widget, QComboBox):
+                value_type = str(type_widget.currentData() or "")
+            precision_widget = self._table.cellWidget(row, 3)
+            display_precision = None
+            if isinstance(precision_widget, QSpinBox):
+                display_precision = normalize_display_precision(precision_widget.value())
 
             metadata = ColumnMetadata(
                 role=role,
-                unit=self._item_text(row, 2),
-                long_name=self._item_text(row, 3),
-                comment=self._item_text(row, 4),
+                unit=self._item_text(row, 4),
+                long_name=self._item_text(row, 5),
+                comment=self._item_text(row, 6),
+                value_type=value_type,
+                display_precision=display_precision,
             )
             if not metadata.is_empty():
                 metadata_by_column[column_name] = metadata

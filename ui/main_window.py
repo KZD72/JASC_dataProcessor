@@ -13,13 +13,14 @@ import numpy as np
 import pandas as pd
 from PySide6.QtCore import (
     QByteArray,
+    QEvent,
     QItemSelection,
     QItemSelectionModel,
     QModelIndex,
     QMimeData,
     Qt,
 )
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -61,8 +62,10 @@ from core.data_backends import (
 from core.file_io import export_tabular_file, read_tabular_file
 from core.operations import ExpressionError, ExpressionResult, apply_column_expression
 from core.workspace import (
+    COLUMN_NUMERIC_TYPES,
     ColumnMetadata,
     Dataset,
+    column_type_label,
     Workspace,
     set_column_operation_comment,
     set_dataset_operation_comments,
@@ -76,6 +79,7 @@ from math_engine.calculus import (
     fft_dataset,
     ifft_dataset,
     integral_column,
+    validate_numeric_column_metadata,
 )
 from math_engine.curve_fitting import FIT_METHODS, FitResult, fit_curve
 from math_engine.interpolation import (
@@ -125,6 +129,7 @@ class MainWindow(QMainWindow):
         self._workspace = Workspace()
         self._project_path: Path | None = None
         self._large_dataset_warning_names: set[str] = set()
+        self._applying_visual_style = False
 
         self.setWindowTitle("JASC Data Processor")
         icon_path = Path(__file__).parent.parent / "resources" / "logo.png"
@@ -146,6 +151,7 @@ class MainWindow(QMainWindow):
         self._dataset_model = DataFrameTableModel(self)
         self._dataset_model.history_changed.connect(self._handle_dataset_history_changed)
         self._dataset_model.columns_renamed.connect(self._handle_dataset_columns_renamed)
+        self._dataset_model.edit_rejected.connect(self._handle_dataset_edit_rejected)
         self._dataset_table = QTableView()
         self._dataset_table.setModel(self._dataset_model)
         self._dataset_table.setAlternatingRowColors(True)
@@ -180,6 +186,12 @@ class MainWindow(QMainWindow):
         self._sync_inspector_to_current_tab()
         self._update_dataset_summary()
         self.statusBar().showMessage("Ready")
+
+    def changeEvent(self, event: QEvent) -> None:
+        """Refresh theme-aware styling when Qt reports a palette change."""
+        super().changeEvent(event)
+        if not getattr(self, "_applying_visual_style", False) and event.type() in self._palette_change_event_types():
+            self._apply_visual_style()
 
     def _build_workspace_dock(self) -> None:
         """Build the docked workspace navigator for datasets and saved plots."""
@@ -384,9 +396,12 @@ class MainWindow(QMainWindow):
             return
 
         dataset.metadata_for_column("x").role = "x"
+        dataset.metadata_for_column("x").value_type = "numeric"
         dataset.metadata_for_column("x").comment = "Default X column for a blank worksheet."
         dataset.metadata_for_column("y").role = "y"
+        dataset.metadata_for_column("y").value_type = "numeric"
         dataset.metadata_for_column("y").comment = "Default Y column for a blank worksheet."
+        dataset.sync_column_metadata_attrs()
 
         self._tabs.setCurrentWidget(self._data_tab_widget)
         self._workspace_dock.setVisible(True)
@@ -441,6 +456,7 @@ class MainWindow(QMainWindow):
 
         if column_name.lower() in {"x", "time", "t"}:
             dataset.metadata_for_column(column_name).role = "x"
+        dataset.metadata_for_column(column_name).value_type = "numeric"
         dataset.prune_column_metadata()
         self._resize_dataset_columns_to_contents(dataset)
         self._plot_tab_widget.refresh_controls(dataset.name)
@@ -664,8 +680,214 @@ class MainWindow(QMainWindow):
         self._update_dataset_summary()
 
     def _apply_visual_style(self) -> None:
-        """Apply the application-wide Qt stylesheet."""
-        self.setStyleSheet("""
+        """Apply a polished style matched to the active Qt palette."""
+        if self._applying_visual_style:
+            return
+
+        self._applying_visual_style = True
+        try:
+            try:
+                palette = QApplication.instance().palette() if QApplication.instance() else self.palette()
+                style_sheet = (
+                    self._dark_visual_style(palette)
+                    if self._is_dark_palette(palette)
+                    else self._light_visual_style()
+                )
+            except Exception as exc:
+                print(f"Theme styling disabled during startup: {exc}")
+                style_sheet = ""
+
+            try:
+                self.setStyleSheet(style_sheet)
+            except Exception as exc:
+                print(f"Qt stylesheet application failed; falling back to defaults: {exc}")
+                self.setStyleSheet("")
+        finally:
+            self._applying_visual_style = False
+
+    @staticmethod
+    def _is_dark_palette(palette: QPalette) -> bool:
+        """Return whether the active Qt palette is visually dark."""
+        return palette.color(MainWindow._palette_role("Window")).lightness() < 128
+
+    @classmethod
+    def _dark_visual_style(cls, palette: QPalette) -> str:
+        """Return a dark-theme stylesheet derived from the active Qt palette."""
+        window = palette.color(cls._palette_role("Window"))
+        text = palette.color(cls._palette_role("Text"))
+        base = cls._dark_safe_color(palette.color(cls._palette_role("Base")), window, text, 0.08)
+        button = cls._dark_safe_color(palette.color(cls._palette_role("Button")), window, text, 0.10)
+        button_text = palette.color(cls._palette_role("ButtonText"))
+        highlight = palette.color(cls._palette_role("Highlight"))
+        highlighted_text = palette.color(cls._palette_role("HighlightedText"))
+        border = cls._mix_colors(window, text, 0.28)
+        soft_border = cls._mix_colors(window, text, 0.18)
+        panel = cls._mix_colors(window, base, 0.45)
+        raised = cls._mix_colors(button, text, 0.06)
+        hover = cls._mix_colors(button, highlight, 0.30)
+        pressed = cls._mix_colors(button, highlight, 0.45)
+        disabled_bg = cls._mix_colors(button, window, 0.55)
+        disabled_text = cls._mix_colors(text, window, 0.50)
+        selected_tab_text = cls._mix_colors(text, highlight, 0.18)
+        table_alternate = cls._mix_colors(base, text, 0.05)
+
+        colors = {
+            "window": cls._qss_color(window),
+            "base": cls._qss_color(base),
+            "button": cls._qss_color(button),
+            "raised": cls._qss_color(raised),
+            "text": cls._qss_color(text),
+            "button_text": cls._qss_color(button_text),
+            "highlight": cls._qss_color(highlight),
+            "highlighted_text": cls._qss_color(highlighted_text),
+            "border": cls._qss_color(border),
+            "soft_border": cls._qss_color(soft_border),
+            "panel": cls._qss_color(panel),
+            "hover": cls._qss_color(hover),
+            "pressed": cls._qss_color(pressed),
+            "disabled_bg": cls._qss_color(disabled_bg),
+            "disabled_text": cls._qss_color(disabled_text),
+            "selected_tab_text": cls._qss_color(selected_tab_text),
+            "table_alternate": cls._qss_color(table_alternate),
+        }
+        return """
+            QMainWindow {{
+                background: {window};
+                color: {text};
+            }}
+            QMenuBar {{
+                background: {base};
+                color: {text};
+                border-bottom: 1px solid {border};
+                padding: 2px 4px;
+            }}
+            QMenuBar::item:selected, QMenu::item:selected {{
+                background: {highlight};
+                color: {highlighted_text};
+            }}
+            QToolBar {{
+                background: {panel};
+                border-bottom: 1px solid {border};
+                spacing: 4px;
+                padding: 4px;
+            }}
+            QDockWidget {{
+                color: {text};
+                font-weight: 700;
+            }}
+            QDockWidget::title {{
+                background: {panel};
+                border: 1px solid {border};
+                padding: 6px;
+                text-align: left;
+            }}
+            QToolButton, QPushButton {{
+                background: {button};
+                border: 1px solid {border};
+                border-radius: 4px;
+                color: {button_text};
+                padding: 5px 10px;
+            }}
+            QToolButton:hover, QPushButton:hover {{
+                background: {hover};
+                border-color: {highlight};
+            }}
+            QToolButton:pressed, QPushButton:pressed {{
+                background: {pressed};
+                border-color: {highlight};
+                padding-top: 6px;
+                padding-bottom: 4px;
+            }}
+            QToolButton:disabled, QPushButton:disabled {{
+                background: {disabled_bg};
+                border-color: {soft_border};
+                color: {disabled_text};
+            }}
+            QLabel#SectionLabel {{
+                color: {text};
+                font-weight: 700;
+                padding: 8px 2px 3px 2px;
+            }}
+            QListWidget, QTableView, QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
+                background: {base};
+                border: 1px solid {border};
+                border-radius: 4px;
+                color: {text};
+                selection-background-color: {highlight};
+                selection-color: {highlighted_text};
+            }}
+            QTableView {{
+                alternate-background-color: {table_alternate};
+                gridline-color: {soft_border};
+            }}
+            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableView:focus {{
+                border: 1px solid {highlight};
+            }}
+            QListWidget::item {{
+                padding: 4px 6px;
+                border-radius: 3px;
+            }}
+            QListWidget::item:selected {{
+                background: {highlight};
+                color: {highlighted_text};
+            }}
+            QListWidget::item:hover {{
+                background: {hover};
+                color: {button_text};
+            }}
+            QTabWidget::pane {{
+                border: 1px solid {border};
+                background: {base};
+                border-radius: 4px;
+            }}
+            QTabBar::tab {{
+                background: {raised};
+                border: 1px solid {border};
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                color: {text};
+                padding: 6px 12px;
+                margin-right: 2px;
+            }}
+            QTabBar::tab:selected {{
+                background: {base};
+                color: {selected_tab_text};
+                font-weight: 700;
+            }}
+            QGroupBox {{
+                border: 1px solid {border};
+                border-radius: 5px;
+                margin-top: 10px;
+                padding: 8px;
+                background: {panel};
+                color: {text};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+                color: {text};
+                font-weight: 700;
+            }}
+            QHeaderView::section {{
+                background: {panel};
+                border: 1px solid {border};
+                color: {text};
+                padding: 4px;
+                font-weight: 700;
+            }}
+            QStatusBar {{
+                background: {base};
+                border-top: 1px solid {border};
+                color: {text};
+            }}
+        """.format(**colors)
+
+    @staticmethod
+    def _light_visual_style() -> str:
+        """Return the polished light stylesheet used for non-dark palettes."""
+        return """
             QMainWindow {
                 background: #f4f7fa;
             }
@@ -727,6 +949,10 @@ class MainWindow(QMainWindow):
                 selection-background-color: #2f77bc;
                 selection-color: #ffffff;
             }
+            QTableView {
+                alternate-background-color: #f7fbff;
+                gridline-color: #dbe3ec;
+            }
             QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableView:focus {
                 border: 1px solid #2f77bc;
             }
@@ -785,7 +1011,59 @@ class MainWindow(QMainWindow):
                 background: #ffffff;
                 border-top: 1px solid #c7d0da;
             }
-        """)
+        """
+
+    @staticmethod
+    def _qss_color(color: QColor) -> str:
+        """Return a QColor as a stylesheet-safe hex color."""
+        return color.name()
+
+    @staticmethod
+    def _palette_role(role_name: str) -> QPalette.ColorRole:
+        """Return a QPalette role using old or new PySide enum layouts."""
+        color_role = getattr(QPalette, "ColorRole", None)
+        role = getattr(color_role, role_name, None) if color_role is not None else None
+        if role is None:
+            role = getattr(QPalette, role_name)
+        return role
+
+    @staticmethod
+    def _palette_change_event_types() -> set[QEvent.Type]:
+        """Return available Qt palette-change event constants."""
+        event_type = getattr(QEvent, "Type", None)
+        names = ("ApplicationPaletteChange", "PaletteChange")
+        values: set[QEvent.Type] = set()
+        for name in names:
+            value = getattr(event_type, name, None) if event_type is not None else None
+            if value is None:
+                value = getattr(QEvent, name, None)
+            if value is not None:
+                values.add(value)
+        return values
+
+    @staticmethod
+    def _mix_colors(first: QColor, second: QColor, second_weight: float) -> QColor:
+        """Blend two colors and return the resulting QColor."""
+        weight = max(0.0, min(1.0, second_weight))
+        first_weight = 1.0 - weight
+        return QColor(
+            round(first.red() * first_weight + second.red() * weight),
+            round(first.green() * first_weight + second.green() * weight),
+            round(first.blue() * first_weight + second.blue() * weight),
+        )
+
+    @classmethod
+    def _dark_safe_color(
+        cls,
+        candidate: QColor,
+        fallback_base: QColor,
+        text: QColor,
+        text_weight: float,
+    ) -> QColor:
+        """Return a dark color even when a dark OS palette exposes a light base role."""
+        if candidate.lightness() < 150:
+            return candidate
+        return cls._mix_colors(fallback_base, text, text_weight)
 
     def _confirm_large_file_import(self, path: Path) -> bool:
         """Ask before reading a very large delimited text file into memory."""
@@ -986,13 +1264,16 @@ class MainWindow(QMainWindow):
 
         x_metadata = dataset.metadata_for_column("x")
         x_metadata.role = "x"
+        x_metadata.value_type = "numeric"
         x_metadata.long_name = "Digitized X"
         y_metadata = dataset.metadata_for_column("y")
         y_metadata.role = "y"
+        y_metadata.value_type = "numeric"
         y_metadata.long_name = "Digitized Y"
         for column_name in ("pixel_x", "pixel_y"):
             if column_name in dataset.frame.columns:
                 metadata = dataset.metadata_for_column(column_name)
+                metadata.value_type = "numeric"
                 metadata.comment = "Source pixel coordinate from figure digitization."
         for column_name in ("trace_mode", "trace_color", "roi_marks"):
             if column_name in dataset.frame.columns:
@@ -1013,6 +1294,7 @@ class MainWindow(QMainWindow):
         ):
             if column_name in dataset.frame.columns:
                 metadata = dataset.metadata_for_column(column_name)
+                metadata.value_type = "numeric"
                 metadata.comment = "Detected symbol-center diagnostics from figure digitization."
                 if column_name == "x_uncertainty":
                     metadata.role = "x_error"
@@ -1027,6 +1309,7 @@ class MainWindow(QMainWindow):
             f"{dialog.calibration_summary()}; {dialog.extraction_summary()}"
         )
         set_dataset_operation_comments(dataset, operation)
+        dataset.sync_column_metadata_attrs()
 
         self._refresh_dataset_list(dataset.name)
         self.statusBar().showMessage(
@@ -1180,10 +1463,25 @@ class MainWindow(QMainWindow):
         if dialog.exec() != ColumnMetadataDialog.Accepted:
             return
 
+        edited_column_names = dialog.column_names()
+        edited_metadata = dialog.column_metadata()
+        validation_errors = self._validate_column_metadata_types(
+            dataset=dataset,
+            edited_column_names=edited_column_names,
+            metadata=edited_metadata,
+        )
+        if validation_errors:
+            QMessageBox.warning(
+                self,
+                "Column Metadata",
+                "\n".join(validation_errors[:8]),
+            )
+            return
+
         try:
             renamed_columns = self._dataset_model.apply_column_metadata(
-                column_names=dialog.column_names(),
-                metadata=dialog.column_metadata(),
+                column_names=edited_column_names,
+                metadata=edited_metadata,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Column Metadata Failed", str(exc))
@@ -1215,6 +1513,47 @@ class MainWindow(QMainWindow):
     def _edit_column_metadata_for_column(self, column_index: int) -> None:
         """Open column metadata focused on the double-clicked header column."""
         self._edit_column_metadata(column_index)
+
+    @staticmethod
+    def _validate_column_metadata_types(
+        dataset: Dataset,
+        edited_column_names: list[str],
+        metadata: dict[str, ColumnMetadata],
+    ) -> list[str]:
+        """Return metadata type validation errors before applying metadata edits."""
+        errors: list[str] = []
+        numeric_roles = {"y", "z", "error", "x_error", "y_error", "weight"}
+        for column_index, edited_name in enumerate(edited_column_names):
+            entry = metadata.get(edited_name)
+            if entry is None:
+                continue
+
+            if entry.value_type == "text" and entry.role in numeric_roles:
+                errors.append(
+                    f"Column '{edited_name}' is marked Text but role "
+                    f"'{entry.role}' requires numeric values."
+                )
+                continue
+
+            if entry.value_type not in COLUMN_NUMERIC_TYPES:
+                continue
+            if column_index >= len(dataset.frame.columns):
+                continue
+
+            values = dataset.frame.iloc[:, column_index]
+            meaningful = values.notna() & (values.astype(str).str.strip() != "")
+            if not meaningful.any():
+                continue
+            numeric_values = pd.to_numeric(values[meaningful], errors="coerce")
+            invalid = numeric_values.isna()
+            if invalid.any():
+                example = str(values[meaningful][invalid].iloc[0])
+                errors.append(
+                    f"Column '{edited_name}' is marked "
+                    f"{column_type_label(entry.value_type)} but contains non-numeric text "
+                    f"such as '{example}'."
+                )
+        return errors
 
     def _add_empty_row(self) -> None:
         """Append an empty row to the selected dataset."""
@@ -4482,8 +4821,11 @@ class MainWindow(QMainWindow):
                         column: self._statistics_column_label(source_dataset, column)
                         for column in multi_columns
                     }
+                    source_dataset.sync_column_metadata_attrs()
+                    multi_frame = source_dataset.frame[multi_columns].copy()
+                    multi_frame.attrs.update(source_dataset.frame.attrs)
                     result_frame = run_multicolumn_statistical_analysis(
-                        frame=source_dataset.frame[multi_columns],
+                        frame=multi_frame,
                         column_labels=column_labels,
                         operation_key=operation_key,
                     )
@@ -4618,6 +4960,8 @@ class MainWindow(QMainWindow):
                     )
                     if primary_column is None:
                         raise MathOperationError("Choose a primary column.")
+                    primary_values = pd.to_numeric(source_dataset.frame[primary_column], errors="coerce")
+                    validate_numeric_column_metadata(source_dataset.frame, primary_column, primary_values)
 
                     secondary_series = None
                     secondary_label = ""
@@ -4639,6 +4983,13 @@ class MainWindow(QMainWindow):
                             raise MathOperationError("Choose a secondary or group column.")
                         secondary_series = secondary_dataset.frame[secondary_column]
                         secondary_label = f"{secondary_dataset.name}: {secondary_column}"
+                        if operation_scope != "group":
+                            secondary_values = pd.to_numeric(secondary_series, errors="coerce")
+                            validate_numeric_column_metadata(
+                                secondary_dataset.frame,
+                                secondary_column,
+                                secondary_values,
+                            )
 
                     result_frame = run_statistical_analysis(
                         primary=source_dataset.frame[primary_column],
@@ -5729,6 +6080,7 @@ class MainWindow(QMainWindow):
         if column not in dataset.frame.columns:
             raise ValueError(f"Column '{column}' is no longer available.")
         values = pd.to_numeric(dataset.frame[column], errors="coerce")
+        validate_numeric_column_metadata(dataset.frame, column, values)
         values = values[
             values.notna()
             & (values != float("inf"))
@@ -5764,7 +6116,9 @@ class MainWindow(QMainWindow):
         """Return a numeric series preserving blanks as NaN for alignment."""
         if column not in dataset.frame.columns:
             raise ValueError(f"Column '{column}' is no longer available.")
-        return pd.to_numeric(dataset.frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        values = pd.to_numeric(dataset.frame[column], errors="coerce")
+        validate_numeric_column_metadata(dataset.frame, column, values)
+        return values.replace([np.inf, -np.inf], np.nan)
 
     @staticmethod
     def _statistics_column_label(dataset: Dataset, column: str) -> str:
@@ -7163,6 +7517,11 @@ class MainWindow(QMainWindow):
         self._workspace.rename_column_references_in_plots(dataset.name, rename_map)
         self._plot_tab_widget.rename_column_references(dataset.name, rename_map)
 
+    def _handle_dataset_edit_rejected(self, message: str) -> None:
+        """Show a visible reason when column typing rejects a cell edit."""
+        self.statusBar().showMessage(message)
+        QMessageBox.warning(self, "Cell Edit Rejected", message)
+
     def _undo_dataset_edit(self) -> None:
         """Undo the most recent editable dataset operation."""
         if not self._dataset_model.undo():
@@ -7299,7 +7658,15 @@ class MainWindow(QMainWindow):
         ranges: dict[str, tuple[float, float]] = {}
         for column in dataset.frame.columns:
             column_name = str(column)
+            metadata = dataset.column_metadata.get(column_name)
+            if metadata is not None and metadata.value_type == "text":
+                continue
             values = pd.to_numeric(dataset.frame[column], errors="coerce")
+            if metadata is not None and metadata.value_type in COLUMN_NUMERIC_TYPES:
+                source_values = dataset.frame[column]
+                meaningful = source_values.notna() & (source_values.astype(str).str.strip() != "")
+                if (meaningful & values.isna()).any():
+                    continue
             values = values[
                 values.notna()
                 & (values != float("inf"))
@@ -7329,6 +7696,8 @@ class MainWindow(QMainWindow):
                 unit=source_metadata.unit,
                 long_name=source_metadata.long_name,
                 comment=source_metadata.comment,
+                value_type=source_metadata.value_type,
+                display_precision=source_metadata.display_precision,
             )
 
         prediction_column = f"{value_column}_interpolated"
@@ -7340,7 +7709,10 @@ class MainWindow(QMainWindow):
             unit=value_metadata.unit,
             long_name=f"Interpolated {value_metadata.long_name or value_column}",
             comment=value_metadata.comment,
+            value_type=value_metadata.value_type,
+            display_precision=value_metadata.display_precision,
         )
+        result_dataset.sync_column_metadata_attrs()
 
     def _selected_dataset_columns(self) -> list[int]:
         """Return sorted column indexes touched by the table selection."""

@@ -26,6 +26,16 @@ COLUMN_ROLE_LABELS: dict[str, str] = {
 }
 COLUMN_ROLE_OPTIONS: tuple[tuple[str, str], ...] = tuple(COLUMN_ROLE_LABELS.items())
 
+COLUMN_TYPE_LABELS: dict[str, str] = {
+    "": "Auto",
+    "numeric": "Numeric",
+    "scientific": "Scientific",
+    "text": "Text",
+}
+COLUMN_TYPE_OPTIONS: tuple[tuple[str, str], ...] = tuple(COLUMN_TYPE_LABELS.items())
+COLUMN_NUMERIC_TYPES = {"numeric", "scientific"}
+DATAFRAME_COLUMN_METADATA_ATTR = "jasc_column_metadata"
+
 
 @dataclass(slots=True)
 class ColumnMetadata:
@@ -35,18 +45,29 @@ class ColumnMetadata:
     unit: str = ""
     long_name: str = ""
     comment: str = ""
+    value_type: str = ""
+    display_precision: int | None = None
 
     def is_empty(self) -> bool:
         """Return whether no meaningful metadata is stored."""
-        return not any((self.role, self.unit, self.long_name, self.comment))
+        return not any((
+            self.role,
+            self.unit,
+            self.long_name,
+            self.comment,
+            self.value_type,
+            self.display_precision is not None,
+        ))
 
-    def to_metadata(self) -> dict[str, str]:
+    def to_metadata(self) -> dict[str, str | int | None]:
         """Return JSON-friendly metadata."""
         return {
             "role": self.role,
             "unit": self.unit,
             "long_name": self.long_name,
             "comment": self.comment,
+            "value_type": self.value_type,
+            "display_precision": self.display_precision,
         }
 
     @classmethod
@@ -55,11 +76,14 @@ class ColumnMetadata:
         if not isinstance(metadata, dict):
             return cls()
         role = normalize_column_role(str(metadata.get("role", "") or ""))
+        precision = normalize_display_precision(metadata.get("display_precision"))
         return cls(
             role=role,
             unit=str(metadata.get("unit", "") or "").strip(),
             long_name=str(metadata.get("long_name", "") or "").strip(),
             comment=str(metadata.get("comment", "") or "").strip(),
+            value_type=normalize_column_type(str(metadata.get("value_type", "") or "")),
+            display_precision=precision,
         )
 
 
@@ -92,10 +116,13 @@ class Dataset:
                 unit=entry.unit.strip(),
                 long_name=entry.long_name.strip(),
                 comment=entry.comment.strip(),
+                value_type=normalize_column_type(entry.value_type),
+                display_precision=normalize_display_precision(entry.display_precision),
             )
             for column, entry in metadata.items()
             if str(column) in existing and not entry.is_empty()
         }
+        self.sync_column_metadata_attrs()
 
     def prune_column_metadata(self) -> None:
         """Drop metadata entries for columns no longer present in the DataFrame."""
@@ -104,6 +131,15 @@ class Dataset:
             str(column): metadata
             for column, metadata in self.column_metadata.items()
             if str(column) in existing and not metadata.is_empty()
+        }
+        self.sync_column_metadata_attrs()
+
+    def sync_column_metadata_attrs(self) -> None:
+        """Mirror lightweight column metadata into DataFrame attrs for math helpers."""
+        self.frame.attrs[DATAFRAME_COLUMN_METADATA_ATTR] = {
+            str(column): metadata.to_metadata()
+            for column, metadata in self.column_metadata.items()
+            if not metadata.is_empty()
         }
 
 
@@ -359,6 +395,54 @@ def column_role_label(role: str) -> str:
     return COLUMN_ROLE_LABELS.get(normalize_column_role(role), "None")
 
 
+def normalize_column_type(value_type: str) -> str:
+    """Return a supported column type key."""
+    clean = value_type.strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "auto": "",
+        "none": "",
+        "": "",
+        "number": "numeric",
+        "float": "numeric",
+        "integer": "numeric",
+        "int": "numeric",
+        "sci": "scientific",
+        "scientific_notation": "scientific",
+        "string": "text",
+        "category": "text",
+        "categorical": "text",
+    }
+    clean = aliases.get(clean, clean)
+    return clean if clean in COLUMN_TYPE_LABELS else ""
+
+
+def column_type_label(value_type: str) -> str:
+    """Return a user-facing label for a column type key."""
+    return COLUMN_TYPE_LABELS.get(normalize_column_type(value_type), "Auto")
+
+
+def normalize_display_precision(value: object) -> int | None:
+    """Return a valid display precision, treating blanks and negatives as automatic."""
+    if value in ("", None):
+        return None
+    try:
+        precision = int(value)
+    except (TypeError, ValueError):
+        return None
+    if precision < 0:
+        return None
+    return min(precision, 15)
+
+
+def dataframe_column_metadata(frame: pd.DataFrame, column: str) -> ColumnMetadata:
+    """Return metadata mirrored into DataFrame attrs for non-Workspace helpers."""
+    metadata_by_column = frame.attrs.get(DATAFRAME_COLUMN_METADATA_ATTR, {})
+    if not isinstance(metadata_by_column, dict):
+        return ColumnMetadata()
+    metadata = metadata_by_column.get(str(column), {})
+    return ColumnMetadata.from_metadata(metadata)
+
+
 def set_column_operation_comment(dataset: Dataset, column_name: str, operation_text: str) -> None:
     """Record the latest generated operation in a column metadata comment."""
     metadata = dataset.metadata_for_column(column_name)
@@ -371,6 +455,7 @@ def set_column_operation_comment(dataset: Dataset, column_name: str, operation_t
         existing_lines.pop()
     existing_lines.append(f"Operation: {operation_text.strip()}")
     metadata.comment = "\n".join(existing_lines).strip()
+    dataset.sync_column_metadata_attrs()
 
 
 def set_dataset_operation_comments(
@@ -395,6 +480,8 @@ def copy_column_metadata(metadata: dict[str, ColumnMetadata]) -> dict[str, Colum
             unit=entry.unit,
             long_name=entry.long_name,
             comment=entry.comment,
+            value_type=entry.value_type,
+            display_precision=entry.display_precision,
         )
         for column, entry in metadata.items()
     }

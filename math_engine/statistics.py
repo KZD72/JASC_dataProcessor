@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from math_engine.calculus import MathOperationError
+from math_engine.calculus import MathOperationError, validate_numeric_column_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -1088,7 +1088,13 @@ def _numeric_frame(
     """Coerce selected columns to numeric values while preserving row alignment."""
     if frame.empty or len(frame.columns) < minimum_columns:
         raise MathOperationError(f"Choose at least {minimum_columns} columns for this statistics operation.")
-    numeric = frame.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    columns: dict[object, pd.Series] = {}
+    for column in frame.columns:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        validate_numeric_column_metadata(frame, column, values)
+        columns[column] = values
+    numeric = pd.DataFrame(columns).replace([np.inf, -np.inf], np.nan)
     empty_columns = [
         _column_label(column_labels, column)
         for column in numeric.columns
