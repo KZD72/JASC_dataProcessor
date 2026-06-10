@@ -10,7 +10,7 @@ import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.stats import t as student_t
 
-from math_engine.calculus import MathOperationError
+from math_engine.calculus import MathOperationError, validate_numeric_column_metadata
 from models.fit_functions import CustomFitModel, default_initial_parameters, get_fit_model
 
 
@@ -330,19 +330,27 @@ def _fit_input_frame(
     if y_column not in frame.columns:
         raise MathOperationError(f"Column '{y_column}' does not exist.")
 
+    x_values = pd.to_numeric(frame[x_column], errors="coerce")
+    y_values = pd.to_numeric(frame[y_column], errors="coerce")
+    validate_numeric_column_metadata(frame, x_column, x_values)
+    validate_numeric_column_metadata(frame, y_column, y_values)
     values = {
-        "x": pd.to_numeric(frame[x_column], errors="coerce"),
-        "y": pd.to_numeric(frame[y_column], errors="coerce"),
+        "x": x_values,
+        "y": y_values,
     }
     if weight_column:
         if weight_column not in frame.columns:
             raise MathOperationError(f"Weight column '{weight_column}' does not exist.")
-        values["weight"] = pd.to_numeric(frame[weight_column], errors="coerce")
+        weight_values = pd.to_numeric(frame[weight_column], errors="coerce")
+        validate_numeric_column_metadata(frame, weight_column, weight_values)
+        values["weight"] = weight_values
     
     if x_weight_column:
         if x_weight_column not in frame.columns:
             raise MathOperationError(f"X weight column '{x_weight_column}' does not exist.")
-        values["x_weight"] = pd.to_numeric(frame[x_weight_column], errors="coerce")
+        x_weight_values = pd.to_numeric(frame[x_weight_column], errors="coerce")
+        validate_numeric_column_metadata(frame, x_weight_column, x_weight_values)
+        values["x_weight"] = x_weight_values
 
     aligned = pd.DataFrame(values).replace([np.inf, -np.inf], np.nan).dropna()
 

@@ -14,7 +14,7 @@ from matplotlib.path import Path as MplPath
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
 
-from core.workspace import Workspace
+from core.workspace import COLUMN_NUMERIC_TYPES, Workspace, dataframe_column_metadata
 
 try:
     import scienceplots  # noqa: F401
@@ -532,7 +532,12 @@ class PlotCanvas(QWidget):
         if series.plot_type == "histogram":
             if series.y_column not in y_frame.columns:
                 raise ValueError(f"missing value column '{series.y_column}'")
-            y_values = pd.to_numeric(y_frame[series.y_column], errors="coerce").dropna()
+            y_values = self._numeric_column_values(
+                workspace,
+                series.y_dataset,
+                series.y_column,
+                "value",
+            ).dropna()
             if x_scale == "log":
                 y_values = y_values[y_values > 0]
             if y_values.empty:
@@ -554,8 +559,8 @@ class PlotCanvas(QWidget):
         if series.y_column not in y_frame.columns:
             raise ValueError(f"missing Y column '{series.y_column}'")
 
-        x_values = pd.to_numeric(x_frame[series.x_column], errors="coerce")
-        y_values = pd.to_numeric(y_frame[series.y_column], errors="coerce")
+        x_values = self._numeric_column_values(workspace, series.x_dataset, series.x_column, "X")
+        y_values = self._numeric_column_values(workspace, series.y_dataset, series.y_column, "Y")
         
         cols = {
             "x": x_values,
@@ -563,9 +568,19 @@ class PlotCanvas(QWidget):
         }
         
         if series.x_err_column and series.x_err_column in x_frame.columns:
-            cols["x_err"] = pd.to_numeric(x_frame[series.x_err_column], errors="coerce")
+            cols["x_err"] = self._numeric_column_values(
+                workspace,
+                series.x_dataset,
+                series.x_err_column,
+                "X error",
+            )
         if series.y_err_column and series.y_err_column in y_frame.columns:
-            cols["y_err"] = pd.to_numeric(y_frame[series.y_err_column], errors="coerce")
+            cols["y_err"] = self._numeric_column_values(
+                workspace,
+                series.y_dataset,
+                series.y_err_column,
+                "Y error",
+            )
 
         # Find the minimum valid length across all provided columns
         point_count = min(len(col) for col in cols.values())
@@ -612,9 +627,11 @@ class PlotCanvas(QWidget):
             raise ValueError(f"missing value column '{series.y_column}'")
 
         labels = x_frame[series.x_column]
-        values = pd.to_numeric(y_frame[series.y_column], errors="coerce").replace(
-            [np.inf, -np.inf],
-            np.nan,
+        values = self._numeric_column_values(
+            workspace,
+            series.y_dataset,
+            series.y_column,
+            "value",
         )
         point_count = min(len(labels), len(values))
         if point_count == 0:
@@ -640,10 +657,18 @@ class PlotCanvas(QWidget):
 
         if series.plot_type == "bar":
             if x_scale == "log":
-                aligned["axis_label"] = pd.to_numeric(aligned["label"], errors="coerce")
+                aligned["axis_label"] = self._numeric_label_values(
+                    workspace,
+                    series.x_dataset,
+                    series.x_column,
+                    aligned["label"],
+                )
                 aligned = aligned[aligned["axis_label"] > 0]
             else:
                 aligned["axis_label"] = self._category_axis_values(
+                    workspace,
+                    series.x_dataset,
+                    series.x_column,
                     aligned["label"],
                     aligned["label_text"],
                 )
@@ -653,10 +678,18 @@ class PlotCanvas(QWidget):
             if x_scale == "log":
                 aligned = aligned[aligned["value"] > 0]
             if y_scale == "log":
-                aligned["axis_label"] = pd.to_numeric(aligned["label"], errors="coerce")
+                aligned["axis_label"] = self._numeric_label_values(
+                    workspace,
+                    series.x_dataset,
+                    series.x_column,
+                    aligned["label"],
+                )
                 aligned = aligned[aligned["axis_label"] > 0]
             else:
                 aligned["axis_label"] = self._category_axis_values(
+                    workspace,
+                    series.x_dataset,
+                    series.x_column,
                     aligned["label"],
                     aligned["label_text"],
                 )
@@ -670,9 +703,20 @@ class PlotCanvas(QWidget):
             None,
         )
 
-    @staticmethod
-    def _category_axis_values(labels: pd.Series, label_text: pd.Series) -> pd.Series:
+    def _category_axis_values(
+        self,
+        workspace: Workspace,
+        dataset_name: str,
+        column: str,
+        labels: pd.Series,
+        label_text: pd.Series,
+    ) -> pd.Series:
         """Return numeric labels when possible, otherwise text labels for categorical axes."""
+        metadata = dataframe_column_metadata(workspace.get_dataset(dataset_name).frame, column)
+        if metadata.value_type == "text":
+            return label_text.astype(str)
+        if metadata.value_type in COLUMN_NUMERIC_TYPES:
+            return self._numeric_label_values(workspace, dataset_name, column, labels)
         numeric_labels = pd.to_numeric(labels, errors="coerce")
         if numeric_labels.notna().all():
             return numeric_labels.astype(float)
@@ -684,6 +728,61 @@ class PlotCanvas(QWidget):
         if pd.isna(value):
             return ""
         return str(value).strip()
+
+    def _numeric_column_values(
+        self,
+        workspace: Workspace,
+        dataset_name: str,
+        column: str,
+        role_label: str,
+    ) -> pd.Series:
+        """Return numeric values, enforcing explicit column type metadata."""
+        frame = workspace.get_dataset(dataset_name).frame
+        if column not in frame.columns:
+            raise ValueError(f"missing {role_label} column '{column}'")
+        values = pd.to_numeric(frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        self._validate_numeric_metadata(frame[column], values, frame, column, role_label)
+        return values
+
+    def _numeric_label_values(
+        self,
+        workspace: Workspace,
+        dataset_name: str,
+        column: str,
+        labels: pd.Series,
+    ) -> pd.Series:
+        """Return numeric categorical positions when a categorical axis is logarithmic."""
+        frame = workspace.get_dataset(dataset_name).frame
+        values = pd.to_numeric(labels, errors="coerce")
+        self._validate_numeric_metadata(labels, values, frame, column, "label/position")
+        return values
+
+    @staticmethod
+    def _validate_numeric_metadata(
+        source_values: pd.Series,
+        numeric_values: pd.Series,
+        frame: pd.DataFrame,
+        column: str,
+        role_label: str,
+    ) -> None:
+        """Raise when explicit column metadata conflicts with numeric plot usage."""
+        metadata = dataframe_column_metadata(frame, column)
+        if metadata.value_type == "text":
+            raise ValueError(
+                f"{role_label} column '{column}' is marked Text in metadata; "
+                "choose a Numeric/Scientific column or update its metadata."
+            )
+        if metadata.value_type not in COLUMN_NUMERIC_TYPES:
+            return
+
+        meaningful = source_values.notna() & (source_values.astype(str).str.strip() != "")
+        invalid = meaningful & numeric_values.isna()
+        if invalid.any():
+            example = str(source_values[invalid].iloc[0])
+            raise ValueError(
+                f"{role_label} column '{column}' is marked numeric but contains "
+                f"non-numeric text such as '{example}'."
+            )
 
     def _surface_values(
         self,
@@ -708,9 +807,9 @@ class PlotCanvas(QWidget):
             raise ValueError(f"missing Z/value column '{series.z_column}'")
 
         columns = {
-            "x": pd.to_numeric(x_frame[series.x_column], errors="coerce"),
-            "y": pd.to_numeric(y_frame[series.y_column], errors="coerce"),
-            "z": pd.to_numeric(z_frame[series.z_column], errors="coerce"),
+            "x": self._numeric_column_values(workspace, series.x_dataset, series.x_column, "X coordinate"),
+            "y": self._numeric_column_values(workspace, series.y_dataset, series.y_column, "Y coordinate"),
+            "z": self._numeric_column_values(workspace, z_dataset_name, series.z_column, "Z value"),
         }
         point_count = min(len(column) for column in columns.values())
         if point_count == 0:
@@ -1223,7 +1322,12 @@ class PlotCanvas(QWidget):
                 missing_columns.append(column)
                 continue
 
-            values = pd.to_numeric(frame[column], errors="coerce").dropna()
+            values = self._numeric_column_values(
+                workspace,
+                series.y_dataset,
+                column,
+                "distribution",
+            ).dropna()
             if y_scale == "log":
                 values = values[values > 0]
             if values.empty:
@@ -1318,9 +1422,9 @@ class PlotCanvas(QWidget):
         if series.lower_column not in y_frame.columns or series.upper_column not in y_frame.columns:
             return
 
-        x_values = pd.to_numeric(x_frame[series.x_column], errors="coerce")
-        lower_values = pd.to_numeric(y_frame[series.lower_column], errors="coerce")
-        upper_values = pd.to_numeric(y_frame[series.upper_column], errors="coerce")
+        x_values = self._numeric_column_values(workspace, series.x_dataset, series.x_column, "X")
+        lower_values = self._numeric_column_values(workspace, series.y_dataset, series.lower_column, "lower band")
+        upper_values = self._numeric_column_values(workspace, series.y_dataset, series.upper_column, "upper band")
         point_count = min(len(x_values), len(lower_values), len(upper_values))
         if point_count == 0:
             return

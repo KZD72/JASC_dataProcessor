@@ -12,10 +12,13 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 
 from core.operations import ExpressionResult, apply_column_expression
 from core.workspace import (
+    COLUMN_NUMERIC_TYPES,
     ColumnMetadata,
     Dataset,
+    column_type_label,
     column_role_label,
     copy_column_metadata,
+    normalize_display_precision,
     set_column_operation_comment,
 )
 
@@ -29,11 +32,15 @@ class _DatasetSnapshot:
     column_metadata: dict[str, ColumnMetadata]
 
 
+_INVALID_TYPED_VALUE = object()
+
+
 class DataFrameTableModel(QAbstractTableModel):
     """Editable table model that writes changes directly into a workspace dataset."""
 
     history_changed = Signal()
     columns_renamed = Signal(dict)
+    edit_rejected = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         """Create an empty model until a workspace dataset is attached."""
@@ -118,6 +125,10 @@ class DataFrameTableModel(QAbstractTableModel):
         value = self._dataset.frame.iat[index.row(), index.column()]
         if pd.isna(value):
             return ""
+        if role == Qt.DisplayRole:
+            column_name = str(self._dataset.frame.columns[index.column()])
+            metadata = self._dataset.column_metadata.get(column_name)
+            return self._format_display_value(value, metadata)
         return str(value)
 
     def setData(self, index: QModelIndex, value: Any, role: int = Qt.EditRole) -> bool:
@@ -127,7 +138,15 @@ class DataFrameTableModel(QAbstractTableModel):
 
         frame = self._dataset.frame
         column_name = frame.columns[index.column()]
-        normalized_value = self._normalize_value(frame[column_name], value)
+        metadata = self._dataset.column_metadata.get(str(column_name))
+        normalized_value = self._normalize_value(frame[column_name], value, metadata)
+        if normalized_value is _INVALID_TYPED_VALUE:
+            type_label = column_type_label(metadata.value_type) if metadata is not None else "Numeric"
+            self.edit_rejected.emit(
+                f"Column '{column_name}' is marked {type_label}; enter a numeric value "
+                "or change the column metadata to Text."
+            )
+            return False
         old_value = frame.iat[index.row(), index.column()]
         if self._values_equal(old_value, normalized_value):
             return False
@@ -161,6 +180,10 @@ class DataFrameTableModel(QAbstractTableModel):
                     lines.append(f"Long name: {metadata.long_name}")
                 if metadata.role:
                     lines.append(f"Role: {column_role_label(metadata.role)}")
+                if metadata.value_type:
+                    lines.append(f"Type: {column_type_label(metadata.value_type)}")
+                if metadata.display_precision is not None:
+                    lines.append(f"Shown precision: {metadata.display_precision}")
                 if metadata.unit:
                     lines.append(f"Unit: {metadata.unit}")
                 if metadata.comment:
@@ -333,6 +356,8 @@ class DataFrameTableModel(QAbstractTableModel):
                         unit=metadata_entry.unit,
                         long_name=metadata_entry.long_name,
                         comment=metadata_entry.comment,
+                        value_type=metadata_entry.value_type,
+                        display_precision=metadata_entry.display_precision,
                     )
                 else:
                     metadata = ColumnMetadata.from_metadata(metadata_entry)
@@ -342,6 +367,7 @@ class DataFrameTableModel(QAbstractTableModel):
                     self._dataset.column_metadata[column_name] = metadata
                 inserted_names.append(column_name)
 
+            self._dataset.sync_column_metadata_attrs()
             return inserted_names
         finally:
             self.endResetModel()
@@ -543,11 +569,25 @@ class DataFrameTableModel(QAbstractTableModel):
 
         return rename_pairs
 
-    def _normalize_value(self, column: pd.Series, value: Any) -> object:
+    def _normalize_value(
+        self,
+        column: pd.Series,
+        value: Any,
+        metadata: ColumnMetadata | None = None,
+    ) -> object:
         """Coerce edited text to a numeric value when the column supports it."""
         text = str(value).strip()
         if text == "":
             return pd.NA
+
+        value_type = metadata.value_type if metadata is not None else ""
+        if value_type == "text":
+            return text
+        if value_type in COLUMN_NUMERIC_TYPES:
+            numeric_value = pd.to_numeric(text, errors="coerce")
+            if not pd.isna(numeric_value):
+                return numeric_value
+            return _INVALID_TYPED_VALUE
 
         if is_numeric_dtype(column):
             numeric_value = pd.to_numeric(text, errors="coerce")
@@ -555,6 +595,24 @@ class DataFrameTableModel(QAbstractTableModel):
                 return numeric_value
 
         return text
+
+    @staticmethod
+    def _format_display_value(value: object, metadata: ColumnMetadata | None) -> str:
+        """Format one display value using explicit column metadata."""
+        if metadata is None or metadata.value_type not in COLUMN_NUMERIC_TYPES:
+            return str(value)
+
+        numeric_value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.isna(numeric_value):
+            return str(value)
+
+        precision = normalize_display_precision(metadata.display_precision)
+        if metadata.value_type == "scientific":
+            digits = 6 if precision is None else precision
+            return f"{float(numeric_value):.{digits}e}"
+        if precision is not None:
+            return f"{float(numeric_value):.{precision}f}"
+        return f"{float(numeric_value):g}"
 
     def _value_fits_column(self, column: pd.Series, value: object) -> bool:
         """Return whether a value can be stored without widening column dtype."""
@@ -635,6 +693,7 @@ class DataFrameTableModel(QAbstractTableModel):
         self._dataset.frame = snapshot.frame.copy(deep=True)
         self._dataset.formulas = dict(snapshot.formulas)
         self._dataset.column_metadata = copy_column_metadata(snapshot.column_metadata)
+        self._dataset.sync_column_metadata_attrs()
         self.endResetModel()
         new_columns = [str(column) for column in self._dataset.frame.columns]
         if len(old_columns) == len(new_columns):
