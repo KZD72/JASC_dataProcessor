@@ -66,7 +66,7 @@ The benchmark products emphasize:
 - Phase 1: formalize current 2D plot modes as Line, Scatter, Line + Markers, and Errorbar while preserving saved-plot compatibility. (complete)
 - Phase 2: add reporting plots that still map naturally to X/Y columns: vertical bar, horizontal bar, area/fill, and histogram. (complete)
 - Phase 3: add distribution comparison plots that need multi-column capture: box plots and violin plots, with mean/median/outlier options. (complete)
-- Phase 4: add composition and categorical reporting plots: pie, donut, and Voronoi composition charts with label/value column roles, percentage labels, exploded slice or composition geometry controls, and saved-state persistence. (initial slice started: text/category X labels now work for bar/barh; the Plot Inspector now uses Plot family plus Subtype dropdowns; Pie/Donut render label/value composition charts; Voronoi Composition renders circular, rectangular, or polygonal weighted-grid partitions; percentage/exploded-slice, label-density, and more exact composition geometry controls remain)
+- Phase 4: add composition and categorical reporting plots: pie, donut, and Voronoi composition charts with label/value column roles, percentage labels, exploded slice or composition geometry controls, and saved-state persistence. (initial slice started: text/category X labels now work for bar/barh; the Plot Inspector now uses Plot family plus Subtype dropdowns; Pie/Donut render label/value composition charts; Voronoi Composition renders circular, rectangular, or polygonal value-weighted polygon partitions; percentage/exploded-slice, label-density, and more exact composition geometry controls remain)
 - Phase 5: add matrix and density visualization.
   - Interpolated irregular X/Y/Z heatmap, contour, filled contour, interpolation choices, grid resolution, and X/Y to Z locator prediction. (initial implementation complete)
   - Follow-ups: regular-grid heatmaps, matrix heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, contour-level controls, masking of invalid regions, and export-friendly legends.
@@ -241,8 +241,8 @@ Acceptance criteria:
 Purpose: make the app useful before analysis begins.
 
 Tasks:
-- Add sort, filter, query, duplicate removal, missing-value fill/drop/interpolate, and type conversion tools.
-- Add stack/unstack, transpose, split columns, merge/join, append rows, group-by aggregate, and pivot table outputs.
+- Add sort, filter, query, duplicate removal, missing-value fill/drop/interpolate, and type conversion tools. (implemented first pass: Data Inspector has a `Data Prep` tab and Data menu entries for Filter/Query, Sort, Missing Values, Bin/Average, Group/Aggregate, Merge/Join, and Reshape; all create metadata-preserving result sheets where possible)
+- Add stack/unstack, transpose, split columns, merge/join, append rows, group-by aggregate, and pivot table outputs. (implemented first pass: stack/melt, transpose, merge/join, and group-by aggregate; pivot tables, append rows, split columns, and richer reshape controls remain)
 - Add text extraction/flash-fill-style helpers for mixed text/numeric columns.
 - Add date/time parsing, resampling, rolling-window summaries, and data reduction/downsampling.
 - Add conditional formatting and basic data-quality indicators in the Data Editor.
@@ -250,6 +250,7 @@ Tasks:
 Acceptance criteria:
 - Each operation creates an undoable change or a new result dataset.
 - Operations record enough metadata to be repeated after parameter edits in Stage 9.
+- Near-term Data Prep continuation: add preview row counts/sample rows, multiple AND/OR conditions, output-mode choices, batch application, duplicate removal, type conversion, pivot tables, append rows, and split-column tools.
 
 ### Competitive Stage 5: Graphing and Layout Parity
 

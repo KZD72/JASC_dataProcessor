@@ -73,6 +73,36 @@ from models.fit_functions import (
 
 BATCH_COLUMN_BINDING_NAME = "name"
 BATCH_COLUMN_BINDING_POSITION = "position"
+FILTER_OPERATOR_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("eq", "Equals"),
+    ("ne", "Does not equal"),
+    ("gt", ">"),
+    ("ge", ">="),
+    ("lt", "<"),
+    ("le", "<="),
+    ("between", "Between"),
+    ("contains", "Contains"),
+    ("starts", "Starts with"),
+    ("in", "In comma-separated list"),
+    ("blank", "Is blank"),
+    ("not_blank", "Is not blank"),
+)
+MISSING_VALUE_STRATEGIES: tuple[tuple[str, str], ...] = (
+    ("drop_rows", "Drop rows with blanks"),
+    ("fill_value", "Fill with value"),
+    ("fill_mean", "Fill numeric with mean"),
+    ("fill_median", "Fill numeric with median"),
+    ("interpolate", "Interpolate numeric"),
+)
+GROUP_AGGREGATIONS: tuple[tuple[str, str], ...] = (
+    ("count", "Count"),
+    ("mean", "Mean"),
+    ("std", "Std. deviation"),
+    ("sem", "Std. error"),
+    ("min", "Minimum"),
+    ("max", "Maximum"),
+    ("sum", "Sum"),
+)
 
 
 def batch_column_binding_combo() -> QComboBox:
@@ -102,6 +132,589 @@ def select_list_items(widget: QListWidget, items: list[str]) -> None:
     for row in range(widget.count()):
         item = widget.item(row)
         item.setSelected(item.text() in wanted)
+
+
+class DataFilterDialog(QDialog):
+    """Collect settings for a first-pass Data Prep filter/query operation."""
+
+    def __init__(
+        self,
+        dataset_columns: dict[str, list[str]],
+        default_dataset_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Create a filter dialog for one selected worksheet."""
+        super().__init__(parent)
+        self.setWindowTitle("Filter / Query")
+        self.setModal(True)
+        self.resize(520, 260)
+        self._dataset_columns = dataset_columns
+
+        self._dataset_combo = QComboBox()
+        self._dataset_combo.addItems(dataset_columns.keys())
+        if default_dataset_name in dataset_columns:
+            self._dataset_combo.setCurrentText(default_dataset_name)
+
+        self._column_combo = QComboBox()
+        self._operator_combo = QComboBox()
+        for operator_key, operator_label in FILTER_OPERATOR_OPTIONS:
+            self._operator_combo.addItem(operator_label, operator_key)
+
+        self._value_edit = QLineEdit()
+        self._value_edit.setPlaceholderText("Text, number, list, or range minimum")
+        self._value2_edit = QLineEdit()
+        self._value2_edit.setPlaceholderText("Range maximum")
+        self._output_edit = QLineEdit()
+
+        self._dataset_combo.currentTextChanged.connect(self._refresh_columns)
+        self._operator_combo.currentIndexChanged.connect(lambda _index: self._sync_value_enabled())
+        self._refresh_columns(self._dataset_combo.currentText())
+        self._sync_value_enabled()
+
+        form = QFormLayout()
+        form.addRow("Dataset", self._dataset_combo)
+        form.addRow("Column", self._column_combo)
+        form.addRow("Condition", self._operator_combo)
+        form.addRow("Value", self._value_edit)
+        form.addRow("Second value", self._value2_edit)
+        form.addRow("Output sheet", self._output_edit)
+
+        hint = QLabel(
+            "Creates a filtered copy of the selected sheet. "
+            "Multiple-condition query builders, in-place filtering, and batch filtering are planned next."
+        )
+        hint.setWordWrap(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(hint)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def dataset_name(self) -> str:
+        """Return the selected source dataset name."""
+        return self._dataset_combo.currentText().strip()
+
+    def column_name(self) -> str:
+        """Return the selected source column name."""
+        return self._column_combo.currentText().strip()
+
+    def operator_key(self) -> str:
+        """Return the selected filter operator key."""
+        return str(self._operator_combo.currentData() or "")
+
+    def value_text(self) -> str:
+        """Return the comparison value text."""
+        return self._value_edit.text().strip()
+
+    def value2_text(self) -> str:
+        """Return the optional second comparison value text."""
+        return self._value2_edit.text().strip()
+
+    def output_name(self) -> str:
+        """Return the requested output sheet name."""
+        return self._output_edit.text().strip()
+
+    def accept(self) -> None:
+        """Validate required fields before accepting."""
+        if not self.dataset_name():
+            QMessageBox.warning(self, "Filter / Query", "Choose a dataset.")
+            return
+        if not self.column_name():
+            QMessageBox.warning(self, "Filter / Query", "Choose a column.")
+            return
+        if self.operator_key() not in {"blank", "not_blank"} and not self.value_text():
+            QMessageBox.warning(self, "Filter / Query", "Enter a comparison value.")
+            return
+        if self.operator_key() == "between" and not self.value2_text():
+            QMessageBox.warning(self, "Filter / Query", "Enter the second range value.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Filter / Query", "Enter an output sheet name.")
+            return
+        super().accept()
+
+    def _refresh_columns(self, dataset_name: str) -> None:
+        """Refresh column choices and default output name for the selected dataset."""
+        columns = self._dataset_columns.get(dataset_name, [])
+        current = self._column_combo.currentText()
+        self._column_combo.clear()
+        self._column_combo.addItems(columns)
+        if current in columns:
+            self._column_combo.setCurrentText(current)
+        if dataset_name:
+            self._output_edit.setText(f"{dataset_name}_filtered")
+
+    def _sync_value_enabled(self) -> None:
+        """Disable the value field for blank/not-blank operators."""
+        needs_value = self.operator_key() not in {"blank", "not_blank"}
+        self._value_edit.setEnabled(needs_value)
+        self._value2_edit.setEnabled(self.operator_key() == "between")
+        if not needs_value:
+            self._value_edit.clear()
+        if self.operator_key() != "between":
+            self._value2_edit.clear()
+
+
+class DataSortDialog(QDialog):
+    """Collect settings for sorting a dataset into a new sheet."""
+
+    def __init__(self, column_names: list[str], default_output_name: str, parent: QWidget | None = None) -> None:
+        """Create sort controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Sort")
+        self.setModal(True)
+        self.resize(460, 360)
+        self._column_list = QListWidget()
+        self._column_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._column_list.addItems(column_names)
+        if column_names:
+            self._column_list.item(0).setSelected(True)
+        self._order_combo = QComboBox()
+        self._order_combo.addItem("Ascending", True)
+        self._order_combo.addItem("Descending", False)
+        self._output_edit = QLineEdit(default_output_name)
+
+        form = QFormLayout()
+        form.addRow("Order", self._order_combo)
+        form.addRow("Output sheet", self._output_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Sort by selected columns in their worksheet order."))
+        layout.addWidget(self._column_list)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def selected_columns(self) -> list[str]:
+        """Return selected sort columns."""
+        return selected_list_items(self._column_list)
+
+    def ascending(self) -> bool:
+        """Return whether sorting is ascending."""
+        return bool(self._order_combo.currentData())
+
+    def output_name(self) -> str:
+        """Return requested output sheet name."""
+        return self._output_edit.text().strip()
+
+    def accept(self) -> None:
+        """Validate sort settings."""
+        if not self.selected_columns():
+            QMessageBox.warning(self, "Sort", "Choose at least one sort column.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Sort", "Enter an output sheet name.")
+            return
+        super().accept()
+
+
+class MissingValuesDialog(QDialog):
+    """Collect settings for missing-value cleanup."""
+
+    def __init__(self, column_names: list[str], default_output_name: str, parent: QWidget | None = None) -> None:
+        """Create missing-value cleanup controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Missing Values")
+        self.setModal(True)
+        self.resize(480, 380)
+        self._column_list = QListWidget()
+        self._column_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._column_list.addItems(column_names)
+        for row in range(self._column_list.count()):
+            self._column_list.item(row).setSelected(True)
+        self._strategy_combo = QComboBox()
+        for key, label in MISSING_VALUE_STRATEGIES:
+            self._strategy_combo.addItem(label, key)
+        self._fill_value_edit = QLineEdit()
+        self._fill_value_edit.setPlaceholderText("Value used by 'Fill with value'")
+        self._output_edit = QLineEdit(default_output_name)
+        self._strategy_combo.currentIndexChanged.connect(lambda _index: self._sync_fill_value_enabled())
+        self._sync_fill_value_enabled()
+
+        form = QFormLayout()
+        form.addRow("Strategy", self._strategy_combo)
+        form.addRow("Fill value", self._fill_value_edit)
+        form.addRow("Output sheet", self._output_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Apply missing-value cleanup to the selected columns."))
+        layout.addWidget(self._column_list)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def selected_columns(self) -> list[str]:
+        """Return selected cleanup columns."""
+        return selected_list_items(self._column_list)
+
+    def strategy(self) -> str:
+        """Return selected cleanup strategy."""
+        return str(self._strategy_combo.currentData() or "")
+
+    def fill_value(self) -> str:
+        """Return literal fill value."""
+        return self._fill_value_edit.text()
+
+    def output_name(self) -> str:
+        """Return requested output sheet name."""
+        return self._output_edit.text().strip()
+
+    def accept(self) -> None:
+        """Validate cleanup settings."""
+        if not self.selected_columns():
+            QMessageBox.warning(self, "Missing Values", "Choose at least one column.")
+            return
+        if self.strategy() == "fill_value" and self.fill_value() == "":
+            QMessageBox.warning(self, "Missing Values", "Enter a fill value.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Missing Values", "Enter an output sheet name.")
+            return
+        super().accept()
+
+    def _sync_fill_value_enabled(self) -> None:
+        """Enable fill-value field only for literal fill mode."""
+        self._fill_value_edit.setEnabled(self.strategy() == "fill_value")
+
+
+class GroupAggregateDialog(QDialog):
+    """Collect settings for grouped aggregation."""
+
+    def __init__(self, column_names: list[str], default_output_name: str, parent: QWidget | None = None) -> None:
+        """Create grouped aggregation controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Group / Aggregate")
+        self.setModal(True)
+        self.resize(720, 420)
+        self._group_list = QListWidget()
+        self._group_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._group_list.addItems(column_names)
+        self._value_list = QListWidget()
+        self._value_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._value_list.addItems(column_names)
+        self._agg_list = QListWidget()
+        self._agg_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        for key, label in GROUP_AGGREGATIONS:
+            self._agg_list.addItem(f"{label} ({key})")
+            self._agg_list.item(self._agg_list.count() - 1).setData(Qt.UserRole, key)
+        for row in range(self._agg_list.count()):
+            key = self._agg_list.item(row).data(Qt.UserRole)
+            self._agg_list.item(row).setSelected(key in {"count", "mean", "std"})
+        self._output_edit = QLineEdit(default_output_name)
+
+        list_row = QHBoxLayout()
+        list_row.addLayout(self._labeled_list("Group columns", self._group_list))
+        list_row.addLayout(self._labeled_list("Value columns", self._value_list))
+        list_row.addLayout(self._labeled_list("Aggregations", self._agg_list))
+
+        form = QFormLayout()
+        form.addRow("Output sheet", self._output_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(list_row)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def group_columns(self) -> list[str]:
+        """Return selected group columns."""
+        return selected_list_items(self._group_list)
+
+    def value_columns(self) -> list[str]:
+        """Return selected numeric value columns."""
+        return selected_list_items(self._value_list)
+
+    def aggregations(self) -> list[str]:
+        """Return selected aggregation keys."""
+        return [
+            str(self._agg_list.item(row).data(Qt.UserRole))
+            for row in range(self._agg_list.count())
+            if self._agg_list.item(row).isSelected()
+        ]
+
+    def output_name(self) -> str:
+        """Return requested output sheet name."""
+        return self._output_edit.text().strip()
+
+    def accept(self) -> None:
+        """Validate grouped aggregation settings."""
+        if not self.group_columns():
+            QMessageBox.warning(self, "Group / Aggregate", "Choose at least one group column.")
+            return
+        if not self.value_columns():
+            QMessageBox.warning(self, "Group / Aggregate", "Choose at least one value column.")
+            return
+        overlap = sorted(set(self.group_columns()) & set(self.value_columns()))
+        if overlap:
+            QMessageBox.warning(
+                self,
+                "Group / Aggregate",
+                "Group columns cannot also be value columns: " + ", ".join(overlap),
+            )
+            return
+        if not self.aggregations():
+            QMessageBox.warning(self, "Group / Aggregate", "Choose at least one aggregation.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Group / Aggregate", "Enter an output sheet name.")
+            return
+        super().accept()
+
+    @staticmethod
+    def _labeled_list(label: str, widget: QListWidget) -> QVBoxLayout:
+        """Return a labeled list layout."""
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel(label))
+        layout.addWidget(widget)
+        return layout
+
+
+class MergeJoinDialog(QDialog):
+    """Collect settings for merging two datasets."""
+
+    def __init__(
+        self,
+        dataset_columns: dict[str, list[str]],
+        default_dataset_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Create merge/join controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Merge / Join")
+        self.setModal(True)
+        self.resize(560, 260)
+        self._dataset_columns = dataset_columns
+        self._left_dataset_combo = QComboBox()
+        self._right_dataset_combo = QComboBox()
+        self._left_dataset_combo.addItems(dataset_columns.keys())
+        self._right_dataset_combo.addItems(dataset_columns.keys())
+        if default_dataset_name in dataset_columns:
+            self._left_dataset_combo.setCurrentText(default_dataset_name)
+        if len(dataset_columns) > 1:
+            for name in dataset_columns:
+                if name != self._left_dataset_combo.currentText():
+                    self._right_dataset_combo.setCurrentText(name)
+                    break
+        self._left_key_combo = QComboBox()
+        self._right_key_combo = QComboBox()
+        self._how_combo = QComboBox()
+        for key, label in [("inner", "Inner"), ("left", "Left"), ("right", "Right"), ("outer", "Outer")]:
+            self._how_combo.addItem(label, key)
+        self._output_edit = QLineEdit(f"{default_dataset_name}_joined")
+
+        self._left_dataset_combo.currentTextChanged.connect(lambda _text: self._refresh_keys())
+        self._right_dataset_combo.currentTextChanged.connect(lambda _text: self._refresh_keys())
+        self._refresh_keys()
+
+        form = QFormLayout()
+        form.addRow("Left dataset", self._left_dataset_combo)
+        form.addRow("Left key", self._left_key_combo)
+        form.addRow("Right dataset", self._right_dataset_combo)
+        form.addRow("Right key", self._right_key_combo)
+        form.addRow("Join mode", self._how_combo)
+        form.addRow("Output sheet", self._output_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def left_dataset_name(self) -> str:
+        """Return selected left dataset name."""
+        return self._left_dataset_combo.currentText().strip()
+
+    def right_dataset_name(self) -> str:
+        """Return selected right dataset name."""
+        return self._right_dataset_combo.currentText().strip()
+
+    def left_key(self) -> str:
+        """Return selected left key column."""
+        return self._left_key_combo.currentText().strip()
+
+    def right_key(self) -> str:
+        """Return selected right key column."""
+        return self._right_key_combo.currentText().strip()
+
+    def join_mode(self) -> str:
+        """Return selected join mode."""
+        return str(self._how_combo.currentData() or "inner")
+
+    def output_name(self) -> str:
+        """Return requested output sheet name."""
+        return self._output_edit.text().strip()
+
+    def accept(self) -> None:
+        """Validate merge settings."""
+        if not self.left_dataset_name() or not self.right_dataset_name():
+            QMessageBox.warning(self, "Merge / Join", "Choose both datasets.")
+            return
+        if not self.left_key() or not self.right_key():
+            QMessageBox.warning(self, "Merge / Join", "Choose both key columns.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Merge / Join", "Enter an output sheet name.")
+            return
+        super().accept()
+
+    def _refresh_keys(self) -> None:
+        """Refresh key column combos after dataset changes."""
+        left_columns = self._dataset_columns.get(self._left_dataset_combo.currentText(), [])
+        right_columns = self._dataset_columns.get(self._right_dataset_combo.currentText(), [])
+        self._left_key_combo.clear()
+        self._left_key_combo.addItems(left_columns)
+        self._right_key_combo.clear()
+        self._right_key_combo.addItems(right_columns)
+
+
+class ReshapeDialog(QDialog):
+    """Collect settings for transpose or stack/melt reshaping."""
+
+    def __init__(self, column_names: list[str], default_output_name: str, parent: QWidget | None = None) -> None:
+        """Create reshape controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Reshape")
+        self.setModal(True)
+        self.resize(640, 420)
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("Transpose", "transpose")
+        self._mode_combo.addItem("Stack selected columns (melt)", "melt")
+        self._id_list = QListWidget()
+        self._id_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._id_list.addItems(column_names)
+        self._value_list = QListWidget()
+        self._value_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._value_list.addItems(column_names)
+        for row in range(self._value_list.count()):
+            self._value_list.item(row).setSelected(True)
+        self._output_edit = QLineEdit(default_output_name)
+
+        list_row = QHBoxLayout()
+        list_row.addLayout(GroupAggregateDialog._labeled_list("Identifier columns", self._id_list))
+        list_row.addLayout(GroupAggregateDialog._labeled_list("Value columns", self._value_list))
+
+        form = QFormLayout()
+        form.addRow("Mode", self._mode_combo)
+        form.addRow("Output sheet", self._output_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addLayout(list_row)
+        layout.addWidget(buttons)
+
+    def mode(self) -> str:
+        """Return selected reshape mode."""
+        return str(self._mode_combo.currentData() or "transpose")
+
+    def id_columns(self) -> list[str]:
+        """Return selected identifier columns."""
+        return selected_list_items(self._id_list)
+
+    def value_columns(self) -> list[str]:
+        """Return selected value columns."""
+        return selected_list_items(self._value_list)
+
+    def output_name(self) -> str:
+        """Return requested output sheet name."""
+        return self._output_edit.text().strip()
+
+    def accept(self) -> None:
+        """Validate reshape settings."""
+        if self.mode() == "melt" and not self.value_columns():
+            QMessageBox.warning(self, "Reshape", "Choose at least one value column to stack.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Reshape", "Enter an output sheet name.")
+            return
+        super().accept()
+
+
+class BinningDialog(QDialog):
+    """Collect settings for binned means and dispersion outputs."""
+
+    def __init__(self, column_names: list[str], default_output_name: str, parent: QWidget | None = None) -> None:
+        """Create binning controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Bin / Average")
+        self.setModal(True)
+        self.resize(520, 420)
+        self._bin_column_combo = QComboBox()
+        self._bin_column_combo.addItems(column_names)
+        self._value_list = QListWidget()
+        self._value_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._value_list.addItems(column_names)
+        for row in range(self._value_list.count()):
+            self._value_list.item(row).setSelected(row > 0)
+        self._bin_count_spin = QSpinBox()
+        self._bin_count_spin.setRange(1, 10000)
+        self._bin_count_spin.setValue(20)
+        self._output_edit = QLineEdit(default_output_name)
+
+        form = QFormLayout()
+        form.addRow("Bin by", self._bin_column_combo)
+        form.addRow("Bin count", self._bin_count_spin)
+        form.addRow("Output sheet", self._output_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("Value columns"))
+        layout.addWidget(self._value_list)
+        layout.addWidget(buttons)
+
+    def bin_column(self) -> str:
+        """Return selected bin coordinate column."""
+        return self._bin_column_combo.currentText().strip()
+
+    def value_columns(self) -> list[str]:
+        """Return selected value columns."""
+        return selected_list_items(self._value_list)
+
+    def bin_count(self) -> int:
+        """Return requested number of bins."""
+        return int(self._bin_count_spin.value())
+
+    def output_name(self) -> str:
+        """Return requested output sheet name."""
+        return self._output_edit.text().strip()
+
+    def accept(self) -> None:
+        """Validate binning settings."""
+        if not self.bin_column():
+            QMessageBox.warning(self, "Bin / Average", "Choose a bin column.")
+            return
+        if not self.value_columns():
+            QMessageBox.warning(self, "Bin / Average", "Choose at least one value column.")
+            return
+        if self.bin_column() in self.value_columns():
+            QMessageBox.warning(self, "Bin / Average", "The bin column should not also be a value column.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Bin / Average", "Enter an output sheet name.")
+            return
+        super().accept()
 
 
 class ImportOptionsDialog(QDialog):
