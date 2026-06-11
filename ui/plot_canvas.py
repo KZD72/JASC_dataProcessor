@@ -1037,7 +1037,7 @@ class PlotCanvas(QWidget):
         values: np.ndarray,
         shape: str,
     ) -> None:
-        """Draw a grid-weighted Voronoi-style composition chart."""
+        """Draw a value-weighted polygonal Voronoi-style composition chart."""
         values = np.asarray(values, dtype=float)
         valid = np.isfinite(values) & (values > 0)
         labels = [label for label, keep in zip(labels, valid) if keep]
@@ -1046,44 +1046,29 @@ class PlotCanvas(QWidget):
             raise ValueError("Voronoi composition needs at least one positive finite value")
 
         shape_key = self._normalized_voronoi_shape(shape)
-        resolution = self._voronoi_grid_resolution(len(values))
-        grid_x, grid_y, mask = self._voronoi_container_grid(shape_key, resolution)
-        points = np.column_stack([grid_x[mask], grid_y[mask]])
-        if points.size == 0:
-            raise ValueError("Voronoi container has no plottable area")
-
+        container = self._voronoi_container_polygon(shape_key)
         seeds = self._voronoi_seed_points(len(values), shape_key)
-        assignments = self._weighted_voronoi_assignments(points, seeds, values)
-        assignment_grid = np.full(grid_x.shape, np.nan, dtype=float)
-        assignment_grid[mask] = assignments.astype(float)
-        masked_assignments = np.ma.masked_invalid(assignment_grid)
-
+        weights = self._power_voronoi_weights(shape_key, seeds, values)
+        polygons = self._power_voronoi_polygons(container, seeds, weights)
         colors = [f"C{index % 10}" for index in range(len(values))]
-        levels = np.arange(len(values) + 1, dtype=float) - 0.5
-        target_axes.contourf(
-            grid_x,
-            grid_y,
-            masked_assignments,
-            levels=levels,
-            colors=colors,
-            alpha=0.92,
-            antialiased=True,
-        )
-        if len(values) > 1:
-            target_axes.contour(
-                grid_x,
-                grid_y,
-                masked_assignments,
-                levels=np.arange(0.5, len(values), dtype=float),
-                colors="white",
-                linewidths=0.7,
+
+        for index, polygon in enumerate(polygons):
+            if polygon.shape[0] < 3:
+                continue
+            target_axes.fill(
+                polygon[:, 0],
+                polygon[:, 1],
+                facecolor=colors[index],
+                edgecolor="white",
+                linewidth=1.1,
+                alpha=0.92,
+                antialiased=True,
             )
 
         self._draw_voronoi_container_outline(target_axes, shape_key)
-        self._label_voronoi_regions(
+        self._label_voronoi_polygons(
             target_axes=target_axes,
-            points=points,
-            assignments=assignments,
+            polygons=polygons,
             labels=labels,
             values=values,
         )
@@ -1094,6 +1079,24 @@ class PlotCanvas(QWidget):
         target_axes.set_aspect("equal")
         target_axes.grid(False)
         target_axes.set_frame_on(False)
+
+    def _voronoi_container_polygon(self, shape: str) -> np.ndarray:
+        """Return a clipping polygon for the requested Voronoi composition container."""
+        if shape == "rectangle":
+            return np.array(
+                [
+                    [-1.0, -1.0],
+                    [1.0, -1.0],
+                    [1.0, 1.0],
+                    [-1.0, 1.0],
+                ],
+                dtype=float,
+            )
+        if shape == "polygon":
+            return self._polygon_container_vertices()
+
+        angles = np.linspace(0.0, 2.0 * np.pi, 97)[:-1]
+        return np.column_stack([np.cos(angles), np.sin(angles)])
 
     @staticmethod
     def _normalized_voronoi_shape(shape: str) -> str:
@@ -1193,6 +1196,96 @@ class PlotCanvas(QWidget):
             assignments[missing] = np.argmin(distances[missing], axis=1)
         return assignments
 
+    def _power_voronoi_weights(
+        self,
+        shape: str,
+        seeds: np.ndarray,
+        values: np.ndarray,
+    ) -> np.ndarray:
+        """Estimate additive weights so polygon areas follow composition values."""
+        if len(values) <= 1:
+            return np.zeros(len(values), dtype=float)
+
+        resolution = self._voronoi_grid_resolution(len(values))
+        grid_x, grid_y, mask = self._voronoi_container_grid(shape, resolution)
+        points = np.column_stack([grid_x[mask], grid_y[mask]])
+        if points.size == 0:
+            return np.zeros(len(values), dtype=float)
+
+        target = values / np.sum(values)
+        weights = np.zeros(len(values), dtype=float)
+        distances = np.sum((points[:, None, :] - seeds[None, :, :]) ** 2, axis=2)
+        gain = 0.32
+        for _iteration in range(90):
+            assignments = np.argmin(distances - weights[None, :], axis=1)
+            counts = np.bincount(assignments, minlength=len(values)).astype(float)
+            current = counts / max(float(np.sum(counts)), 1.0)
+            error = target - current
+            if float(np.max(np.abs(error))) < 0.006:
+                break
+            weights += gain * error
+            weights -= float(np.mean(weights))
+            gain *= 0.985
+        return weights
+
+    def _power_voronoi_polygons(
+        self,
+        container: np.ndarray,
+        seeds: np.ndarray,
+        weights: np.ndarray,
+    ) -> list[np.ndarray]:
+        """Build clipped power-diagram cells as ordinary polygons."""
+        polygons: list[np.ndarray] = []
+        for index, seed in enumerate(seeds):
+            polygon = np.asarray(container, dtype=float)
+            for other_index, other_seed in enumerate(seeds):
+                if other_index == index or polygon.shape[0] < 3:
+                    continue
+                normal = 2.0 * (other_seed - seed)
+                limit = (
+                    float(np.dot(other_seed, other_seed))
+                    - float(np.dot(seed, seed))
+                    + float(weights[index])
+                    - float(weights[other_index])
+                )
+                polygon = self._clip_polygon_to_half_plane(polygon, normal, limit)
+            polygons.append(polygon)
+        return polygons
+
+    @staticmethod
+    def _clip_polygon_to_half_plane(
+        polygon: np.ndarray,
+        normal: np.ndarray,
+        limit: float,
+    ) -> np.ndarray:
+        """Clip a polygon to the half-plane normal dot point <= limit."""
+        if polygon.shape[0] < 3:
+            return np.empty((0, 2), dtype=float)
+
+        clipped: list[np.ndarray] = []
+        epsilon = 1e-9
+        previous = polygon[-1]
+        previous_value = float(np.dot(normal, previous) - limit)
+        previous_inside = previous_value <= epsilon
+
+        for current in polygon:
+            current_value = float(np.dot(normal, current) - limit)
+            current_inside = current_value <= epsilon
+            if current_inside != previous_inside:
+                direction = current - previous
+                denominator = float(np.dot(normal, direction))
+                if abs(denominator) > epsilon:
+                    ratio = (limit - float(np.dot(normal, previous))) / denominator
+                    clipped.append(previous + np.clip(ratio, 0.0, 1.0) * direction)
+            if current_inside:
+                clipped.append(current)
+            previous = current
+            previous_inside = current_inside
+
+        if not clipped:
+            return np.empty((0, 2), dtype=float)
+        return np.asarray(clipped, dtype=float)
+
     @staticmethod
     def _proportional_voronoi_counts(values: np.ndarray, point_count: int) -> np.ndarray:
         """Return integer grid-cell counts proportional to the composition values."""
@@ -1231,24 +1324,24 @@ class PlotCanvas(QWidget):
         target_axes.plot(x_values, y_values, color="black", linewidth=0.9)
 
     @staticmethod
-    def _label_voronoi_regions(
+    def _label_voronoi_polygons(
         target_axes: Any,
-        points: np.ndarray,
-        assignments: np.ndarray,
+        polygons: list[np.ndarray],
         labels: list[str],
         values: np.ndarray,
     ) -> None:
-        """Place compact labels at the grid centroid of readable Voronoi regions."""
+        """Place compact labels at polygon centroids for readable Voronoi regions."""
         total = float(np.sum(values))
         item_count = len(values)
-        for index, (label, value) in enumerate(zip(labels, values)):
+        for polygon, label, value in zip(polygons, labels, values):
+            if polygon.shape[0] < 3:
+                continue
             percentage = 100.0 * float(value) / total if total > 0 else 0.0
             if item_count > 18 and percentage < 3.0:
                 continue
-            region_points = points[assignments == index]
-            if region_points.size == 0:
+            area, centroid = PlotCanvas._polygon_area_and_centroid(polygon)
+            if area <= 0.004:
                 continue
-            centroid = np.mean(region_points, axis=0)
             text = f"{label}\n{percentage:.1f}%" if item_count <= 30 else f"{percentage:.1f}%"
             target_axes.text(
                 float(centroid[0]),
@@ -1259,6 +1352,26 @@ class PlotCanvas(QWidget):
                 fontsize=8 if item_count <= 18 else 7,
                 color="black",
             )
+
+    @staticmethod
+    def _polygon_area_and_centroid(polygon: np.ndarray) -> tuple[float, np.ndarray]:
+        """Return polygon area and centroid, falling back to vertex mean if degenerate."""
+        x_values = polygon[:, 0]
+        y_values = polygon[:, 1]
+        shifted_x = np.roll(x_values, -1)
+        shifted_y = np.roll(y_values, -1)
+        cross = x_values * shifted_y - shifted_x * y_values
+        signed_area = 0.5 * float(np.sum(cross))
+        if abs(signed_area) < 1e-12:
+            return 0.0, np.mean(polygon, axis=0)
+        centroid = np.array(
+            [
+                float(np.sum((x_values + shifted_x) * cross) / (6.0 * signed_area)),
+                float(np.sum((y_values + shifted_y) * cross) / (6.0 * signed_area)),
+            ],
+            dtype=float,
+        )
+        return abs(signed_area), centroid
 
     def _draw_surface_by_type(
         self,

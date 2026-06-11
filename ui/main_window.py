@@ -59,6 +59,15 @@ from core.data_backends import (
     profile_dataframe,
     should_warn_for_large_file,
 )
+from core.data_prep import FILTER_OPERATORS, DataPrepError, FilterCondition, apply_filter_condition
+from core.data_prep import (
+    bin_dataframe,
+    clean_missing_values,
+    group_aggregate_dataframe,
+    merge_join_dataframes,
+    reshape_dataframe,
+    sort_dataframe,
+)
 from core.file_io import export_tabular_file, read_tabular_file
 from core.operations import ExpressionError, ExpressionResult, apply_column_expression
 from core.workspace import (
@@ -100,17 +109,24 @@ from ui.dialogs import (
     BATCH_COLUMN_BINDING_NAME,
     BATCH_COLUMN_BINDING_POSITION,
     BatchPreviewDialog,
+    BinningDialog,
     ColumnExpressionDialog,
     ColumnMathDialog,
     ColumnMetadataDialog,
     CustomFitModelsDialog,
+    DataFilterDialog,
     FFTDialog,
     FigureDigitizerDialog,
     FitDialog,
     FitReportDialog,
+    GroupAggregateDialog,
     IFFTDialog,
     ImportOptionsDialog,
     InterpolationDialog,
+    MergeJoinDialog,
+    MissingValuesDialog,
+    ReshapeDialog,
+    DataSortDialog,
     StatisticsDialog,
 )
 from ui.plot_canvas import PlotSeries
@@ -250,6 +266,7 @@ class MainWindow(QMainWindow):
         """Build the Data-mode inspector with sheet editing and analysis actions."""
         inspector_tabs = QTabWidget()
         inspector_tabs.addTab(self._build_sheet_actions_panel(), "Sheet")
+        inspector_tabs.addTab(self._build_data_prep_actions_panel(), "Data Prep")
         inspector_tabs.addTab(self._build_analysis_actions_panel(), "Analysis")
         return inspector_tabs
 
@@ -289,6 +306,46 @@ class MainWindow(QMainWindow):
         layout.addLayout(self._button_row(self._editor_rename_button, self._editor_remove_button))
         layout.addLayout(self._button_row(self._editor_fill_range_button, self._editor_metadata_button))
         layout.addWidget(self._editor_export_button)
+        layout.addStretch(1)
+        return panel
+
+    def _build_data_prep_actions_panel(self) -> QWidget:
+        """Build data-preparation launch buttons for the Data inspector."""
+        panel = QWidget()
+        filter_button = QPushButton("Filter / Query")
+        filter_button.clicked.connect(self._run_filter_query)
+        sort_button = QPushButton("Sort")
+        sort_button.clicked.connect(self._run_sort)
+        missing_button = QPushButton("Missing Values")
+        missing_button.clicked.connect(self._run_missing_values)
+        bin_button = QPushButton("Bin / Average")
+        bin_button.clicked.connect(self._run_binning)
+        group_button = QPushButton("Group / Aggregate")
+        group_button.clicked.connect(self._run_group_aggregate)
+        join_button = QPushButton("Merge / Join")
+        join_button.clicked.connect(self._run_merge_join)
+        reshape_button = QPushButton("Reshape")
+        reshape_button.clicked.connect(self._run_reshape)
+
+        self._data_prep_buttons = [
+            filter_button,
+            sort_button,
+            missing_button,
+            bin_button,
+            group_button,
+            join_button,
+            reshape_button,
+        ]
+
+        layout = QVBoxLayout(panel)
+        layout.addWidget(QLabel("Clean and Shape"))
+        layout.addWidget(filter_button)
+        layout.addLayout(self._button_row(sort_button, missing_button))
+        layout.addWidget(bin_button)
+        layout.addWidget(QLabel("Combine and Summarize"))
+        layout.addWidget(group_button)
+        layout.addWidget(join_button)
+        layout.addWidget(reshape_button)
         layout.addStretch(1)
         return panel
 
@@ -465,6 +522,316 @@ class MainWindow(QMainWindow):
         self._select_dataset_range(dialog.start_row() - 1, column_index, dialog.count(), 1)
         self.statusBar().showMessage(f"Filled {dialog.count()} value(s) in {dataset.name}.{column_name}")
 
+    def _run_filter_query(self) -> None:
+        """Create a filtered copy of a dataset from one simple condition."""
+        dataset_columns = self._data_prep_dataset_columns()
+        if not dataset_columns:
+            QMessageBox.information(self, "Filter / Query", "Load or create a dataset before filtering.")
+            return
+
+        default_dataset_name = self._default_data_prep_dataset_name(dataset_columns)
+        dialog = DataFilterDialog(
+            dataset_columns=dataset_columns,
+            default_dataset_name=default_dataset_name,
+            parent=self,
+        )
+        if dialog.exec() != DataFilterDialog.Accepted:
+            return
+
+        try:
+            source_dataset = self._workspace.get_dataset(dialog.dataset_name())
+            condition = FilterCondition(
+                column=dialog.column_name(),
+                operator=dialog.operator_key(),
+                value=dialog.value_text(),
+                value2=dialog.value2_text(),
+            )
+            result_frame = apply_filter_condition(source_dataset.frame, condition)
+        except (KeyError, DataPrepError) as exc:
+            QMessageBox.warning(self, "Filter / Query Failed", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Filter / Query Failed", str(exc))
+            return
+
+        operation = (
+            f"Filter {source_dataset.name}.{condition.column} "
+            f"{FILTER_OPERATORS.get(condition.operator, condition.operator)} {condition.value}"
+        )
+        if condition.operator == "between":
+            operation = f"{operation} and {condition.value2}"
+        self._create_data_prep_result(
+            title="Filter / Query",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[source_dataset],
+            operation=operation.strip(),
+            status_message=(
+                f"Filtered {source_dataset.name}: {len(result_frame)} of {len(source_dataset.frame)} rows"
+            ),
+        )
+
+    def _run_sort(self) -> None:
+        """Create a sorted copy of the current dataset."""
+        dataset = self._current_data_prep_source("Sort")
+        if dataset is None:
+            return
+        dialog = DataSortDialog(
+            column_names=[str(column) for column in dataset.frame.columns],
+            default_output_name=f"{dataset.name}_sorted",
+            parent=self,
+        )
+        if dialog.exec() != DataSortDialog.Accepted:
+            return
+        try:
+            result_frame = sort_dataframe(dataset.frame, dialog.selected_columns(), dialog.ascending())
+        except DataPrepError as exc:
+            QMessageBox.warning(self, "Sort Failed", str(exc))
+            return
+        self._create_data_prep_result(
+            title="Sort",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[dataset],
+            operation=(
+                f"Sort {dataset.name} by {', '.join(dialog.selected_columns())} "
+                f"({'ascending' if dialog.ascending() else 'descending'})"
+            ),
+            status_message=f"Sorted {dataset.name} into {len(result_frame)} rows",
+        )
+
+    def _run_missing_values(self) -> None:
+        """Create a cleaned copy of the current dataset after missing-value handling."""
+        dataset = self._current_data_prep_source("Missing Values")
+        if dataset is None:
+            return
+        dialog = MissingValuesDialog(
+            column_names=[str(column) for column in dataset.frame.columns],
+            default_output_name=f"{dataset.name}_cleaned",
+            parent=self,
+        )
+        if dialog.exec() != MissingValuesDialog.Accepted:
+            return
+        try:
+            result_frame = clean_missing_values(
+                dataset.frame,
+                columns=dialog.selected_columns(),
+                strategy=dialog.strategy(),
+                fill_value=dialog.fill_value(),
+            )
+        except DataPrepError as exc:
+            QMessageBox.warning(self, "Missing Values Failed", str(exc))
+            return
+        self._create_data_prep_result(
+            title="Missing Values",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[dataset],
+            operation=(
+                f"Missing values {dialog.strategy()} on {dataset.name}: "
+                + ", ".join(dialog.selected_columns())
+            ),
+            status_message=f"Cleaned missing values in {dataset.name}",
+        )
+
+    def _run_binning(self) -> None:
+        """Create binned averages and dispersion columns from the current dataset."""
+        dataset = self._current_data_prep_source("Bin / Average")
+        if dataset is None:
+            return
+        dialog = BinningDialog(
+            column_names=[str(column) for column in dataset.frame.columns],
+            default_output_name=f"{dataset.name}_binned",
+            parent=self,
+        )
+        if dialog.exec() != BinningDialog.Accepted:
+            return
+        try:
+            result_frame = bin_dataframe(
+                dataset.frame,
+                bin_column=dialog.bin_column(),
+                value_columns=dialog.value_columns(),
+                bin_count=dialog.bin_count(),
+            )
+        except DataPrepError as exc:
+            QMessageBox.warning(self, "Bin / Average Failed", str(exc))
+            return
+        self._create_data_prep_result(
+            title="Bin / Average",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[dataset],
+            operation=(
+                f"Bin {dataset.name} by {dialog.bin_column()} into {dialog.bin_count()} bins; "
+                f"values={', '.join(dialog.value_columns())}; outputs mean/std/sem/min/max"
+            ),
+            status_message=f"Binned {dataset.name} into {len(result_frame)} bin row(s)",
+        )
+
+    def _run_group_aggregate(self) -> None:
+        """Create grouped aggregate values from the current dataset."""
+        dataset = self._current_data_prep_source("Group / Aggregate")
+        if dataset is None:
+            return
+        dialog = GroupAggregateDialog(
+            column_names=[str(column) for column in dataset.frame.columns],
+            default_output_name=f"{dataset.name}_grouped",
+            parent=self,
+        )
+        if dialog.exec() != GroupAggregateDialog.Accepted:
+            return
+        try:
+            result_frame = group_aggregate_dataframe(
+                dataset.frame,
+                group_columns=dialog.group_columns(),
+                value_columns=dialog.value_columns(),
+                aggregations=dialog.aggregations(),
+            )
+        except DataPrepError as exc:
+            QMessageBox.warning(self, "Group / Aggregate Failed", str(exc))
+            return
+        self._create_data_prep_result(
+            title="Group / Aggregate",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[dataset],
+            operation=(
+                f"Group {dataset.name} by {', '.join(dialog.group_columns())}; "
+                f"values={', '.join(dialog.value_columns())}; "
+                f"aggregations={', '.join(dialog.aggregations())}"
+            ),
+            status_message=f"Grouped {dataset.name} into {len(result_frame)} row(s)",
+        )
+
+    def _run_merge_join(self) -> None:
+        """Create a merged dataset from two source datasets."""
+        dataset_columns = self._data_prep_dataset_columns()
+        if len(dataset_columns) < 2:
+            QMessageBox.information(self, "Merge / Join", "Load or create at least two datasets before merging.")
+            return
+        dialog = MergeJoinDialog(
+            dataset_columns=dataset_columns,
+            default_dataset_name=self._default_data_prep_dataset_name(dataset_columns),
+            parent=self,
+        )
+        if dialog.exec() != MergeJoinDialog.Accepted:
+            return
+        try:
+            left_dataset = self._workspace.get_dataset(dialog.left_dataset_name())
+            right_dataset = self._workspace.get_dataset(dialog.right_dataset_name())
+            result_frame = merge_join_dataframes(
+                left_dataset.frame,
+                right_dataset.frame,
+                left_key=dialog.left_key(),
+                right_key=dialog.right_key(),
+                how=dialog.join_mode(),
+            )
+        except (KeyError, DataPrepError) as exc:
+            QMessageBox.warning(self, "Merge / Join Failed", str(exc))
+            return
+        self._create_data_prep_result(
+            title="Merge / Join",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[left_dataset, right_dataset],
+            operation=(
+                f"Merge {left_dataset.name}.{dialog.left_key()} "
+                f"with {right_dataset.name}.{dialog.right_key()} ({dialog.join_mode()})"
+            ),
+            status_message=f"Merged {left_dataset.name} and {right_dataset.name} into {len(result_frame)} row(s)",
+        )
+
+    def _run_reshape(self) -> None:
+        """Create a reshaped copy of the current dataset."""
+        dataset = self._current_data_prep_source("Reshape")
+        if dataset is None:
+            return
+        dialog = ReshapeDialog(
+            column_names=[str(column) for column in dataset.frame.columns],
+            default_output_name=f"{dataset.name}_reshaped",
+            parent=self,
+        )
+        if dialog.exec() != ReshapeDialog.Accepted:
+            return
+        try:
+            result_frame = reshape_dataframe(
+                dataset.frame,
+                mode=dialog.mode(),
+                id_columns=dialog.id_columns(),
+                value_columns=dialog.value_columns(),
+            )
+        except DataPrepError as exc:
+            QMessageBox.warning(self, "Reshape Failed", str(exc))
+            return
+        self._create_data_prep_result(
+            title="Reshape",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[dataset],
+            operation=f"Reshape {dataset.name} using mode {dialog.mode()}",
+            status_message=f"Reshaped {dataset.name} into {len(result_frame)} row(s)",
+        )
+
+    def _create_data_prep_result(
+        self,
+        title: str,
+        output_name: str,
+        result_frame: pd.DataFrame,
+        source_datasets: list[Dataset],
+        operation: str,
+        status_message: str,
+    ) -> Dataset | None:
+        """Create a Data Prep result sheet, preserving metadata where possible."""
+        if result_frame.empty:
+            reply = QMessageBox.question(
+                self,
+                title,
+                "The operation produced an empty sheet. Create it anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return None
+
+        result_dataset = self._workspace.add_dataset(output_name, result_frame)
+        result_metadata: dict[str, ColumnMetadata] = {}
+        for source_dataset in source_datasets:
+            for column, metadata in source_dataset.column_metadata.items():
+                if column in result_dataset.frame.columns and column not in result_metadata:
+                    result_metadata[column] = metadata
+        result_dataset.set_column_metadata(result_metadata)
+        set_dataset_operation_comments(result_dataset, operation)
+        self._refresh_dataset_list(result_dataset.name)
+        self._tabs.setCurrentWidget(self._data_tab_widget)
+        self.statusBar().showMessage(status_message)
+        return result_dataset
+
+    def _current_data_prep_source(self, title: str) -> Dataset | None:
+        """Return the active source dataset for a Data Prep operation."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(self, title, "Select a dataset before running this Data Prep operation.")
+            return None
+        if dataset.frame.empty or len(dataset.frame.columns) == 0:
+            QMessageBox.information(self, title, "The selected dataset has no data columns.")
+            return None
+        return dataset
+
+    def _data_prep_dataset_columns(self) -> dict[str, list[str]]:
+        """Return dataset-to-column choices for Data Prep dialogs."""
+        return {
+            dataset.name: [str(column) for column in dataset.frame.columns]
+            for dataset in self._workspace.list_datasets()
+            if len(dataset.frame.columns) > 0
+        }
+
+    def _default_data_prep_dataset_name(self, dataset_columns: dict[str, list[str]]) -> str:
+        """Return the selected dataset name or the first available Data Prep dataset."""
+        current_dataset = self._current_dataset()
+        if current_dataset is not None and current_dataset.name in dataset_columns:
+            return current_dataset.name
+        return next(iter(dataset_columns))
+
     def _create_actions(self) -> None:
         """Create menus, toolbar actions, and long-lived action references."""
         file_menu = self.menuBar().addMenu("&File")
@@ -575,6 +942,29 @@ class MainWindow(QMainWindow):
 
         fill_range_action = data_menu.addAction("&Fill Range...")
         fill_range_action.triggered.connect(self._fill_dataset_range)
+
+        data_menu.addSeparator()
+
+        filter_query_action = data_menu.addAction("Filter / &Query...")
+        filter_query_action.triggered.connect(self._run_filter_query)
+
+        sort_action = data_menu.addAction("&Sort...")
+        sort_action.triggered.connect(self._run_sort)
+
+        missing_values_action = data_menu.addAction("&Missing Values...")
+        missing_values_action.triggered.connect(self._run_missing_values)
+
+        bin_action = data_menu.addAction("&Bin / Average...")
+        bin_action.triggered.connect(self._run_binning)
+
+        group_aggregate_action = data_menu.addAction("&Group / Aggregate...")
+        group_aggregate_action.triggered.connect(self._run_group_aggregate)
+
+        merge_join_action = data_menu.addAction("Merge / &Join...")
+        merge_join_action.triggered.connect(self._run_merge_join)
+
+        reshape_action = data_menu.addAction("Res&hape...")
+        reshape_action.triggered.connect(self._run_reshape)
 
         data_menu.addSeparator()
 
@@ -7491,6 +7881,8 @@ class MainWindow(QMainWindow):
         self._editor_export_button.setEnabled(has_dataset)
         self._editor_fill_range_button.setEnabled(has_dataset)
         self._editor_metadata_button.setEnabled(has_dataset)
+        for button in getattr(self, "_data_prep_buttons", []):
+            button.setEnabled(has_dataset)
         for button in getattr(self, "_analysis_buttons", []):
             button.setEnabled(has_dataset)
         self._undo_action.setEnabled(self._dataset_model.can_undo())
