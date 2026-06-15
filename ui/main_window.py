@@ -4827,6 +4827,7 @@ class MainWindow(QMainWindow):
         append_column = bool(multiple_columns and column_name and "{column}" not in clean_requested)
 
         def with_column(name: str) -> str:
+            """Apply column placeholder or suffix rules to one dataset name."""
             if "{column}" in name:
                 return name.replace("{column}", column_name)
             if append_column:

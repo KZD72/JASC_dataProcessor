@@ -18,6 +18,7 @@ This manual is structured to guide you from running the application for the firs
    - [Spreadsheet Cell Operations](#spreadsheet-cell-operations)
    - [Inserting & Deleting Rows and Columns](#inserting--deleting-rows-and-columns)
    - [Column Metadata (Roles, Units, Long Names)](#column-metadata-roles-units-long-names)
+   - [Data Preparation Tools](#data-preparation-tools)
 5. [Mathematical Formulas & Expressions](#5-mathematical-formulas--expressions)
    - [Using the Apply Formula Dialog](#using-the-apply-formula-dialog)
    - [Positional Aliases and Namespaces](#positional-aliases-and-namespaces)
@@ -41,7 +42,8 @@ This manual is structured to guide you from running the application for the firs
 10. [Batch Processing Workbench](#10-batch-processing-workbench)
     - [Running Batch Operations](#running-batch-operations)
     - [Execution Controls & Overwrite Safeguards](#execution-controls--overwrite-safeguards)
-11. [Troubleshooting & FAQs](#11-troubleshooting--faqs)
+11. [Project Files, Export, and Persistence](#11-project-files-export-and-persistence)
+12. [Troubleshooting & FAQs](#12-troubleshooting--faqs)
 
 ---
 
@@ -106,6 +108,9 @@ JASC uses a **Docked Workspace Layout** where all secondary control panels dock 
    * **Headers**: Detect headers automatically or specify start row.
 3. The dataset appears in the Workspace panel on the left with a unique name.
 
+### Project Files
+Use **File > Save Project...** to store the complete workspace as a `.jasc` project file. Project files preserve imported datasets, manually-created sheets, formulas, column metadata, custom fit models, and saved plot definitions. Use **File > Open Project...** to restore that workspace later.
+
 ### Manual Spreadsheet Entry
 1. Select **File > New Blank Sheet** (`Ctrl+N`), click the toolbar icon, or click **New Sheet** at the bottom of the Datasets list.
 2. Set the sheet size via the Data Inspector (**Sheet > Table Size**).
@@ -124,7 +129,16 @@ If you have a plot in an image (JPG/PNG) but need the underlying numbers, use JA
 1. Launch it via **File > Import From Figure...** or the main toolbar button.
 2. Load an image using **Load Image** on the top toolbar.
 
-#### A. Calibration
+#### A. Image Correction
+If the figure was photographed at an angle or scanned with perspective skew, correct the image before calibration:
+1. Open the **Correction** tab.
+2. Pick the four corners of the plotted frame or the axis-bar rectangle: top-left, top-right, bottom-right, and bottom-left.
+3. Review the green quadrilateral on the canvas and adjust the corrected image width/height if needed.
+4. Click **Apply Correction**. The canvas is replaced with a rectified working image.
+
+After correction, all calibration, manual picking, automatic tracing, and symbol detection run against the corrected image. Use **Reset Original** to return to the uncorrected image.
+
+#### B. Calibration
 Before digitization, calibrate the pixel-to-data mapping:
 1. Go to the **Calibration** tab.
 2. Click **Pick X1** and click on a known value on the image's X-axis. Enter its calibrated value.
@@ -132,19 +146,19 @@ Before digitization, calibrate the pixel-to-data mapping:
 4. Select whether the axis is **Linear** or **Logarithmic**.
 5. Use the **Precision Zoom** panel with the magnifier enabled to click exact pixel centers.
 
-#### B. Manual Point Picking
+#### C. Manual Point Picking
 * Select the **Manual** mode on the mode banner.
 * Click anywhere on the plot lines to manually place points.
 * To add error bars / uncertainties, click **Set Uncertainty** for a selected point, and click either a radial boundary or four coordinates representing error limits. Manual uncertainties are rendered as blue error bars.
 
-#### C. Automatic Tracing
+#### D. Automatic Tracing
 If the plot has solid lines, let JASC trace it:
 1. Set a painted region using the **ROI Brush** (translucent green mark) to restrict tracing.
 2. Select **Curves/Lines > Auto Trace**.
 3. Choose **Dark Pixels** or **Color Sample** (click a color in the image using the sampler).
 4. Click **Run Auto Trace** to extract pixel paths.
 
-#### D. Symbol and Marker Extraction
+#### E. Symbol and Marker Extraction
 For scatter plots:
 1. Go to **Symbols**.
 2. Click **Sample Symbol** and drag a bounding box around a symbol in the image.
@@ -175,10 +189,24 @@ Right-click on any cell or header in the Data Editor to access the spreadsheet c
 
 ### Column Metadata (Roles, Units, Long Names)
 Double-click a column header (e.g. `col_0`) to open the **Column Metadata** dialog.
-* **Name**: The programmatic column identifier used in formulas (must be alphanumeric/no spaces).
+* **Name**: The column identifier shown in the table and used in formulas.
 * **Role**: Select `x`, `y`, `z`, `x_error`, `y_error`, `group`, `label`, or `weight`.
+* **Type**: Leave as Auto, or mark the column as Numeric, Scientific, or Text. Numeric and Scientific columns reject non-numeric edits and are validated before math operations.
+* **Display Precision**: Control fixed-point or scientific display precision without changing the stored value.
 * **Long Name** & **Unit**: Used to automatically prefill Matplotlib plot titles and axis labels.
-* **Comments**: Document column origin or transformations.
+* **Comments**: Document column origin or transformations. JASC also writes operation provenance here for generated columns.
+
+### Data Preparation Tools
+The **Data** menu includes reusable tools for shaping datasets before analysis:
+* **Filter / Query**: Filter rows by equality, numeric comparisons, ranges, contains/starts-with text checks, comma-separated list membership, blank, or non-blank values.
+* **Sort**: Sort by one or more columns in ascending or descending order.
+* **Missing Values**: Drop rows with missing selected values, fill with a constant, fill with column mean/median, or interpolate numeric gaps.
+* **Bin / Average**: Split a numeric bin column into equal-width bins and calculate count, mean, standard deviation, SEM, minimum, and maximum for selected value columns.
+* **Group / Aggregate**: Group by one or more factor columns and compute count, mean, standard deviation, SEM, minimum, maximum, and sum for selected numeric columns.
+* **Merge / Join**: Join two datasets with inner, left, right, or outer join behavior using selected key columns.
+* **Reshape**: Transpose a dataset or melt selected value columns into a long/tidy table.
+
+Each preparation tool creates a new result sheet so the source data remains available.
 
 ---
 
@@ -200,6 +228,8 @@ Apply custom expressions directly in columns.
   * `special` (SciPy special functions)
   * `stats` (SciPy stats distributions)
   * `np.random.normal()` (NumPy random values)
+* **Row Helpers**: `row` is a one-based row-number series, and `index` exposes the DataFrame index as a series.
+* **Exact Name Helper**: Use `col("Column Name")` for headers containing spaces, punctuation, or Python keywords.
 
 > [!WARNING]
 > Standard Python power syntax is `**` (e.g. `col1 ** 2`). Do not use `^` as JASC blocks it to prevent common XOR bitwise operation bugs.
@@ -222,9 +252,12 @@ Select **Plot result immediately** to automatically view the calculus output.
 ### Interpolation Workbench
 Launch via **Analysis > Interpolation...** to predict values at arbitrary points:
 * **1D Interpolation**: Linear, nearest neighbor, cubic spline, PCHIP, Akima, or smoothing splines.
-* **2D Interpolation**: Grid-based or scattered data methods (linear, cubic, RBF).
-* **N-D Interpolation**: Radial Basis Functions (RBF) or nearest-neighbor queries.
-* **Query Coordinates**: Generate a query sequence automatically, select an existing column, or enter coordinates manually.
+* **2D Interpolation**: Nearest, linear scattered, bivariate cubic spline, Clough-Tocher piecewise cubic, smooth bivariate spline, and RBF kernels.
+* **N-D Interpolation**: Nearest, linear scattered, and RBF kernels for coordinate sets with two or more dimensions.
+* **RBF Kernels**: Linear, thin-plate spline, cubic, and Gaussian. Gaussian RBF can use an automatic or user-entered epsilon value.
+* **Query Coordinates**: Generate a query sequence automatically, select existing query columns, or enter coordinates manually. Generated 2D queries create a full X/Y grid.
+* **Outside Range Policy**: Return blanks outside the source range, extrapolate when the chosen method supports it, or clamp 1D predictions to the nearest source edge value.
+* **Multiple Value Columns**: Select more than one value column to create prediction columns for each signal in the result sheet.
 
 ---
 
@@ -233,19 +266,19 @@ Launch via **Analysis > Interpolation...** to predict values at arbitrary points
 Perform statistical evaluations directly inside the JASC environment. Access these under **Analysis > Statistics...**
 
 ### Single-Column Summaries & Diagnostics
-Returns basic descriptive parameters (Mean, Std Dev, Variance, SEM, Skewness, Kurtosis), percentiles, normality tests (Shapiro-Wilk, Anderson-Darling), and outlier checks (Z-score thresholds, IQR).
+Returns descriptive parameters (count, missing count, mean, median, standard deviation, variance, SEM, min/max, range, coefficient of variation), percentiles, distribution shape (skewness and kurtosis), normality tests (Shapiro-Wilk, D'Agostino-Pearson, Jarque-Bera, Anderson-Darling), confidence intervals for the mean, Z-score series, cumulative statistics, and outlier checks using Z-score and IQR fences.
 
 ### Two-Column & Paired Tests
 Evaluate relationships between columns:
 * **Correlations**: Pearson, Spearman, and Kendall coefficients.
-* **Comparison Tests**: Paired t-tests, independent-samples t-tests, and Mann-Whitney U tests.
-* **Agreement**: Bland-Altman statistics and linear regressions.
+* **Comparison Tests**: Paired t-tests, Wilcoxon signed-rank, Welch independent-samples t-test, Mann-Whitney U, Kolmogorov-Smirnov, Levene, and Bartlett tests.
+* **Agreement and Error**: Bland-Altman statistics, covariance, linear regression, MAE, RMSE, mean error, and R^2 against the primary column.
 
 ### Grouped & Factor Analysis
 If you have a factor or group column (e.g. categorical variables) and a value column:
 * Summarizes statistics per group.
 * Runs **One-way ANOVA** or **Kruskal-Wallis** tests.
-* Performs **Tukey HSD post-hoc comparisons** to isolate pairwise differences.
+* Performs **Tukey HSD post-hoc comparisons** and pairwise Mann-Whitney tests with Holm-Bonferroni adjusted p-values.
 
 ### Multi-Column PCA & Correlations
 Analyze multiple variables in a single operation:
@@ -290,10 +323,10 @@ JASC provides a curve fitting engine for analytical models. Open via **Analysis 
 
 ### Standard Curve Fitting
 1. Select the source Sheet, X, and Y columns.
-2. Select a category (e.g. Linear, Exponential, Trigonometric, Peak Functions) and a specific model (e.g. Gaussian, Heidler, Bessel, Lorentz).
+2. Select a model such as Linear, Quadratic, Cubic, Exponential growth/decay, Double exponential decay, Gaussian, Lorentzian, Pseudo-Voigt, Sine, Damped sine, Logistic, Gompertz, Error-function step, Power law, Log-normal, Weibull, Heidler, Bessel J/Y, Stretched exponential, or Asymmetric Gaussian.
 3. Set initial parameter guesses, lower and upper bounds, or check **Fixed** to hold a parameter constant.
-4. Select fit algorithms: *Levenberg-Marquardt*, *Trust Region Reflective*, or *Dogbox*.
-5. Click **Run Fit**. JASC displays a **Fit Report** (with fit parameters, standard errors, covariance, R², and residuals) and plots the fit curve over your raw data.
+4. Select fit algorithms: *Levenberg-Marquardt*, *Trust Region Reflective*, *Dogbox*, or *Orthogonal Distance Regression*.
+5. Click **Run Fit**. JASC displays a **Fit Report** with parameters, fixed/free state, bounds, standard errors, covariance, R^2, adjusted R^2, RMSE, MAE, residual mean/std, warnings, and optional confidence bands.
 
 ### Custom Mathematical Fit Models
 Create custom fitting equations via **Analysis > Custom Fit Models...**:
@@ -305,6 +338,8 @@ Create custom fitting equations via **Analysis > Custom Fit Models...**:
 ### Uncertainties & ODR (Orthogonal Distance Regression)
 * **Y Uncertainty**: Select a column representing Y measurement error to run weighted fitting.
 * **X/Y Uncertainty (ODR)**: If your independent variable X also has errors, select an X-error column. JASC automatically swaps the solver to **Orthogonal Distance Regression (ODR)** to calculate correct parameters accounting for errors in both dimensions.
+* **Weight Modes**: Interpret uncertainty columns as sigma/error values or as weights. Absolute sigma controls whether covariance is scaled by residual variance.
+* **Result Sheets**: Fits can create fitted-curve, residual, covariance, parameter-summary, and batch-summary datasets depending on the workflow.
 
 ---
 
@@ -317,7 +352,7 @@ Create custom fitting equations via **Analysis > Custom Fit Models...**:
 4. Select a **Plot Type**:
    * *2D Line & Scatter*: Line, Scatter, Line + Markers, Errorbar.
    * *Distribution & Reporting*: Box Plot, Violin Plot, Histogram, Bar (Vertical/Horizontal), Area/Fill.
-   * *Composition*: Pie, Donut.
+   * *Composition*: Pie, Donut, Voronoi Composition.
    * *2D Surface Maps*: Interpolated Heatmap, Contour, Filled Contour.
 5. Set styles: line color, line width, markers, fills, and alphas.
 
@@ -330,6 +365,7 @@ Create custom fitting equations via **Analysis > Custom Fit Models...**:
   * Select **SciencePlots journal templates** (e.g. `science`, `nature`, `ieee`).
   * Enable/disable LaTeX formatting.
   * Adjust output figure dimensions.
+* Use locators/cursors to record coordinates from the plotted figure. Locator values are shown in the plot inspector for quick reading.
 
 ### Saved Plot Definitions
 Once your plot looks correct, save its state so you can return to it later:
@@ -370,12 +406,32 @@ Every main operation dialog (Formula, Derivative, Integral, FFT, Interpolation, 
 
 ### Execution Controls & Overwrite Safeguards
 * **Overwrite Safeguards**: In batch formulas or calculus, JASC defaults to creating new unique output columns to prevent accidental data loss. You can explicitly confirm an overwrite update policy in the preflight check.
-* **Batch Summaries**: Multi-sheet calculations generate a cumulative summary sheet (e.g., `{active_sheet}_fit_batch_summary` or `{active_sheet}_statistics_batch_summary`). These summary sheets aggregate parameter fits, R², averages, test metrics, and execution logs in a tidy table format ready for plotting or exporting.
+* **Batch Summaries**: Multi-sheet calculations generate a cumulative summary sheet (e.g., `{active_sheet}_fit_batch_summary` or `{active_sheet}_statistics_batch_summary`). These summary sheets aggregate parameter fits, R^2, averages, test metrics, and execution logs in a tidy table format ready for plotting or exporting.
 * **Parallel Workers**: JASC utilizes process-based multiprocessing for headless batch sheets, running operations in parallel across CPU cores without locking the active GUI.
+* **Naming Tokens**: Use `{source}` and, where supported, `{column}` in output names to create predictable per-sheet or per-column result names.
+* **Column Binding**: Exact-name binding is safest when every sheet shares headers. Position binding is useful for repeated instrument exports where the first, second, and third columns have consistent meaning but different names.
 
 ---
 
-## 11. Troubleshooting & FAQs
+## 11. Project Files, Export, and Persistence
+
+### Saving and Loading Projects
+Project files use the `.jasc` extension. They are ZIP archives containing CSV data and JSON metadata. Saving a project preserves:
+* Datasets and source paths.
+* Column names, roles, units, long names, comments, value types, and display precision.
+* Column formulas and operation provenance comments.
+* Saved plot definitions.
+* Project custom fit models.
+
+### Exporting Data and Figures
+Use **File > Export Dataset...** or the Data Inspector export action to write the active dataset as CSV/TXT. Plot figures are exported from the Matplotlib toolbar in the Plot tab. Use the saved-plot system when you want to preserve plot configuration inside the project rather than only exporting a static image.
+
+### Large Datasets
+JASC profiles dataset size and memory use. For large tables, it limits expensive full-table visual operations such as automatic column resizing while keeping editing and analysis available.
+
+---
+
+## 12. Troubleshooting & FAQs
 
 #### "Python was not found" or app fails to start.
 Make sure you are executing python from the active conda environment:
@@ -393,3 +449,4 @@ JASC detects when a worksheet has more than 100,000 cells or 5MB memory footprin
 
 #### How do I export my results?
 To save a sheet as a CSV or TSV file, select the sheet, open the Data Inspector, and click **Export** (or select **File > Export Dataset...**). To export figures, click the save floppy disk icon on the Matplotlib toolbar in the Plot tab.
+
