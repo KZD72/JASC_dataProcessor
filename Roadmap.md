@@ -101,10 +101,10 @@ The benchmark products emphasize:
 | --- | --- | --- |
 | Data model | Multiple DataFrames with formulas and lightweight column metadata | No full workbook/sheet hierarchy, matrix sheets, notes/reports, project folders, cell comments, dataset-level metadata, rich formatting, or protected data |
 | Import/connectors | CSV/TXT with options, CSV/TXT export, and an initial raster figure digitizer with precision zoom, ROI brush, color-assisted tracing, connected-symbol centers, and sampled-template symbol matching | Missing Excel multi-sheet/ranges, JSON/XML/HTML, HDF5/NetCDF/MATLAB, binary/instrument formats, ODBC/SQL, drag/drop, re-import, periodic refresh, import themes, batch import, and advanced plot digitizer features such as stronger overlap splitting, editable point cleanup, homography/de-skew/perspective correction, OCR tick labels, and uncertainty capture |
-| Data preparation | Formula columns, row/column operations, clipboard, some statistics outputs | Missing sort/filter/query, data filters, pivot/group/aggregate, stack/unstack, join/merge, reshape, split text/flash fill, missing-value workflows, date/time parsing tools, duplicate handling, and data reduction |
+| Data preparation | Formula columns, row/column operations, clipboard, filter/query, sort, duplicate removal, missing-value cleanup, binning, group/aggregate, merge/join, and reshape result sheets | Missing richer multi-condition filters, previews, type conversion, pivot tables, append/split tools, date/time parsing, resampling, and data reduction |
 | Graphing breadth | Core 2D, distribution plots, early 2D maps, initial pie/donut/Voronoi composition charts, SciencePlots styles | Missing density families, grouped/categorical chart variants, polar/radar/ternary, waterfall, 3D scatter/surface/mesh/bars, specialized scientific diagrams, map overlays, images, and graph object editing |
 | Graph layout | Single canvas with saved plot queue and right Y axis | Missing page layout manager, multi-panel/multi-layer graph pages, linked axes, inset graphs, graph templates/themes, object manager, annotation tools, direct labels, graph galleries, and plot cloning |
-| Analysis | Calculus, FFT/iFFT, 1D/2D/N-D interpolation, statistics workbench | Missing smoothing workbench, filters, baseline correction, peak detection/integration, convolution/correlation, STFT, wavelets, 2D FFT, resampling workflows, ROI/gadget-style analysis, and analysis chains |
+| Analysis | Calculus, FFT/iFFT, advanced smoothing including derivative reconstruction, 1D/2D/N-D interpolation, statistics workbench | Missing broader filters, baseline correction, peak detection/integration, convolution/correlation, STFT, wavelets, 2D FFT, resampling workflows, ROI/gadget-style analysis, and analysis chains |
 | Statistics | Useful first-pass reports, multi-column correlations/covariance/PCA summaries, grouped one-way analyses, post-hoc comparisons, and companion plots | Missing two-way/repeated-measures ANOVA, ANCOVA/MANOVA families, broader nonparametric families, clustering, survival/reliability, SPC/control charts, DOE, power/sample-size, ROC, probability/distribution fitting, and guided statistical advisor workflows |
 | Fitting | Nonlinear fits, ODR, custom models, weights, residuals, confidence bands | Missing global fitting with shared/local parameters, dynamic initial-guess search, robust model ranking, arbitrary polynomial degree UI, prediction bands, peak deconvolution, surface fitting, implicit fitting UI, constraints by expression, and batch fitting |
 | Automation | Saved plots, saved projects, formula metadata, and column-role hints | Missing hardened batch application across compatible worksheets, operation history graph, automatic/manual recalculation locks, templates for analysis and graphing, repeat-last-operation, macro recorder, scripting console/API, plugins, and command log |
@@ -241,7 +241,7 @@ Acceptance criteria:
 Purpose: make the app useful before analysis begins.
 
 Tasks:
-- Add sort, filter, query, duplicate removal, missing-value fill/drop/interpolate, and type conversion tools. (implemented first pass: Data Inspector has a `Data Prep` tab and Data menu entries for Filter/Query, Sort, Missing Values, Bin/Average, Group/Aggregate, Merge/Join, and Reshape; all create metadata-preserving result sheets where possible)
+- Add sort, filter, query, duplicate removal, missing-value fill/drop/interpolate, and type conversion tools. (implemented first pass in the Data menu: Filter/Query, Sort, Remove Duplicates with match-column and keep-policy controls, Missing Values, Bin/Average, Group/Aggregate, Merge/Join, and Reshape; all create metadata-preserving result sheets where possible)
 - Add stack/unstack, transpose, split columns, merge/join, append rows, group-by aggregate, and pivot table outputs. (implemented first pass: stack/melt, transpose, merge/join, and group-by aggregate; pivot tables, append rows, split columns, and richer reshape controls remain)
 - Add text extraction/flash-fill-style helpers for mixed text/numeric columns.
 - Add date/time parsing, resampling, rolling-window summaries, and data reduction/downsampling.
@@ -250,11 +250,13 @@ Tasks:
 Acceptance criteria:
 - Each operation creates an undoable change or a new result dataset.
 - Operations record enough metadata to be repeated after parameter edits in Stage 9.
-- Near-term Data Prep continuation: add preview row counts/sample rows, multiple AND/OR conditions, output-mode choices, batch application, duplicate removal, type conversion, pivot tables, append rows, and split-column tools.
+- Near-term Data Prep continuation: add preview row counts/sample rows, multiple AND/OR conditions, output-mode choices, batch application, type conversion, pivot tables, append rows, and split-column tools.
 
 ### Competitive Stage 5: Graphing and Layout Parity
 
 Purpose: make plots feel like publishable scientific graph pages, not just traces.
+
+The Plot Inspector final-state audit and recommended single-canvas polish sequence are documented in `Plot_Inspector_Final_State.md`. Complete that state/interaction, legend/typography, axes/grid/figure, and existing-plot-type polish before coupling the inspector to multi-panel page layout work.
 
 Tasks:
 - Finish Phase 2A subphases 4-7.
@@ -274,7 +276,7 @@ Acceptance criteria:
 Purpose: move from isolated math tools to a broad scientific analysis suite.
 
 Tasks:
-- Add smoothing tools: Savitzky-Golay, adjacent average, moving median, LOESS/LOWESS, FFT smoothing, and preview.
+- Add smoothing tools: Savitzky-Golay, adjacent average, moving median, LOESS/LOWESS, FFT smoothing, and preview. (initial implementation complete, including batch worksheet/column application and derivative-smoothing-plus-integration reconstruction with optional endpoint preservation)
 - Add filtering tools: Butterworth, Chebyshev, elliptic, Bessel, FIR/IIR design, band-pass/stop/high/low, and frequency response preview.
 - Add baseline correction and subtraction methods for spectra and chromatograms.
 - Add peak detection, peak area/height/FWHM tables, integration regions, and multi-peak summaries.
@@ -357,7 +359,12 @@ Acceptance criteria:
 
 Purpose: make the app robust outside the development environment.
 
+The measured near-term performance findings and regression budgets are documented in `Large_Data_Performance_Audit.md`. Complete its local amplification fixes (single editor attachment/sizing pass, block-oriented clipboard paste, lazy clipboard parsing, and bounded/delta undo) before attributing current loading delays solely to the absence of a large-data backend.
+
 Tasks:
+- Remove redundant dataset editor refresh/column-sizing passes and replace automatic full-content sizing with bounded sampling plus an explicit user action. (single-pass attachment and bounded automatic sampling implemented; explicit manual fit action remains optional)
+- Replace row-at-a-time/scalar clipboard paste with one block-oriented grow/normalize/assign path, and avoid parsing clipboard contents merely to construct a context menu. (implemented, including whole-column paste and Fill Range bulk growth)
+- Introduce bounded, operation-specific undo storage before encouraging edits on larger in-memory worksheets. (bounded 20-entry/256 MiB snapshot first pass implemented; compact delta commands remain)
 - Add background workers with progress/cancel for imports, fitting, statistics, and large plots.
 - Add a large-data backend based first on DuckDB plus PyArrow/Parquet, keeping Pandas as the default editable backend for small and medium worksheets.
 - Add lazy loading or chunked import for large text/Excel/HDF5 files.

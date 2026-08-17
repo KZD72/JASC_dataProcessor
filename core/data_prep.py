@@ -57,6 +57,22 @@ def sort_dataframe(frame: pd.DataFrame, columns: list[str], ascending: bool = Tr
     return _reset_copy(frame.sort_values(by=clean_columns, ascending=ascending, kind="mergesort"))
 
 
+def remove_duplicate_rows(
+    frame: pd.DataFrame,
+    columns: list[str],
+    keep: str = "first",
+) -> pd.DataFrame:
+    """Return rows remaining after duplicate detection on selected columns."""
+    clean_columns = _existing_columns(frame, columns, "duplicate-match")
+    if not clean_columns:
+        raise DataPrepError("Choose at least one column for duplicate detection.")
+    if keep not in {"first", "last", "none"}:
+        raise DataPrepError(f"Unknown duplicate keep policy: {keep}")
+    pandas_keep: str | bool = False if keep == "none" else keep
+    duplicate_mask = frame.duplicated(subset=clean_columns, keep=pandas_keep)
+    return _reset_copy(frame.loc[~duplicate_mask])
+
+
 def clean_missing_values(
     frame: pd.DataFrame,
     columns: list[str],

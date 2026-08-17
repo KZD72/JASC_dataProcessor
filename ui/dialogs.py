@@ -7,6 +7,9 @@ import os
 from html import escape
 
 import numpy as np
+import pandas as pd
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
@@ -62,6 +65,12 @@ from math_engine.interpolation import (
     FILL_POLICIES,
     INTERPOLATION_METHODS,
     MAX_GENERATED_QUERY_POINTS,
+)
+from math_engine.smoothing import (
+    DERIVATIVE_SMOOTHING_METHODS,
+    SMOOTHING_METHODS,
+    SmoothingParameters,
+    smooth_values,
 )
 from math_engine.statistics import STATISTIC_OPERATIONS
 from models.fit_functions import (
@@ -311,6 +320,75 @@ class DataSortDialog(QDialog):
             return
         if not self.output_name():
             QMessageBox.warning(self, "Sort", "Enter an output sheet name.")
+            return
+        super().accept()
+
+
+class RemoveDuplicatesDialog(QDialog):
+    """Choose duplicate-key columns and which matching row to retain."""
+
+    def __init__(
+        self,
+        column_names: list[str],
+        default_output_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build duplicate-removal controls with all columns selected by default."""
+        super().__init__(parent)
+        self.setWindowTitle("Remove Duplicates")
+        self.setModal(True)
+        self.setMinimumWidth(430)
+
+        self._columns_list = QListWidget()
+        self._columns_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._columns_list.addItems(column_names)
+        for row in range(self._columns_list.count()):
+            self._columns_list.item(row).setSelected(True)
+
+        self._keep_combo = QComboBox()
+        self._keep_combo.addItem("Keep first occurrence", "first")
+        self._keep_combo.addItem("Keep last occurrence", "last")
+        self._keep_combo.addItem("Remove every row in a duplicate group", "none")
+        self._output_name_edit = QLineEdit(default_output_name)
+
+        hint = QLabel(
+            "Rows are duplicates when all selected columns match. Blank/NaN values in the "
+            "same selected columns are treated as matching values."
+        )
+        hint.setWordWrap(True)
+
+        form = QFormLayout()
+        form.addRow("Match columns", self._columns_list)
+        form.addRow("Duplicate policy", self._keep_combo)
+        form.addRow("Output sheet", self._output_name_edit)
+        form.addRow("", hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def columns(self) -> list[str]:
+        """Return columns used to determine duplicate groups."""
+        return selected_list_items(self._columns_list)
+
+    def keep_policy(self) -> str:
+        """Return first, last, or none."""
+        return str(self._keep_combo.currentData() or "first")
+
+    def output_name(self) -> str:
+        """Return the requested result-sheet name."""
+        return self._output_name_edit.text().strip()
+
+    def accept(self) -> None:
+        """Require columns and an output name."""
+        if not self.columns():
+            QMessageBox.warning(self, "Remove Duplicates", "Choose at least one match column.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Remove Duplicates", "Enter an output sheet name.")
             return
         super().accept()
 
@@ -4438,6 +4516,300 @@ class ColumnMathDialog(QDialog):
         index = combo.findText(value)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+
+class SmoothingDialog(QDialog):
+    """Collect smoothing, preview, output, and worksheet-batch settings."""
+
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        column_names: list[str],
+        default_x_column: str | None,
+        default_y_column: str | None,
+        dataset_names: list[str],
+        current_dataset_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build a smoothing workbench with a live source/result preview."""
+        super().__init__(parent)
+        self.setWindowTitle("Smoothing")
+        self.setModal(True)
+        self.resize(940, 650)
+        self._preview_frame = frame
+
+        self._x_column_combo = QComboBox()
+        self._x_column_combo.addItems(column_names)
+        self._set_combo_text(self._x_column_combo, default_x_column)
+
+        self._y_column_list = QListWidget()
+        self._y_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._y_column_list.setMaximumHeight(110)
+        self._y_column_list.addItems(column_names)
+        if default_y_column:
+            select_list_items(self._y_column_list, [default_y_column])
+        elif len(column_names) > 1:
+            self._y_column_list.item(1).setSelected(True)
+
+        self._method_combo = QComboBox()
+        for key, label in SMOOTHING_METHODS.items():
+            self._method_combo.addItem(label, key)
+
+        self._derivative_method_combo = QComboBox()
+        for key, label in DERIVATIVE_SMOOTHING_METHODS.items():
+            self._derivative_method_combo.addItem(label, key)
+        self._derivative_method_combo.setCurrentIndex(
+            self._derivative_method_combo.findData("savgol")
+        )
+
+        self._window_spin = QSpinBox()
+        self._window_spin.setRange(2, 100_001)
+        self._window_spin.setValue(11)
+        self._polynomial_spin = QSpinBox()
+        self._polynomial_spin.setRange(0, 20)
+        self._polynomial_spin.setValue(3)
+
+        self._lowess_fraction_spin = QDoubleSpinBox()
+        self._lowess_fraction_spin.setRange(0.001, 1.0)
+        self._lowess_fraction_spin.setDecimals(3)
+        self._lowess_fraction_spin.setSingleStep(0.025)
+        self._lowess_fraction_spin.setValue(0.15)
+        self._lowess_iterations_spin = QSpinBox()
+        self._lowess_iterations_spin.setRange(0, 10)
+        self._lowess_iterations_spin.setValue(2)
+
+        self._fft_cutoff_spin = QDoubleSpinBox()
+        self._fft_cutoff_spin.setRange(0.1, 100.0)
+        self._fft_cutoff_spin.setDecimals(1)
+        self._fft_cutoff_spin.setValue(10.0)
+        self._fft_cutoff_spin.setSuffix(" % of Nyquist")
+
+        self._derivative_median_spin = QSpinBox()
+        self._derivative_median_spin.setRange(1, 100_001)
+        self._derivative_median_spin.setSingleStep(2)
+        self._derivative_median_spin.setValue(1)
+        self._preserve_endpoints_checkbox = QCheckBox("Preserve first and last data values")
+        self._preserve_endpoints_checkbox.setChecked(True)
+        derivative_help = QLabel(
+            "Derivative reconstruction calculates dy/dx, optionally rejects slope spikes with a "
+            "moving median, smooths the derivative, and integrates it from the original first value."
+        )
+        derivative_help.setWordWrap(True)
+
+        self._target_edit = QLineEdit("{column}_smoothed")
+        self._target_conflict_combo = QComboBox()
+        self._target_conflict_combo.addItem("Create unique new column if target exists", "unique")
+        self._target_conflict_combo.addItem("Stop and warn if target exists", "stop")
+        self._target_conflict_combo.addItem("Overwrite/update existing column", "overwrite")
+        self._column_binding_combo = batch_column_binding_combo()
+        self._plot_result_checkbox = QCheckBox("Plot original and smoothed data immediately")
+        self._plot_result_checkbox.setChecked(True)
+
+        self._dataset_list = QListWidget()
+        self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._dataset_list.setMinimumHeight(90)
+        for dataset_name in dataset_names:
+            self._dataset_list.addItem(dataset_name)
+            item = self._dataset_list.item(self._dataset_list.count() - 1)
+            item.setSelected(dataset_name == current_dataset_name)
+
+        controls = QWidget()
+        form = QFormLayout(controls)
+        form.addRow("X column", self._x_column_combo)
+        form.addRow("Y columns", self._y_column_list)
+        form.addRow("Column matching", self._column_binding_combo)
+        form.addRow("Method", self._method_combo)
+        form.addRow("Derivative smoother", self._derivative_method_combo)
+        form.addRow("Window points", self._window_spin)
+        form.addRow("Polynomial order", self._polynomial_spin)
+        form.addRow("LOWESS fraction", self._lowess_fraction_spin)
+        form.addRow("Robust iterations", self._lowess_iterations_spin)
+        form.addRow("FFT cutoff", self._fft_cutoff_spin)
+        form.addRow("Slope-spike prefilter", self._derivative_median_spin)
+        form.addRow("", self._preserve_endpoints_checkbox)
+        form.addRow("", derivative_help)
+        form.addRow("Target column", self._target_edit)
+        form.addRow("If target exists", self._target_conflict_combo)
+        form.addRow("Apply to sheets", self._dataset_list)
+        form.addRow("", self._plot_result_checkbox)
+
+        self._preview_figure = Figure(figsize=(6.0, 4.0), constrained_layout=True)
+        self._preview_canvas = FigureCanvasQTAgg(self._preview_figure)
+        self._preview_axes = self._preview_figure.add_subplot(111)
+        self._preview_status = QLabel()
+        self._preview_status.setWordWrap(True)
+        preview_panel = QWidget()
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_layout.addWidget(self._preview_canvas, 1)
+        preview_layout.addWidget(self._preview_status)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(controls)
+        splitter.addWidget(preview_panel)
+        splitter.setSizes([380, 560])
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(splitter, 1)
+        layout.addWidget(buttons)
+
+        self._method_combo.currentIndexChanged.connect(self._update_method_controls)
+        self._derivative_method_combo.currentIndexChanged.connect(self._update_method_controls)
+        self._x_column_combo.currentIndexChanged.connect(self._refresh_preview)
+        self._y_column_list.itemSelectionChanged.connect(self._refresh_preview)
+        for spin in (
+            self._window_spin,
+            self._polynomial_spin,
+            self._lowess_fraction_spin,
+            self._lowess_iterations_spin,
+            self._fft_cutoff_spin,
+            self._derivative_median_spin,
+        ):
+            spin.valueChanged.connect(self._refresh_preview)
+        self._preserve_endpoints_checkbox.toggled.connect(self._refresh_preview)
+        self._update_method_controls()
+
+    def x_column(self) -> str:
+        """Return the selected coordinate column."""
+        return self._x_column_combo.currentText()
+
+    def y_columns(self) -> list[str]:
+        """Return the selected signal columns."""
+        return selected_list_items(self._y_column_list)
+
+    def method(self) -> str:
+        """Return the selected smoothing method key."""
+        return str(self._method_combo.currentData() or "adjacent_average")
+
+    def parameters(self) -> SmoothingParameters:
+        """Return the currently configured engine parameters."""
+        return SmoothingParameters(
+            window_length=self._window_spin.value(),
+            polynomial_order=self._polynomial_spin.value(),
+            lowess_fraction=self._lowess_fraction_spin.value(),
+            lowess_iterations=self._lowess_iterations_spin.value(),
+            fft_cutoff_fraction=self._fft_cutoff_spin.value() / 100.0,
+            derivative_smoothing_method=str(
+                self._derivative_method_combo.currentData() or "savgol"
+            ),
+            derivative_median_window=self._derivative_median_spin.value(),
+            preserve_endpoints=self._preserve_endpoints_checkbox.isChecked(),
+        )
+
+    def target_column(self) -> str:
+        """Return the output column template."""
+        return self._target_edit.text().strip()
+
+    def target_conflict_policy(self) -> str:
+        """Return the requested existing-output policy."""
+        return str(self._target_conflict_combo.currentData() or "unique")
+
+    def column_binding_mode(self) -> str:
+        """Return name or position input matching."""
+        return str(self._column_binding_combo.currentData() or BATCH_COLUMN_BINDING_NAME)
+
+    def target_dataset_names(self) -> list[str]:
+        """Return selected worksheet names."""
+        return [item.text() for item in self._dataset_list.selectedItems()]
+
+    def plot_result_immediately(self) -> bool:
+        """Return whether a comparison plot should be created."""
+        return self._plot_result_checkbox.isChecked()
+
+    def _update_method_controls(self) -> None:
+        """Show which parameters affect the selected method and refresh preview."""
+        method = self.method()
+        derivative_mode = method == "derivative_integral"
+        effective_method = (
+            str(self._derivative_method_combo.currentData() or "savgol")
+            if derivative_mode
+            else method
+        )
+        self._derivative_method_combo.setEnabled(derivative_mode)
+        self._window_spin.setEnabled(effective_method in {
+            "adjacent_average", "moving_median", "savgol"
+        })
+        self._polynomial_spin.setEnabled(effective_method == "savgol")
+        self._lowess_fraction_spin.setEnabled(effective_method == "lowess")
+        self._lowess_iterations_spin.setEnabled(effective_method == "lowess")
+        self._fft_cutoff_spin.setEnabled(effective_method == "fft")
+        self._derivative_median_spin.setEnabled(method == "derivative_integral")
+        self._preserve_endpoints_checkbox.setEnabled(method == "derivative_integral")
+        self._refresh_preview()
+
+    def _refresh_preview(self) -> None:
+        """Render the first selected signal and its current smoothing result."""
+        self._preview_axes.clear()
+        columns = self.y_columns()
+        if not self.x_column() or not columns:
+            self._preview_status.setText("Choose X and at least one Y column to preview smoothing.")
+            self._preview_canvas.draw_idle()
+            return
+        try:
+            values = pd.DataFrame({
+                "x": pd.to_numeric(self._preview_frame[self.x_column()], errors="coerce"),
+                "y": pd.to_numeric(self._preview_frame[columns[0]], errors="coerce"),
+            }).replace([np.inf, -np.inf], np.nan).dropna()
+            if len(values) > 4000:
+                stride = int(math.ceil(len(values) / 4000))
+                values = values.iloc[::stride]
+                preview_note = " Preview uses up to 4,000 evenly sampled points."
+            else:
+                preview_note = ""
+            smoothed = smooth_values(
+                values["x"].to_numpy(dtype=float),
+                values["y"].to_numpy(dtype=float),
+                method=self.method(),
+                parameters=self.parameters(),
+            )
+            self._preview_axes.plot(values["x"], values["y"], color="0.6", linewidth=1.0, label="Original")
+            self._preview_axes.plot(values["x"], smoothed, color="tab:red", linewidth=1.8, label="Smoothed")
+            self._preview_axes.legend(loc="best")
+            self._preview_axes.grid(True, alpha=0.25)
+            self._preview_status.setText(
+                f"Previewing {SMOOTHING_METHODS.get(self.method(), self.method())} on {columns[0]}."
+                f"{preview_note}"
+            )
+        except Exception as exc:
+            self._preview_status.setText(str(exc))
+        self._preview_canvas.draw_idle()
+
+    def accept(self) -> None:
+        """Validate required selections and odd-window constraints."""
+        if not self.x_column() or not self.y_columns():
+            QMessageBox.warning(self, "Smoothing", "Choose X and at least one Y column.")
+            return
+        if not self.target_column():
+            QMessageBox.warning(self, "Smoothing", "Enter a target column name or template.")
+            return
+        if not self.target_dataset_names():
+            QMessageBox.warning(self, "Smoothing", "Choose at least one target sheet.")
+            return
+        effective_method = (
+            str(self._derivative_method_combo.currentData() or "savgol")
+            if self.method() == "derivative_integral"
+            else self.method()
+        )
+        if effective_method in {"moving_median", "savgol"} and self._window_spin.value() % 2 == 0:
+            QMessageBox.warning(self, "Smoothing", "This method requires an odd smoothing window.")
+            return
+        if effective_method == "savgol" and self._polynomial_spin.value() >= self._window_spin.value():
+            QMessageBox.warning(self, "Smoothing", "Polynomial order must be smaller than the smoothing window.")
+            return
+        if self.method() == "derivative_integral" and self._derivative_median_spin.value() % 2 == 0:
+            QMessageBox.warning(self, "Smoothing", "The derivative median window must be 1 or an odd number.")
+            return
+        super().accept()
+
+    @staticmethod
+    def _set_combo_text(combo: QComboBox, value: str | None) -> None:
+        """Select a combo item by text when present."""
+        if value:
+            index = combo.findText(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
 
 
 class FFTDialog(QDialog):

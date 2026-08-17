@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -52,13 +53,16 @@ from core.batch_processing import (
     run_formula_batch_parallel,
 )
 from core.data_backends import (
+    AUTO_RESIZE_ROW_SAMPLE,
     DEFAULT_LARGE_DATASET_COLUMN_WIDTH,
+    LARGE_AUTO_RESIZE_ROW_SAMPLE,
     PANDAS_BACKEND,
     format_bytes,
     file_size_bytes,
     profile_dataframe,
     should_warn_for_large_file,
 )
+from core.clipboard_io import parse_tabular_clipboard
 from core.data_prep import FILTER_OPERATORS, DataPrepError, FilterCondition, apply_filter_condition
 from core.data_prep import (
     bin_dataframe,
@@ -66,6 +70,7 @@ from core.data_prep import (
     group_aggregate_dataframe,
     merge_join_dataframes,
     reshape_dataframe,
+    remove_duplicate_rows,
     sort_dataframe,
 )
 from core.file_io import export_tabular_file, read_tabular_file
@@ -103,6 +108,12 @@ from math_engine.statistics import (
     run_multicolumn_statistical_analysis,
     run_statistical_analysis,
 )
+from math_engine.smoothing import (
+    SMOOTHING_METHODS,
+    SmoothingParameters,
+    smooth_column,
+    smoothing_operation_text,
+)
 from ui.data_table import RangeFillDialog
 from ui.dataframe_model import DataFrameTableModel
 from ui.dialogs import (
@@ -126,8 +137,10 @@ from ui.dialogs import (
     MergeJoinDialog,
     MissingValuesDialog,
     ReshapeDialog,
+    RemoveDuplicatesDialog,
     DataSortDialog,
     StatisticsDialog,
+    SmoothingDialog,
 )
 from ui.plot_canvas import PlotSeries
 from ui.plot_tab import PlotTab
@@ -146,6 +159,9 @@ class MainWindow(QMainWindow):
         self._project_path: Path | None = None
         self._large_dataset_warning_names: set[str] = set()
         self._applying_visual_style = False
+        self._active_plot_name: str | None = None
+        self._active_plot_baseline: str | None = None
+        self._plot_inspector_enabled = True
 
         self.setWindowTitle("JASC Data Processor")
         icon_path = Path(__file__).parent.parent / "resources" / "logo.png"
@@ -160,12 +176,13 @@ class MainWindow(QMainWindow):
 
         self._plot_list = QListWidget()
         self._plot_list.itemDoubleClicked.connect(lambda _item: self._load_selected_plot())
-        self._plot_list.currentTextChanged.connect(self._handle_saved_plot_selection)
+        self._plot_list.currentItemChanged.connect(self._handle_saved_plot_selection)
         self._plot_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self._plot_list.customContextMenuRequested.connect(self._show_plot_context_menu)
 
         self._dataset_model = DataFrameTableModel(self)
         self._dataset_model.history_changed.connect(self._handle_dataset_history_changed)
+        self._dataset_model.history_warning.connect(self.statusBar().showMessage)
         self._dataset_model.columns_renamed.connect(self._handle_dataset_columns_renamed)
         self._dataset_model.edit_rejected.connect(self._handle_dataset_edit_rejected)
         self._dataset_table = QTableView()
@@ -174,6 +191,9 @@ class MainWindow(QMainWindow):
         self._dataset_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._dataset_table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self._dataset_table.setSortingEnabled(False)
+        self._dataset_table.horizontalHeader().setResizeContentsPrecision(
+            AUTO_RESIZE_ROW_SAMPLE
+        )
         self._dataset_table.doubleClicked.connect(self._edit_dataset_cell)
         self._install_dataset_clipboard_shortcuts()
         self._install_dataset_context_menu()
@@ -189,6 +209,8 @@ class MainWindow(QMainWindow):
         self._plot_tab_widget.status_message.connect(self.statusBar().showMessage)
         self._plot_tab_widget.plot_rendered.connect(self._update_plot_action_state)
         self._plot_tab_widget.save_plot_requested.connect(self._save_current_plot)
+        self._plot_tab_widget.new_plot_requested.connect(self._start_new_plot)
+        self._plot_tab_widget.plot_draft_replaced.connect(self._mark_plot_as_unsaved)
         self._plot_tab_widget.load_plot_requested.connect(self._load_selected_plot)
         self._plot_tab_widget.remove_plot_requested.connect(self._delete_selected_plot)
         self._plot_tab_widget.options_visibility_changed.connect(self._handle_plot_options_visibility_changed)
@@ -198,6 +220,7 @@ class MainWindow(QMainWindow):
         self._build_workspace_dock()
         self._build_inspector_dock()
         self._create_actions()
+        self._refresh_plot_list()
         self._apply_visual_style()
         self._sync_inspector_to_current_tab()
         self._update_dataset_summary()
@@ -299,7 +322,6 @@ class MainWindow(QMainWindow):
         self._editor_metadata_button.clicked.connect(self._edit_column_metadata)
 
         layout = QVBoxLayout(panel)
-        layout.addWidget(self._dataset_summary)
         layout.addLayout(self._button_row(self._editor_add_row_button, self._editor_insert_row_button))
         layout.addLayout(self._button_row(self._editor_delete_rows_button, self._editor_delete_columns_button))
         layout.addLayout(self._button_row(self._editor_add_column_button, self._editor_insert_column_button))
@@ -318,6 +340,8 @@ class MainWindow(QMainWindow):
         sort_button.clicked.connect(self._run_sort)
         missing_button = QPushButton("Missing Values")
         missing_button.clicked.connect(self._run_missing_values)
+        duplicates_button = QPushButton("Remove Duplicates")
+        duplicates_button.clicked.connect(self._run_remove_duplicates)
         bin_button = QPushButton("Bin / Average")
         bin_button.clicked.connect(self._run_binning)
         group_button = QPushButton("Group / Aggregate")
@@ -331,6 +355,7 @@ class MainWindow(QMainWindow):
             filter_button,
             sort_button,
             missing_button,
+            duplicates_button,
             bin_button,
             group_button,
             join_button,
@@ -341,6 +366,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Clean and Shape"))
         layout.addWidget(filter_button)
         layout.addLayout(self._button_row(sort_button, missing_button))
+        layout.addWidget(duplicates_button)
         layout.addWidget(bin_button)
         layout.addWidget(QLabel("Combine and Summarize"))
         layout.addWidget(group_button)
@@ -435,6 +461,7 @@ class MainWindow(QMainWindow):
         editor = QWidget()
 
         layout = QVBoxLayout(editor)
+        layout.addWidget(self._dataset_summary)
         layout.addWidget(self._dataset_table)
         return editor
 
@@ -598,6 +625,43 @@ class MainWindow(QMainWindow):
                 f"({'ascending' if dialog.ascending() else 'descending'})"
             ),
             status_message=f"Sorted {dataset.name} into {len(result_frame)} rows",
+        )
+
+    def _run_remove_duplicates(self) -> None:
+        """Create a copy with duplicate rows removed using selected key columns."""
+        dataset = self._current_data_prep_source("Remove Duplicates")
+        if dataset is None:
+            return
+        dialog = RemoveDuplicatesDialog(
+            column_names=[str(column) for column in dataset.frame.columns],
+            default_output_name=f"{dataset.name}_unique",
+            parent=self,
+        )
+        if dialog.exec() != RemoveDuplicatesDialog.Accepted:
+            return
+        try:
+            result_frame = remove_duplicate_rows(
+                dataset.frame,
+                columns=dialog.columns(),
+                keep=dialog.keep_policy(),
+            )
+        except DataPrepError as exc:
+            QMessageBox.warning(self, "Remove Duplicates Failed", str(exc))
+            return
+        removed_count = len(dataset.frame) - len(result_frame)
+        self._create_data_prep_result(
+            title="Remove Duplicates",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[dataset],
+            operation=(
+                f"Remove duplicates from {dataset.name}; keys={', '.join(dialog.columns())}; "
+                f"keep={dialog.keep_policy()}"
+            ),
+            status_message=(
+                f"Removed {removed_count} duplicate row(s) from {dataset.name}; "
+                f"{len(result_frame)} row(s) remain"
+            ),
         )
 
     def _run_missing_values(self) -> None:
@@ -907,7 +971,7 @@ class MainWindow(QMainWindow):
         show_plots_action.setChecked(True)
         show_plots_action.toggled.connect(self._set_plots_section_visible)
 
-        show_plot_options_action = view_menu.addAction("Show &Inspector")
+        show_plot_options_action = view_menu.addAction("Show Plot &Inspector")
         show_plot_options_action.setCheckable(True)
         show_plot_options_action.setChecked(True)
         show_plot_options_action.toggled.connect(self._set_plot_options_visible_from_action)
@@ -951,6 +1015,9 @@ class MainWindow(QMainWindow):
         sort_action = data_menu.addAction("&Sort...")
         sort_action.triggered.connect(self._run_sort)
 
+        remove_duplicates_action = data_menu.addAction("Remove &Duplicates...")
+        remove_duplicates_action.triggered.connect(self._run_remove_duplicates)
+
         missing_values_action = data_menu.addAction("&Missing Values...")
         missing_values_action.triggered.connect(self._run_missing_values)
 
@@ -982,6 +1049,9 @@ class MainWindow(QMainWindow):
         integral_action = analysis_menu.addAction("&Integral...")
         integral_action.triggered.connect(self._run_integral)
 
+        smoothing_action = analysis_menu.addAction("&Smoothing...")
+        smoothing_action.triggered.connect(self._run_smoothing)
+
         interpolation_action = analysis_menu.addAction("Inter&polation...")
         interpolation_action.triggered.connect(self._run_interpolation)
 
@@ -1002,6 +1072,10 @@ class MainWindow(QMainWindow):
         fit_action.triggered.connect(self._run_curve_fit)
 
         plot_menu = self.menuBar().addMenu("&Plot")
+        new_plot_action = plot_menu.addAction("&New Empty Plot")
+        new_plot_action.setShortcut("Ctrl+Alt+N")
+        new_plot_action.triggered.connect(self._start_new_plot)
+
         save_plot_action = plot_menu.addAction("&Save Current Plot...")
         save_plot_action.setShortcut("Ctrl+Alt+S")
         save_plot_action.triggered.connect(self._save_current_plot)
@@ -1043,6 +1117,7 @@ class MainWindow(QMainWindow):
         self._insert_column_action = insert_column_action
         self._fill_range_action = fill_range_action
         self._column_metadata_action = column_metadata_action
+        self._remove_duplicates_action = remove_duplicates_action
         self._apply_formula_action = apply_formula_action
         self._import_figure_action = import_figure_action
         self._derivative_action = derivative_action
@@ -1066,7 +1141,9 @@ class MainWindow(QMainWindow):
         self._workspace_dock.visibilityChanged.connect(
             lambda visible: self._sync_checkable_action(self._show_sidebar_action, visible)
         )
-        self._inspector_dock.visibilityChanged.connect(self._sync_plot_options_action)
+        self._inspector_dock.visibilityChanged.connect(
+            self._handle_inspector_dock_visibility_changed
+        )
         self._update_dataset_summary()
 
     def _apply_visual_style(self) -> None:
@@ -1499,24 +1576,27 @@ class MainWindow(QMainWindow):
         return reply == QMessageBox.Yes
 
     def _resize_dataset_columns_to_contents(self, dataset: Dataset | None = None) -> None:
-        """Resize table columns, skipping expensive full auto-sizing for large sheets."""
+        """Resize columns from a bounded row sample instead of scanning full sheets."""
         target_dataset = dataset or self._dataset_model.dataset
         if target_dataset is None:
             return
 
         profile = profile_dataframe(target_dataset.frame, target_dataset.name)
+        header = self._dataset_table.horizontalHeader()
+        sample_rows = (
+            LARGE_AUTO_RESIZE_ROW_SAMPLE
+            if profile.should_skip_full_auto_resize
+            else AUTO_RESIZE_ROW_SAMPLE
+        )
+        header.setResizeContentsPrecision(sample_rows)
+        header.setDefaultSectionSize(DEFAULT_LARGE_DATASET_COLUMN_WIDTH)
+        self._dataset_table.resizeColumnsToContents()
         if profile.should_skip_full_auto_resize:
-            self._dataset_table.horizontalHeader().setDefaultSectionSize(
-                DEFAULT_LARGE_DATASET_COLUMN_WIDTH
-            )
             if target_dataset.name not in self._large_dataset_warning_names:
                 self._large_dataset_warning_names.add(target_dataset.name)
                 self.statusBar().showMessage(
-                    f"{target_dataset.name} is large; skipped full column auto-sizing for responsiveness"
+                    f"{target_dataset.name} is large; column widths used a {sample_rows}-row sample"
                 )
-            return
-
-        self._dataset_table.resizeColumnsToContents()
 
     def _warn_about_large_workspace_datasets(self, source_label: str) -> None:
         """Show a post-load notice when a project contains large sheets."""
@@ -1576,7 +1656,12 @@ class MainWindow(QMainWindow):
             ):
                 self.statusBar().showMessage("Import cancelled")
                 return
-            dataset = self._workspace.add_dataset(path.stem, frame, source_path=path)
+            dataset = self._workspace.add_dataset(
+                path.stem,
+                frame,
+                source_path=path,
+                copy_frame=False,
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Import Failed", str(exc))
             self.statusBar().showMessage("Import failed")
@@ -1646,6 +1731,7 @@ class MainWindow(QMainWindow):
                 dialog.dataset_name(),
                 frame,
                 source_path=dialog.source_path() or None,
+                copy_frame=False,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Import From Figure Failed", str(exc))
@@ -2936,6 +3022,308 @@ class MainWindow(QMainWindow):
             methods=INTEGRATION_METHODS,
             initial_value=initial_value or 0.0,
         )
+
+    def _run_smoothing(self) -> None:
+        """Run the smoothing workbench for one or more worksheet signals."""
+        current_dataset = self._current_dataset()
+        if current_dataset is None:
+            QMessageBox.information(self, "Smoothing", "Select a dataset before smoothing data.")
+            return
+
+        dialog = SmoothingDialog(
+            frame=current_dataset.frame,
+            column_names=[str(column) for column in current_dataset.frame.columns],
+            default_x_column=self._preferred_dataset_column(current_dataset, ("x",), fallback_index=0),
+            default_y_column=self._preferred_dataset_column(current_dataset, ("y",), fallback_index=1),
+            dataset_names=[
+                candidate.name
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            ],
+            current_dataset_name=current_dataset.name,
+            parent=self,
+        )
+        if dialog.exec() != SmoothingDialog.Accepted:
+            return
+        self._run_smoothing_batch(current_dataset, dialog)
+
+    def _run_smoothing_batch(self, current_dataset: Dataset, dialog: SmoothingDialog) -> None:
+        """Validate and apply smoothing jobs using existing batch conventions."""
+        requested_x = dialog.x_column()
+        requested_y_columns = dialog.y_columns()
+        binding_mode = dialog.column_binding_mode()
+        multiple_y = len(requested_y_columns) > 1
+        requests: list[dict[str, object]] = []
+        results: list[dict[str, object]] = []
+
+        for dataset_name in dialog.target_dataset_names():
+            try:
+                dataset = self._workspace.get_dataset(dataset_name)
+                resolved_x = self._resolve_batch_column(
+                    current_dataset, dataset, requested_x, binding_mode, "X"
+                )
+                if resolved_x is None:
+                    raise MathOperationError("Choose an X column.")
+            except Exception as exc:
+                for requested_y in requested_y_columns:
+                    results.append({
+                        "source_sheet": dataset_name,
+                        "requested_x_column": requested_x,
+                        "requested_y_column": requested_y,
+                        "x_column": "",
+                        "y_column": "",
+                        "method": dialog.method(),
+                        "method_label": SMOOTHING_METHODS.get(dialog.method(), dialog.method()),
+                        "target_column": "",
+                        "values_written": 0,
+                        "status": "failed",
+                        "error": str(exc),
+                        "elapsed_seconds": 0.0,
+                    })
+                continue
+
+            for requested_y in requested_y_columns:
+                try:
+                    resolved_y = self._resolve_batch_column(
+                        current_dataset, dataset, requested_y, binding_mode, "Y"
+                    )
+                    if resolved_y is None:
+                        raise MathOperationError("Choose a Y column.")
+                    requests.append({
+                        "source_sheet": dataset.name,
+                        "requested_x_column": requested_x,
+                        "requested_y_column": requested_y,
+                        "x_column": resolved_x,
+                        "y_column": resolved_y,
+                        "requested_target_column": self._batch_output_column_name(
+                            dialog.target_column(), resolved_y, multiple_y
+                        ),
+                    })
+                except Exception as exc:
+                    results.append({
+                        "source_sheet": dataset_name,
+                        "requested_x_column": requested_x,
+                        "requested_y_column": requested_y,
+                        "x_column": resolved_x,
+                        "y_column": "",
+                        "method": dialog.method(),
+                        "method_label": SMOOTHING_METHODS.get(dialog.method(), dialog.method()),
+                        "target_column": "",
+                        "values_written": 0,
+                        "status": "failed",
+                        "error": str(exc),
+                        "elapsed_seconds": 0.0,
+                    })
+
+        plan = self._batch_output_target_plan(requests, dialog.target_conflict_policy())
+        preview_rows = [
+            {
+                "source_sheet": row["source_sheet"],
+                "status": "blocked" if row["output_action"] == "blocked" else "ready",
+                "x_column": row["x_column"],
+                "y_column": row["y_column"],
+                "target_column": row["target_column"],
+                "method": SMOOTHING_METHODS.get(dialog.method(), dialog.method()),
+                "output_action": row["output_action"],
+                "error": "Target exists and policy is Stop." if row["output_action"] == "blocked" else "",
+            }
+            for row in plan
+        ]
+        preview_rows.extend({
+            "source_sheet": row["source_sheet"],
+            "status": "failed",
+            "x_column": row["requested_x_column"],
+            "y_column": row["requested_y_column"],
+            "target_column": "",
+            "method": row["method_label"],
+            "output_action": "input_error",
+            "error": row["error"],
+        } for row in results)
+        if (len(preview_rows) > 1 or any(row["status"] != "ready" for row in preview_rows)) and not self._show_batch_preview(
+            "Smoothing Batch Preview",
+            preview_rows,
+            [
+                ("Sheet", "source_sheet"),
+                ("Status", "status"),
+                ("X", "x_column"),
+                ("Y", "y_column"),
+                ("Method", "method"),
+                ("Target", "target_column"),
+                ("Action", "output_action"),
+                ("Details", "error"),
+            ],
+        ):
+            return
+        if not plan:
+            QMessageBox.warning(self, "Smoothing Failed", results[0]["error"] if results else "No smoothing jobs were created.")
+            return
+        if not self._confirm_column_math_batch_target_plan(
+            plan, dialog.target_conflict_policy(), "Smoothing"
+        ):
+            return
+
+        parameters = dialog.parameters()
+        progress = self._batch_progress_dialog("Smoothing Batch", len(plan))
+        active_plot: tuple[str, str, str] | None = None
+        completed = 0
+        canceled = False
+        for row in plan:
+            dataset_name = str(row["source_sheet"])
+            if self._batch_progress_canceled(
+                progress, completed, f"Smoothing: {dataset_name} / {row['y_column']}"
+            ):
+                canceled = True
+                break
+            started = time.perf_counter()
+            dataset = self._workspace.get_dataset(dataset_name)
+            use_visible_model = dataset.name == current_dataset.name
+            if use_visible_model:
+                self._dataset_model.capture_undo_state()
+            try:
+                result = smooth_column(
+                    dataset.frame,
+                    x_column=str(row["x_column"]),
+                    y_column=str(row["y_column"]),
+                    method=dialog.method(),
+                    target_column=str(row["target_column"]),
+                    parameters=parameters,
+                )
+                self._apply_smoothing_metadata(
+                    dataset,
+                    source_column=str(row["y_column"]),
+                    result_column=result.column_name,
+                    operation_text=smoothing_operation_text(
+                        str(row["x_column"]),
+                        str(row["y_column"]),
+                        dialog.method(),
+                        parameters,
+                    ),
+                )
+                if use_visible_model:
+                    self._dataset_model.history_changed.emit()
+                    if active_plot is None:
+                        active_plot = (
+                            str(row["x_column"]), str(row["y_column"]), result.column_name
+                        )
+                results.append(self._smoothing_summary_row(
+                    row, dialog.method(), result.column_name, result.values_written,
+                    "ok", "", time.perf_counter() - started,
+                ))
+            except Exception as exc:
+                if use_visible_model:
+                    self._dataset_model.discard_latest_undo_state()
+                results.append(self._smoothing_summary_row(
+                    row, dialog.method(), str(row["target_column"]), 0,
+                    "failed", str(exc), time.perf_counter() - started,
+                ))
+            completed += 1
+
+        if progress is not None:
+            progress.setValue(completed)
+        if canceled:
+            for row in plan[completed:]:
+                results.append(self._smoothing_summary_row(
+                    row, dialog.method(), str(row["target_column"]), 0,
+                    "canceled", "Canceled by user before processing.", 0.0,
+                ))
+
+        success_count = sum(row["status"] == "ok" for row in results)
+        failures = [row for row in results if row["status"] != "ok"]
+        summary_dataset = None
+        if len(results) > 1:
+            summary_dataset = self._workspace.add_dataset(
+                f"{current_dataset.name}_smoothing_batch_summary", pd.DataFrame(results)
+            )
+            self._dataset_list.addItem(summary_dataset.name)
+
+        self._dataset_model.set_dataset(current_dataset)
+        self._resize_dataset_columns_to_contents(current_dataset)
+        self._plot_tab_widget.refresh_controls(current_dataset.name)
+        self._update_dataset_summary()
+        if active_plot is not None:
+            self._select_column(active_plot[2])
+
+        if active_plot is not None and dialog.plot_result_immediately():
+            x_column, source_column, result_column = active_plot
+            self._plot_tab_widget.queue_plot_series(
+                [
+                    PlotSeries(
+                        x_dataset=current_dataset.name, x_column=x_column,
+                        y_dataset=current_dataset.name, y_column=source_column,
+                        plot_type="line", color="0.55", custom_label=source_column,
+                    ),
+                    PlotSeries(
+                        x_dataset=current_dataset.name, x_column=x_column,
+                        y_dataset=current_dataset.name, y_column=result_column,
+                        plot_type="line", color="tab:red", custom_label=result_column,
+                    ),
+                ],
+                title=f"{SMOOTHING_METHODS.get(dialog.method(), dialog.method())}: {source_column}",
+                selected_dataset_name=current_dataset.name,
+            )
+            self._tabs.setCurrentWidget(self._plot_tab_widget)
+
+        if success_count == 0:
+            detail = "\n".join(f"{row['source_sheet']}: {row['error']}" for row in failures[:8])
+            QMessageBox.warning(self, "Smoothing Failed", detail or "Smoothing failed.")
+        elif failures:
+            QMessageBox.warning(
+                self, "Smoothing Batch",
+                f"Created {success_count} smoothed result(s); {len(failures)} did not complete."
+            )
+        summary_text = f"; summary saved as '{summary_dataset.name}'" if summary_dataset else ""
+        self.statusBar().showMessage(
+            f"Created {success_count} smoothed result(s), {len(failures)} incomplete{summary_text}"
+        )
+
+    @staticmethod
+    def _apply_smoothing_metadata(
+        dataset: Dataset,
+        source_column: str,
+        result_column: str,
+        operation_text: str,
+    ) -> None:
+        """Copy signal metadata to a smoothed output and append provenance."""
+        source = dataset.column_metadata.get(source_column, ColumnMetadata())
+        existing = dataset.column_metadata.get(result_column, ColumnMetadata())
+        dataset.column_metadata[result_column] = ColumnMetadata(
+            role=source.role,
+            unit=source.unit,
+            long_name=f"Smoothed {source.long_name or source_column}",
+            comment=existing.comment or source.comment,
+            value_type=source.value_type,
+            display_precision=source.display_precision,
+        )
+        set_column_operation_comment(dataset, result_column, operation_text)
+        dataset.prune_column_metadata()
+
+    @staticmethod
+    def _smoothing_summary_row(
+        plan_row: dict[str, object],
+        method: str,
+        result_column: str,
+        values_written: int,
+        status: str,
+        error: str,
+        elapsed_seconds: float,
+    ) -> dict[str, object]:
+        """Return one tidy smoothing batch result row."""
+        return {
+            "source_sheet": plan_row["source_sheet"],
+            "requested_x_column": plan_row["requested_x_column"],
+            "requested_y_column": plan_row["requested_y_column"],
+            "x_column": plan_row["x_column"],
+            "y_column": plan_row["y_column"],
+            "method": method,
+            "method_label": SMOOTHING_METHODS.get(method, method),
+            "requested_target_column": plan_row["requested_target_column"],
+            "target_column": result_column,
+            "output_action": plan_row["output_action"],
+            "values_written": values_written,
+            "status": status,
+            "error": error,
+            "elapsed_seconds": elapsed_seconds,
+        }
 
     def _run_column_math_batch(
         self,
@@ -7396,15 +7784,18 @@ class MainWindow(QMainWindow):
             target_name = dataset_names[0]
 
         self._dataset_list.blockSignals(True)
-        self._dataset_list.clear()
-        self._dataset_list.addItems(dataset_names)
-        self._dataset_list.blockSignals(False)
+        try:
+            self._dataset_list.clear()
+            self._dataset_list.addItems(dataset_names)
+            if target_name:
+                matches = self._dataset_list.findItems(target_name, Qt.MatchExactly)
+                if matches:
+                    self._dataset_list.setCurrentItem(matches[0])
+        finally:
+            self._dataset_list.blockSignals(False)
 
         if target_name:
-            matches = self._dataset_list.findItems(target_name, Qt.MatchExactly)
-            if matches:
-                self._dataset_list.setCurrentItem(matches[0])
-                self._show_dataset_editor(target_name)
+            self._show_dataset_editor(target_name)
         else:
             self._dataset_model.set_dataset(None)
             self._dataset_table.clearSelection()
@@ -7458,9 +7849,8 @@ class MainWindow(QMainWindow):
         has_dataset = dataset is not None
         has_selection = bool(self._selected_dataset_indexes())
         has_columns = bool(self._selected_dataset_columns())
-        has_clipboard_text = bool(
-            self._parse_clipboard_text(QApplication.clipboard().text())
-        )
+        clipboard_mime = QApplication.clipboard().mimeData()
+        has_clipboard_text = bool(clipboard_mime is not None and clipboard_mime.hasText())
 
         menu = QMenu(self)
         undo_action = menu.addAction("Undo")
@@ -7567,13 +7957,16 @@ class MainWindow(QMainWindow):
         if dataset is None:
             return
 
-        rows = self._parse_clipboard_text(QApplication.clipboard().text())
-        if not rows:
-            return
-
         current_index = self._dataset_table.currentIndex()
         start_row = current_index.row() if current_index.isValid() else 0
         start_column = current_index.column() if current_index.isValid() else 0
+        text_columns = self._clipboard_text_column_offsets(dataset, start_column)
+        rows = self._parse_clipboard_text(
+            QApplication.clipboard().text(),
+            text_columns=text_columns,
+        )
+        if rows.empty and len(rows.columns) == 0:
+            return
 
         try:
             pasted_rows, pasted_columns = self._dataset_model.paste_block(
@@ -7648,7 +8041,7 @@ class MainWindow(QMainWindow):
             return
 
         column_names, rows, column_metadata = self._clipboard_dataset_columns()
-        if not column_names and not rows:
+        if not column_names and rows.empty:
             return
 
         selected_columns = self._selected_dataset_columns()
@@ -7685,11 +8078,16 @@ class MainWindow(QMainWindow):
         )
 
     def _clipboard_has_dataset_columns(self) -> bool:
-        """Return whether the clipboard can be pasted as one or more columns."""
-        column_names, rows, _metadata = self._clipboard_dataset_columns()
-        return bool(column_names or rows)
+        """Return whether MIME data is available without eagerly parsing it."""
+        mime_data = QApplication.clipboard().mimeData()
+        return bool(
+            mime_data is not None
+            and (mime_data.hasFormat(_DATASET_COLUMNS_MIME) or mime_data.hasText())
+        )
 
-    def _clipboard_dataset_columns(self) -> tuple[list[str], list[list[str]], list[ColumnMetadata | None]]:
+    def _clipboard_dataset_columns(
+        self,
+    ) -> tuple[list[str], pd.DataFrame, list[ColumnMetadata | None]]:
         """Return clipboard content as column headers and row values."""
         mime_data = QApplication.clipboard().mimeData()
         if mime_data is not None and mime_data.hasFormat(_DATASET_COLUMNS_MIME):
@@ -7723,24 +8121,37 @@ class MainWindow(QMainWindow):
                         metadata = ColumnMetadata.from_metadata(entry)
                         parsed_metadata.append(None if metadata.is_empty() else metadata)
                 if column_names or parsed_rows:
-                    return column_names, parsed_rows, parsed_metadata
+                    return column_names, pd.DataFrame(parsed_rows, dtype="object"), parsed_metadata
 
         rows = self._parse_clipboard_text(QApplication.clipboard().text())
-        if not rows:
-            return [], [], []
+        if rows.empty and len(rows.columns) == 0:
+            return [], pd.DataFrame(), []
 
-        column_count = max((len(row) for row in rows), default=0)
+        column_count = len(rows.columns)
         column_names = [f"Pasted Column {index + 1}" for index in range(column_count)]
         return column_names, rows, []
 
-    def _parse_clipboard_text(self, text: str) -> list[list[str]]:
-        """Parse tab-delimited clipboard text into rows and cells."""
-        cleaned_text = text.rstrip("\r\n")
-        if not cleaned_text:
-            return []
+    def _parse_clipboard_text(
+        self,
+        text: str,
+        text_columns: set[int] | None = None,
+    ) -> pd.DataFrame:
+        """Parse tab-delimited clipboard text into a typed rectangular block."""
+        return parse_tabular_clipboard(text, text_columns=text_columns)
 
-        reader = csv.reader(StringIO(cleaned_text), delimiter="\t")
-        return [row for row in reader]
+    @staticmethod
+    def _clipboard_text_column_offsets(dataset: Dataset, start_column: int) -> set[int]:
+        """Return clipboard offsets that must preserve exact textual tokens."""
+        text_columns: set[int] = set()
+        for target_column in range(max(start_column, 0), len(dataset.frame.columns)):
+            column_name = str(dataset.frame.columns[target_column])
+            metadata = dataset.column_metadata.get(column_name)
+            if (
+                (metadata is not None and metadata.value_type == "text")
+                or not pd.api.types.is_numeric_dtype(dataset.frame.iloc[:, target_column])
+            ):
+                text_columns.add(target_column - max(start_column, 0))
+        return text_columns
 
     def _select_dataset_range(
         self,
@@ -7862,6 +8273,7 @@ class MainWindow(QMainWindow):
         self._column_metadata_action.setEnabled(has_dataset)
         self._insert_row_action.setEnabled(has_dataset)
         self._apply_formula_action.setEnabled(has_dataset)
+        self._remove_duplicates_action.setEnabled(has_dataset)
         self._derivative_action.setEnabled(has_dataset)
         self._integral_action.setEnabled(has_dataset)
         self._interpolation_action.setEnabled(has_dataset)
@@ -7894,11 +8306,7 @@ class MainWindow(QMainWindow):
         self._update_plot_action_state()
 
     def _handle_dataset_history_changed(self) -> None:
-        """Refresh controls after an undoable dataset edit changes history."""
-        dataset = self._dataset_model.dataset
-        if dataset is not None and hasattr(self, "_plot_tab_widget"):
-            self._resize_dataset_columns_to_contents(dataset)
-            self._plot_tab_widget.refresh_controls(dataset.name)
+        """Refresh history/action state without rescanning the worksheet."""
         if hasattr(self, "_undo_action"):
             self._update_dataset_summary()
 
@@ -7919,12 +8327,22 @@ class MainWindow(QMainWindow):
         """Undo the most recent editable dataset operation."""
         if not self._dataset_model.undo():
             return
+        dataset = self._dataset_model.dataset
+        if dataset is not None:
+            self._resize_dataset_columns_to_contents(dataset)
+            self._plot_tab_widget.refresh_controls(dataset.name)
+            self._update_dataset_summary()
         self.statusBar().showMessage("Undid dataset edit")
 
     def _redo_dataset_edit(self) -> None:
         """Redo the most recently undone dataset operation."""
         if not self._dataset_model.redo():
             return
+        dataset = self._dataset_model.dataset
+        if dataset is not None:
+            self._resize_dataset_columns_to_contents(dataset)
+            self._plot_tab_widget.refresh_controls(dataset.name)
+            self._update_dataset_summary()
         self.statusBar().showMessage("Redid dataset edit")
 
     def _set_sidebar_visible(self, visible: bool) -> None:
@@ -7934,16 +8352,18 @@ class MainWindow(QMainWindow):
             self._sync_checkable_action(self._show_sidebar_action, visible)
 
     def _sync_inspector_to_current_tab(self, _index: int | None = None) -> None:
-        """Show the inspector page that matches the active work area tab."""
+        """Show plot controls on Plot and maximize worksheet space on Data."""
         if not hasattr(self, "_inspector_stack"):
             return
 
         if self._tabs.currentWidget() is self._plot_tab_widget:
             self._inspector_stack.setCurrentWidget(self._plot_inspector)
             self._inspector_dock.setWindowTitle("Plot Inspector")
+            self._plot_tab_widget.set_plot_options_visible(self._plot_inspector_enabled)
+            self._inspector_dock.setVisible(self._plot_inspector_enabled)
         else:
-            self._inspector_stack.setCurrentWidget(self._data_inspector)
-            self._inspector_dock.setWindowTitle("Data Inspector")
+            self._inspector_dock.setVisible(False)
+        self._sync_plot_options_action(self._plot_inspector_enabled)
 
     def _toggle_workspace_section(self) -> None:
         """Toggle visibility of the workspace dataset section."""
@@ -7978,13 +8398,25 @@ class MainWindow(QMainWindow):
 
     def _set_plot_options_visible_from_action(self, visible: bool) -> None:
         """Apply the View menu inspector visibility state."""
-        self._inspector_dock.setVisible(visible)
+        self._plot_inspector_enabled = visible
         self._plot_tab_widget.set_plot_options_visible(visible)
+        self._inspector_dock.setVisible(
+            visible and self._tabs.currentWidget() is self._plot_tab_widget
+        )
 
     def _handle_plot_options_visibility_changed(self, visible: bool) -> None:
         """Apply plot-tab option visibility to the external inspector dock."""
+        self._plot_inspector_enabled = visible
         if self._tabs.currentWidget() is self._plot_tab_widget:
             self._inspector_dock.setVisible(visible)
+        self._sync_plot_options_action(visible)
+
+    def _handle_inspector_dock_visibility_changed(self, visible: bool) -> None:
+        """Treat manual dock closing as a plot-inspector preference only on Plot."""
+        if self._tabs.currentWidget() is not self._plot_tab_widget:
+            return
+        self._plot_inspector_enabled = visible
+        self._plot_tab_widget.set_plot_options_visible(visible)
         self._sync_plot_options_action(visible)
 
     def _sync_plot_options_action(self, visible: bool) -> None:
@@ -8002,7 +8434,7 @@ class MainWindow(QMainWindow):
     def _reset_view_to_default(self) -> None:
         """Restore default workspace and inspector dock visibility/layout."""
         self._set_sidebar_visible(True)
-        self._inspector_dock.setVisible(True)
+        self._plot_inspector_enabled = True
         self._set_workspace_section_visible(True)
         self._set_plots_section_visible(True)
         self._plot_tab_widget.reset_view_to_default()
@@ -8160,6 +8592,8 @@ class MainWindow(QMainWindow):
             self._workspace = project_io.load_project(file_name)
             self._project_path = Path(file_name)
             self._large_dataset_warning_names.clear()
+            self._active_plot_name = None
+            self._active_plot_baseline = None
             self._plot_tab_widget.set_workspace(self._workspace)
             self._refresh_dataset_list()
             self._refresh_plot_list()
@@ -8227,6 +8661,8 @@ class MainWindow(QMainWindow):
         self._workspace = Workspace()
         self._project_path = None
         self._large_dataset_warning_names.clear()
+        self._active_plot_name = None
+        self._active_plot_baseline = None
         self._plot_tab_widget.set_workspace(self._workspace)
         self._refresh_dataset_list()
         self._refresh_plot_list()
@@ -8254,37 +8690,142 @@ class MainWindow(QMainWindow):
     def _refresh_plot_list(self, selected_name: str | None = None) -> None:
         """Refresh saved plot navigation and optionally reselect one plot."""
         plot_names = self._workspace.plot_names()
-        target_name = selected_name if selected_name in plot_names else None
+        target_name = selected_name if selected_name in plot_names else self._active_plot_name
+        if target_name not in plot_names:
+            target_name = None
 
         self._plot_list.blockSignals(True)
         self._plot_list.clear()
-        self._plot_list.addItems(plot_names)
-        self._plot_list.blockSignals(False)
+        empty_item = QListWidgetItem("New / Empty Plot")
+        empty_item.setData(Qt.UserRole, None)
+        self._plot_list.addItem(empty_item)
+        for plot_name in plot_names:
+            item = QListWidgetItem(plot_name)
+            item.setData(Qt.UserRole, plot_name)
+            self._plot_list.addItem(item)
 
         if target_name:
-            matches = self._plot_list.findItems(target_name, Qt.MatchExactly)
-            if matches:
-                self._plot_list.setCurrentItem(matches[0])
+            for row in range(self._plot_list.count()):
+                item = self._plot_list.item(row)
+                if item.data(Qt.UserRole) == target_name:
+                    self._plot_list.setCurrentItem(item)
+                    break
+        else:
+            self._plot_list.setCurrentItem(empty_item)
+        self._plot_list.blockSignals(False)
         self._update_plot_action_state()
 
     def _current_plot_name(self) -> str | None:
-        """Return the selected saved plot name, if any."""
+        """Return the saved plot currently loaded in the editor, if any."""
+        return self._active_plot_name
+
+    def _selected_plot_name(self) -> str | None:
+        """Return the saved plot selected in the navigator, if any."""
         current_item = self._plot_list.currentItem()
-        return current_item.text() if current_item is not None else None
+        if current_item is None:
+            return None
+        value = current_item.data(Qt.UserRole)
+        return str(value) if isinstance(value, str) and value else None
 
-    def _handle_saved_plot_selection(self, plot_name: str) -> None:
-        """Load a selected saved plot into the editable Plot tab."""
-        self._update_plot_action_state()
-        if plot_name:
+    def _handle_saved_plot_selection(
+        self,
+        current_item: QListWidgetItem | None,
+        _previous_item: QListWidgetItem | None,
+    ) -> None:
+        """Load a saved plot or start the selected empty plot draft."""
+        plot_name = None if current_item is None else current_item.data(Qt.UserRole)
+        if isinstance(plot_name, str) and plot_name:
+            if not self._confirm_plot_replacement():
+                self._restore_active_plot_selection()
+                return
             self._load_plot_by_name(plot_name, show_message=False)
+        else:
+            self._start_new_plot(update_selection=False)
 
-    def _save_current_plot(self) -> None:
+    def _start_new_plot(
+        self,
+        _checked: bool = False,
+        update_selection: bool = True,
+        confirm_replacement: bool = True,
+    ) -> bool:
+        """Detach from any saved definition and display a fresh empty plot."""
+        if confirm_replacement and not self._confirm_plot_replacement():
+            self._restore_active_plot_selection()
+            return False
+        self._active_plot_name = None
+        self._active_plot_baseline = None
+        self._plot_tab_widget.reset_plot_draft()
+        if update_selection and self._plot_list.count():
+            self._plot_list.blockSignals(True)
+            self._plot_list.setCurrentRow(0)
+            self._plot_list.blockSignals(False)
+        self._tabs.setCurrentWidget(self._plot_tab_widget)
+        self._update_plot_action_state()
+        self.statusBar().showMessage("Started a new empty plot")
+        return True
+
+    def _plot_has_unsaved_changes(self) -> bool:
+        """Return whether replacing the editor would discard an unsaved definition."""
+        if not self._plot_tab_widget.has_plot_series():
+            return False
+        if self._active_plot_baseline is None:
+            return True
+        return self._plot_state_fingerprint() != self._active_plot_baseline
+
+    def _confirm_plot_replacement(self) -> bool:
+        """Offer Save, Discard, and Cancel before replacing unsaved plot work."""
+        if not self._plot_has_unsaved_changes():
+            return True
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Warning)
+        message.setWindowTitle("Unsaved Plot")
+        message.setText("The current plot has unsaved changes.")
+        message.setInformativeText("Save it before replacing the plot?")
+        message.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        message.setDefaultButton(QMessageBox.Save)
+        choice = message.exec()
+        if choice == QMessageBox.Save:
+            return self._save_current_plot()
+        return choice == QMessageBox.Discard
+
+    def _plot_state_fingerprint(self) -> str:
+        """Return a stable JSON representation of the editable plot state."""
+        return json.dumps(
+            self._plot_tab_widget.current_plot_state(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _restore_active_plot_selection(self) -> None:
+        """Restore navigator selection after a replacement prompt is canceled."""
+        self._plot_list.blockSignals(True)
+        target_row = 0
+        if self._active_plot_name is not None:
+            for row in range(self._plot_list.count()):
+                if self._plot_list.item(row).data(Qt.UserRole) == self._active_plot_name:
+                    target_row = row
+                    break
+        if self._plot_list.count():
+            self._plot_list.setCurrentRow(target_row)
+        self._plot_list.blockSignals(False)
+
+    def _mark_plot_as_unsaved(self) -> None:
+        """Detach an analysis-generated plot from a previously loaded saved plot."""
+        self._active_plot_name = None
+        self._active_plot_baseline = None
+        if self._plot_list.count():
+            self._plot_list.blockSignals(True)
+            self._plot_list.setCurrentRow(0)
+            self._plot_list.blockSignals(False)
+        self._update_plot_action_state()
+
+    def _save_current_plot(self) -> bool:
         """Save or overwrite the current plot definition in the workspace."""
         if not self._plot_tab_widget.has_plot_series():
             QMessageBox.information(self, "Save Plot", "Create a plot before saving it.")
-            return
+            return False
 
-        selected_name = self._current_plot_name()
+        selected_name = self._active_plot_name
         default_name = selected_name or self._plot_tab_widget.suggested_plot_name()
         plot_name, accepted = QInputDialog.getText(
             self,
@@ -8293,7 +8834,7 @@ class MainWindow(QMainWindow):
             text=default_name,
         )
         if not accepted:
-            return
+            return False
 
         clean_name = plot_name.strip() or "Plot"
         state = self._plot_tab_widget.current_plot_state()
@@ -8308,22 +8849,29 @@ class MainWindow(QMainWindow):
                     QMessageBox.Yes,
                 )
                 if reply != QMessageBox.Yes:
-                    return
+                    return False
                 saved_plot = self._workspace.update_plot(clean_name, state)
             else:
                 saved_plot = self._workspace.add_plot(clean_name, state)
         except Exception as exc:
             QMessageBox.critical(self, "Save Plot Failed", str(exc))
-            return
+            return False
 
+        self._active_plot_name = saved_plot.name
+        self._active_plot_baseline = self._plot_state_fingerprint()
         self._refresh_plot_list(saved_plot.name)
         self.statusBar().showMessage(f"Saved plot '{saved_plot.name}'")
+        return True
 
     def _load_selected_plot(self) -> None:
         """Load the currently selected saved plot with user feedback."""
-        plot_name = self._current_plot_name()
+        plot_name = self._selected_plot_name()
         if plot_name is None:
             QMessageBox.information(self, "Load Plot", "Select a saved plot before loading it.")
+            return
+
+        if plot_name != self._active_plot_name and not self._confirm_plot_replacement():
+            self._restore_active_plot_selection()
             return
 
         self._load_plot_by_name(plot_name, show_message=True)
@@ -8341,7 +8889,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load Plot Failed", str(exc))
             return
 
+        self._active_plot_name = saved_plot.name
+        self._active_plot_baseline = self._plot_state_fingerprint()
         self._tabs.setCurrentWidget(self._plot_tab_widget)
+        self._update_plot_action_state()
         if show_message:
             self.statusBar().showMessage(f"Loaded plot '{plot_name}'")
         else:
@@ -8349,7 +8900,7 @@ class MainWindow(QMainWindow):
 
     def _delete_selected_plot(self) -> None:
         """Remove the currently selected saved plot from the workspace."""
-        plot_name = self._current_plot_name()
+        plot_name = self._selected_plot_name()
         if plot_name is None:
             QMessageBox.information(self, "Remove Plot", "Select a saved plot before removing it.")
             return
@@ -8370,6 +8921,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Remove Plot Failed", str(exc))
             return
 
+        if self._active_plot_name == plot_name:
+            self._active_plot_name = None
+            self._active_plot_baseline = None
+            self._plot_tab_widget.reset_plot_draft()
         self._refresh_plot_list()
         self.statusBar().showMessage(f"Removed plot '{plot_name}'")
 
@@ -8392,7 +8947,8 @@ class MainWindow(QMainWindow):
 
     def _update_plot_action_state(self) -> None:
         """Update plot menu and header action enabled states."""
-        has_saved_plot = self._current_plot_name() is not None
+        selected_plot_name = self._selected_plot_name()
+        has_saved_plot = selected_plot_name is not None
         has_current_plot = self._plot_tab_widget.has_plot_series()
 
         if hasattr(self, "_save_plot_action"):
@@ -8405,7 +8961,7 @@ class MainWindow(QMainWindow):
             can_load=has_saved_plot,
             can_remove=has_saved_plot,
         )
-        self._plot_tab_widget.set_active_plot_name(self._current_plot_name())
+        self._plot_tab_widget.set_active_plot_name(self._active_plot_name)
 
     def _rename_dataset(self, old_name: str) -> None:
         """Prompt for and apply a dataset rename."""
@@ -8414,6 +8970,8 @@ class MainWindow(QMainWindow):
             try:
                 final_name = self._workspace.rename_dataset(old_name, new_name)
                 self._plot_tab_widget.clear_plot_state()
+                self._active_plot_name = None
+                self._active_plot_baseline = None
                 self._refresh_plot_list()
                 self._refresh_dataset_list(final_name)
                 self.statusBar().showMessage(f"Renamed '{old_name}' to '{final_name}'")
@@ -8439,7 +8997,10 @@ class MainWindow(QMainWindow):
             try:
                 self._workspace.remove_dataset(name)
                 self._plot_tab_widget.clear_plot_state()
+                self._active_plot_name = None
+                self._active_plot_baseline = None
                 self._refresh_dataset_list()
+                self._refresh_plot_list()
                 self.statusBar().showMessage(f"Deleted dataset '{name}'")
             except Exception as exc:
                 QMessageBox.critical(self, "Delete Failed", str(exc))

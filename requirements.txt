@@ -5,3 +5,4 @@ matplotlib>=3.8,<4
 scipy>=1.12,<2
 odrpack>=0.5,<1
 SciencePlots>=2.2,<3
+statsmodels>=0.14,<1

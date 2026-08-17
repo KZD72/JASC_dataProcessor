@@ -94,7 +94,7 @@ JASC uses a **Docked Workspace Layout** where all secondary control panels dock 
   1. **Data**: Displays the selected sheet in a spreadsheet view.
   2. **Plot**: Displays the active visualization canvas.
 * **Workspace Panel (Left)**: Displays list of active **Datasets** and **Saved Plots**. Double-clicking items swaps active view.
-* **Inspector Panel (Right)**: Shows contextual tools. When in the **Data** tab, it displays **Sheet** tools (add/delete/metadata) and **Analysis** actions. When in the **Plot** tab, it swaps to **Plot Options** (Series styling, Axes settings, and the Locator coordinates).
+* **Plot Inspector (Right)**: Appears in the **Plot** tab and contains series styling, axes settings, and locator coordinates. It is hidden in the **Data** tab because worksheet, preparation, and analysis operations are available from the upper menus and table context menus.
 * **Resetting Layout**: If panels get closed or misplaced, select **View > Reset View to Default** (`Ctrl+Shift+R`) to restore the original layout.
 
 ---
@@ -113,8 +113,8 @@ Use **File > Save Project...** to store the complete workspace as a `.jasc` proj
 
 ### Manual Spreadsheet Entry
 1. Select **File > New Blank Sheet** (`Ctrl+N`), click the toolbar icon, or click **New Sheet** at the bottom of the Datasets list.
-2. Set the sheet size via the Data Inspector (**Sheet > Table Size**).
-3. To generate data patterns, use **Sheet > Fill Range**. Specify:
+2. Add or insert rows and columns from the **Data** menu or the table's context menus.
+3. To generate data patterns, use **Data > Fill Range**. Specify:
    * **Target Column**
    * **Start Value** and **Step Size**
    * **Row Range** and **Row Count**
@@ -200,6 +200,7 @@ Double-click a column header (e.g. `col_0`) to open the **Column Metadata** dial
 The **Data** menu includes reusable tools for shaping datasets before analysis:
 * **Filter / Query**: Filter rows by equality, numeric comparisons, ranges, contains/starts-with text checks, comma-separated list membership, blank, or non-blank values.
 * **Sort**: Sort by one or more columns in ascending or descending order.
+* **Remove Duplicates**: Choose the columns that define a match, then keep the first occurrence, keep the last occurrence, or remove every row belonging to a duplicate group.
 * **Missing Values**: Drop rows with missing selected values, fill with a constant, fill with column mean/median, or interpolate numeric gaps.
 * **Bin / Average**: Split a numeric bin column into equal-width bins and calculate count, mean, standard deviation, SEM, minimum, and maximum for selected value columns.
 * **Group / Aggregate**: Group by one or more factor columns and compute count, mean, standard deviation, SEM, minimum, maximum, and sum for selected numeric columns.
@@ -215,7 +216,7 @@ Each preparation tool creates a new result sheet so the source data remains avai
 Apply custom expressions directly in columns.
 
 ### Using the Apply Formula Dialog
-1. Select **Analysis > Apply Formula...** (`Ctrl+Shift+F`) or click the inspector button.
+1. Select **Data > Apply Formula...** (`Ctrl+Shift+F`).
 2. Select the target column (or enter a new name to create one).
 3. In the formula text box, type your expression (e.g., `col("y") * 2.5` or `col1 / col2`).
 4. Select the cell scope: **All Rows** or **Selected Rows Only**.
@@ -239,11 +240,16 @@ Apply custom expressions directly in columns.
 ## 6. Calculus, Signal Processing & Interpolation
 
 ### Numerical Differentiation & Integration
-Available via the **Analysis** menu or the Data Inspector:
+Available via the **Analysis** menu:
 * **Derivative**: Select X and Y columns. Choose from methods: *NumPy gradient*, *Forward difference*, *Backward difference*, *Central difference*, or *Savitzky-Golay* smoothing derivative.
 * **Integral**: Select X and Y columns. Choose from integration algorithms: *Trapezoid*, *Simpson*, *Left*, *Right*, or *Midpoint* rectangle. You can specify an **Initial Value** offset (integration constant) to align the integrated curve with physical bounds.
 
 Select **Plot result immediately** to automatically view the calculus output.
+
+### Smoothing Workbench
+Open **Analysis > Smoothing...** to preview and write a smoothed signal into a worksheet column. Available methods are adjacent average, moving median, Savitzky-Golay, LOWESS/LOESS, FFT low-pass smoothing, and derivative smoothing followed by integration. The dialog supports multiple Y columns, multiple compatible worksheets, name/position column matching, safe output-name conflict policies, cancelable batch progress, and an immediate original-versus-smoothed comparison plot.
+
+**Derivative smoothing + integration** is useful when the measured curve is noisy but its underlying rate of change is expected to vary smoothly. JASC calculates `dy/dx`, optionally applies a moving-median spike prefilter, then lets you smooth the derivative with any included smoothing method: adjacent average, moving median, Savitzky-Golay, LOWESS/LOESS, or FFT low-pass. It integrates the result from the original first value. **Preserve first and last data values** distributes residual integration drift across the reconstructed curve so both endpoints remain anchored. Savitzky-Golay and FFT require evenly spaced X values, including when selected as the derivative smoother.
 
 ### FFT and Inverse FFT
 * **FFT (Fast Fourier Transform)**: Computes the spectral amplitude and frequency. Select a signal column, sampling interval, and a window function (*Rectangular*, *Hann*, *Hamming*, *Blackman*, *Bartlett*, *Flat top*). JASC creates a new sheet containing the frequency spectrum.
@@ -347,7 +353,7 @@ Create custom fitting equations via **Analysis > Custom Fit Models...**:
 
 ### Plot Series Configuration
 1. Select the **Plot** tab, then view the **Plot Inspector** on the right.
-2. Click **Add Series** in the Series tab.
+2. Configure a series and click **Add as New** in the Series tab. Selecting an existing queued series live-binds the editor to it; changing its subtype, data mapping, or appearance updates that queued series and participates in Auto preview. **Apply to Selected** remains available for an immediate explicit update.
 3. Assign columns to X, Y (and Z/weights if applicable).
 4. Select a **Plot Type**:
    * *2D Line & Scatter*: Line, Scatter, Line + Markers, Errorbar.
@@ -361,13 +367,24 @@ Create custom fitting equations via **Analysis > Custom Fit Models...**:
   * Manually set limits for X, left Y, and right Y axes, or leave them blank to auto-scale.
   * Swap scales between **Linear** and **Logarithmic**.
   * Toggle the plot grid on/off.
-* Go to the **Style** tab:
+* In the **Axes** tab's style controls:
   * Select **SciencePlots journal templates** (e.g. `science`, `nature`, `ieee`).
   * Enable/disable LaTeX formatting.
   * Adjust output figure dimensions.
-* Use locators/cursors to record coordinates from the plotted figure. Locator values are shown in the plot inspector for quick reading.
+* Use locators/cursors to find Y from a supplied X or every X intersection for a supplied Y. Surface plots accept X and Y coordinates and return interpolated Z. Horizontal curve segments at the requested Y are reported as ambiguous rather than producing an arbitrary X.
+
+### Legend and Live Preview
+Use the dedicated **Legend** tab to control legend visibility, inside or outside placement, text and title sizes, optional title, column count, frame visibility and opacity, marker scale, handle length, and whether locator markers or confidence bands appear. A series can be excluded individually with **Show this series in legend**. Entries from the left and right Y axes follow queued-series order and duplicate labels are removed.
+
+Global axes, style, figure-size, and legend changes update through a short debounced **Auto preview** by default. Turn Auto preview off for expensive plots and click **Apply** when ready. Invalid range text marks the preview as out of date without interrupting typing with modal dialogs.
+
+Heatmap, Contour, and Filled Contour require at least three distinct, non-collinear X/Y coordinate points and numeric Z values. If the selected coordinates cannot form a 2D interpolation surface, the canvas displays the rendering reason rather than an empty white plot.
 
 ### Saved Plot Definitions
+**New / Empty Plot** is the default plot workspace entry. It starts a clean unsaved plot with default axes and styling; analysis-generated plots also become unsaved drafts so they cannot accidentally overwrite a previously loaded saved plot.
+
+When **New Empty Plot** would replace a draft with unsaved changes, JASC asks whether to **Save**, **Discard**, or **Cancel**. Cancel keeps the current plot intact.
+
 Once your plot looks correct, save its state so you can return to it later:
 1. Click **Save Plot** at the top of the Plot tab or select **Plot > Save Current Plot...**
 2. Name the plot definition.
@@ -424,10 +441,12 @@ Project files use the `.jasc` extension. They are ZIP archives containing CSV da
 * Project custom fit models.
 
 ### Exporting Data and Figures
-Use **File > Export Dataset...** or the Data Inspector export action to write the active dataset as CSV/TXT. Plot figures are exported from the Matplotlib toolbar in the Plot tab. Use the saved-plot system when you want to preserve plot configuration inside the project rather than only exporting a static image.
+Use **File > Export Dataset...** to write the active dataset as CSV/TXT. Plot figures are exported from the Matplotlib toolbar in the Plot tab. Use the saved-plot system when you want to preserve plot configuration inside the project rather than only exporting a static image.
 
 ### Large Datasets
-JASC profiles dataset size and memory use. For large tables, it limits expensive full-table visual operations such as automatic column resizing while keeping editing and analysis available.
+JASC profiles dataset size and memory use. Column widths are calculated from a bounded row sample rather than scanning a complete worksheet. Clipboard data and generated ranges are parsed, grown, and assigned as column blocks, so large pastes do not append or update the DataFrame one cell at a time.
+
+Undo history retains at most 20 worksheet snapshots within a 256 MiB budget per undo/redo stack. If the current worksheet is too large for one snapshot, JASC avoids making the expensive copy and shows a status-bar warning that the edit cannot be undone. Very large file and project parsing is still an in-memory Pandas operation; background/cancelable import and out-of-core datasets remain planned.
 
 ---
 
@@ -440,7 +459,7 @@ Make sure you are executing python from the active conda environment:
 ```
 
 #### "Large Dataset Warning" popup appears.
-JASC detects when a worksheet has more than 100,000 cells or 5MB memory footprint. The Data Editor limits automated column autosizing to prevent GUI lag. For very large datasets, consider using external downsampling or editing in chunks.
+JASC warns before importing a delimited file of 100 MiB or more and flags a loaded worksheet at 2,000,000 cells or an estimated 250 MiB of DataFrame memory. The Data Editor samples at most 25 rows when sizing columns above the 250,000-cell responsiveness threshold.
 
 #### The Curve Fit does not converge.
 * Check if your initial guesses are realistic.
@@ -448,5 +467,5 @@ JASC detects when a worksheet has more than 100,000 cells or 5MB memory footprin
 * Swap from *Levenberg-Marquardt* to *Trust Region Reflective* to respect parameter bounds.
 
 #### How do I export my results?
-To save a sheet as a CSV or TSV file, select the sheet, open the Data Inspector, and click **Export** (or select **File > Export Dataset...**). To export figures, click the save floppy disk icon on the Matplotlib toolbar in the Plot tab.
+To save a sheet as a CSV or TSV file, select the sheet and choose **File > Export Dataset...**. To export figures, click the save floppy disk icon on the Matplotlib toolbar in the Plot tab.
 

@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.clipboard_io import parse_tabular_clipboard
+
 
 class DataTableWidget(QWidget):
     """A simple editable table that can emit its contents as a DataFrame."""
@@ -269,7 +271,7 @@ class DataTableWidget(QWidget):
     def _paste_clipboard(self) -> None:
         """Paste tab-delimited clipboard text starting at the active cell."""
         rows = self._parse_clipboard_text(QApplication.clipboard().text())
-        if not rows:
+        if rows.empty and len(rows.columns) == 0:
             return
 
         start_row = self._table.currentRow()
@@ -281,33 +283,33 @@ class DataTableWidget(QWidget):
 
         self._ensure_table_size(
             minimum_rows=start_row + len(rows),
-            minimum_columns=start_column + max(len(row) for row in rows),
+            minimum_columns=start_column + len(rows.columns),
         )
 
-        for row_offset, row_values in enumerate(rows):
-            for column_offset, value in enumerate(row_values):
-                self._table.setItem(
-                    start_row + row_offset,
-                    start_column + column_offset,
-                    QTableWidgetItem(value),
-                )
+        self._table.setUpdatesEnabled(False)
+        try:
+            for row_offset in range(len(rows)):
+                for column_offset in range(len(rows.columns)):
+                    value = rows.iat[row_offset, column_offset]
+                    self._table.setItem(
+                        start_row + row_offset,
+                        start_column + column_offset,
+                        QTableWidgetItem("" if pd.isna(value) else str(value)),
+                    )
+        finally:
+            self._table.setUpdatesEnabled(True)
 
-    def _parse_clipboard_text(self, text: str) -> list[list[str]]:
+    def _parse_clipboard_text(self, text: str) -> pd.DataFrame:
         """Parse clipboard text into rows and cells."""
-        cleaned_text = text.rstrip("\r\n")
-        if not cleaned_text:
-            return []
-
-        reader = csv.reader(StringIO(cleaned_text), delimiter="\t")
-        return [row for row in reader]
+        return parse_tabular_clipboard(text, preserve_all_text=True)
 
     def _ensure_table_size(self, minimum_rows: int, minimum_columns: int) -> None:
         """Grow the table until it can contain the requested row/column count."""
-        while self._table.rowCount() < minimum_rows:
-            self._add_row()
-
-        while self._table.columnCount() < minimum_columns:
-            self._add_column()
+        if self._table.rowCount() < minimum_rows:
+            self._table.setRowCount(minimum_rows)
+        if self._table.columnCount() < minimum_columns:
+            self._table.setColumnCount(minimum_columns)
+            self._refresh_missing_headers()
 
     def _default_fill_count(self) -> int:
         """Return the default number of rows for range filling."""
