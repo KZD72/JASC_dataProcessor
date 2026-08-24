@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from matplotlib import style as mpl_style
+from matplotlib import rcParams, style as mpl_style
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.path import Path as MplPath
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
 
 from core.workspace import COLUMN_NUMERIC_TYPES, Workspace, dataframe_column_metadata
+from models.plot_settings import LegendSettings
 
 try:
     import scienceplots  # noqa: F401
@@ -64,6 +65,7 @@ class PlotSeries:
     interpolation_method: str = "linear"
     grid_resolution: int = 120
     voronoi_shape: str = "circle"
+    show_in_legend: bool = True
 
     @property
     def label(self) -> str:
@@ -83,14 +85,20 @@ class PlotSeries:
             return f"{self.y_dataset}: {self.y_column}"
         return f"{self.y_dataset}: {self.y_column} vs {self.x_dataset}: {self.x_column}"
 
+    @property
+    def legend_label(self) -> str:
+        """Return the visible label or Matplotlib's legend-suppression sentinel."""
+        return self.label if self.show_in_legend else "_nolegend_"
+
 
 @dataclass(frozen=True, slots=True)
 class PlotLocator:
-    """Marker request for an interpolated Y value on a plotted series."""
+    """Marker request for a forward, inverse, or surface data lookup."""
 
     series_index: int
-    x_value: float
+    x_value: float | None = None
     y_value: float | None = None
+    lookup_mode: str = "x_to_y"
     marker: str = "o"
     size: float = 70.0
     color: str = "tab:red"
@@ -161,8 +169,7 @@ class PlotCanvas(QWidget):
         y_limits: tuple[float | None, float | None] = (None, None),
         right_y_limits: tuple[float | None, float | None] = (None, None),
         grid_enabled: bool = True,
-        legend_enabled: bool = True,
-        legend_position: str = "best",
+        legend_settings: LegendSettings | None = None,
         locators: list[PlotLocator] | None = None,
         figure_width: float = 7.0,
         figure_height: float = 4.8,
@@ -185,13 +192,14 @@ class PlotCanvas(QWidget):
                     y_limits=y_limits,
                     right_y_limits=right_y_limits,
                     grid_enabled=grid_enabled,
-                    legend_enabled=legend_enabled,
-                    legend_position=legend_position,
+                    legend_settings=legend_settings or LegendSettings(),
                     locators=locators,
                     figure_width=figure_width,
                     figure_height=figure_height,
                 )
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._draw_error_state(str(exc))
+            self.canvas.draw()
             return PlotResult(
                 plotted_count=0,
                 skipped_messages=[f"Plot style/rendering unavailable: {exc}"],
@@ -213,8 +221,7 @@ class PlotCanvas(QWidget):
         y_limits: tuple[float | None, float | None],
         right_y_limits: tuple[float | None, float | None],
         grid_enabled: bool,
-        legend_enabled: bool,
-        legend_position: str,
+        legend_settings: LegendSettings,
         locators: list[PlotLocator] | None,
         figure_width: float,
         figure_height: float,
@@ -223,6 +230,7 @@ class PlotCanvas(QWidget):
         self._remove_right_axes()
         self.figure.clear()
         self._disable_layout_engine()
+        self._reset_figure_margins()
         self.figure.set_size_inches(figure_width, figure_height, forward=True)
         self.axes = self.figure.add_subplot(111)
         self.right_axes = None
@@ -315,7 +323,7 @@ class PlotCanvas(QWidget):
                 continue
 
             plot_kwargs = {
-                "label": series.label,
+                "label": series.legend_label,
                 "linestyle": series.line_style,
                 "marker": series.marker,
                 "linewidth": series.line_width,
@@ -340,6 +348,7 @@ class PlotCanvas(QWidget):
                 target_axes=target_axes,
                 x_scale=x_scale,
                 y_scale=series_y_scale,
+                include_in_legend=legend_settings.include_confidence_bands,
             )
             if series.plot_type not in ({"histogram"} | _COMPOSITION_PLOT_TYPES):
                 plotted_series_values[series_index] = (x_values, y_values, series)
@@ -354,7 +363,8 @@ class PlotCanvas(QWidget):
             plotted_count += 1
 
         if not plotted_count:
-            self._draw_empty_state(clear_axes=False)
+            detail = skipped_messages[0] if skipped_messages else "No series could be plotted."
+            self._draw_error_state(detail)
             self.canvas.draw()
             return PlotResult(
                 plotted_count=0,
@@ -403,10 +413,11 @@ class PlotCanvas(QWidget):
             locators=locators or [],
             plotted_series_values=plotted_series_values,
             plotted_surface_values=plotted_surface_values,
+            include_in_legend=legend_settings.include_locators,
         )
         skipped_messages.extend(locator_messages)
 
-        self._draw_legend(legend_enabled, legend_position)
+        self._draw_legend(legend_settings, series_list)
 
         self.canvas.draw()
         return PlotResult(
@@ -418,6 +429,10 @@ class PlotCanvas(QWidget):
     def clear_plot(self) -> None:
         """Clear the plot surface."""
         self._draw_empty_state()
+        nav_stack = getattr(self.toolbar, "_nav_stack", None)
+        if nav_stack is not None:
+            nav_stack.clear()
+            self.toolbar.update()
         self.canvas.draw_idle()
 
     def _disable_layout_engine(self) -> None:
@@ -427,6 +442,17 @@ class PlotCanvas(QWidget):
             set_layout_engine(None)
         else:
             self.figure.set_constrained_layout(False)
+
+    def _reset_figure_margins(self) -> None:
+        """Restore active-style subplot margins before applying custom outside layout."""
+        self.figure.subplots_adjust(
+            left=float(rcParams["figure.subplot.left"]),
+            right=float(rcParams["figure.subplot.right"]),
+            bottom=float(rcParams["figure.subplot.bottom"]),
+            top=float(rcParams["figure.subplot.top"]),
+            wspace=float(rcParams["figure.subplot.wspace"]),
+            hspace=float(rcParams["figure.subplot.hspace"]),
+        )
 
     def _record_axis_values(
         self,
@@ -922,7 +948,7 @@ class PlotCanvas(QWidget):
         plot_type = series.plot_type or "line"
         if plot_type == "scatter":
             scatter_kwargs: dict[str, object] = {
-                "label": series.label,
+                "label": series.legend_label,
                 "marker": series.marker or "o",
                 "s": series.marker_size**2,
             }
@@ -947,7 +973,7 @@ class PlotCanvas(QWidget):
                 xerr=x_err,
                 yerr=y_err,
                 fmt=marker,
-                label=series.label,
+                label=series.legend_label,
                 linestyle=series.line_style,
                 linewidth=series.line_width,
                 markersize=series.marker_size,
@@ -960,8 +986,9 @@ class PlotCanvas(QWidget):
                 x_values,
                 y_values,
                 width=series.bar_width,
-                label=series.label,
+                label=series.legend_label,
                 color=series.color if series.color else None,
+                alpha=series.fill_alpha,
             )
             return
 
@@ -970,8 +997,9 @@ class PlotCanvas(QWidget):
                 x_values,
                 y_values,
                 height=series.bar_width,
-                label=series.label,
+                label=series.legend_label,
                 color=series.color if series.color else None,
+                alpha=series.fill_alpha,
             )
             return
 
@@ -1010,7 +1038,7 @@ class PlotCanvas(QWidget):
                 x_values,
                 y_values,
                 0,
-                label=series.label,
+                label=series.legend_label,
                 color=series.color if series.color else None,
                 alpha=series.fill_alpha,
             )
@@ -1022,7 +1050,7 @@ class PlotCanvas(QWidget):
                 bins=max(series.histogram_bins, 1),
                 density=series.histogram_density,
                 cumulative=series.histogram_cumulative,
-                label=series.label,
+                label=series.legend_label,
                 color=series.color if series.color else None,
                 alpha=series.fill_alpha,
             )
@@ -1491,7 +1519,7 @@ class PlotCanvas(QWidget):
                 mean.set_marker("D")
                 mean.set_markerfacecolor("white")
                 mean.set_markeredgecolor(color)
-            target_axes.plot([], [], color=color, label=series.label)
+            target_axes.plot([], [], color=color, label=series.legend_label)
             return
 
         violin_parts = target_axes.violinplot(
@@ -1514,7 +1542,7 @@ class PlotCanvas(QWidget):
 
         target_axes.set_xticks(positions)
         target_axes.set_xticklabels(column_labels)
-        target_axes.plot([], [], color=color, label=series.label)
+        target_axes.plot([], [], color=color, label=series.legend_label)
 
     def _draw_confidence_band(
         self,
@@ -1523,6 +1551,7 @@ class PlotCanvas(QWidget):
         target_axes: Any,
         x_scale: str,
         y_scale: str,
+        include_in_legend: bool,
     ) -> None:
         """Draw an optional lower/upper confidence band for a series."""
         if not series.lower_column or not series.upper_column:
@@ -1565,7 +1594,11 @@ class PlotCanvas(QWidget):
             color=fill_color,
             alpha=series.fill_alpha,
             linewidth=0,
-            label=f"{series.label} confidence",
+            label=(
+                f"{series.label} confidence"
+                if include_in_legend and series.show_in_legend
+                else "_nolegend_"
+            ),
         )
 
     def _draw_empty_state(self, clear_axes: bool = True) -> None:
@@ -1588,6 +1621,30 @@ class PlotCanvas(QWidget):
             va="center",
             transform=self.axes.transAxes,
             color="0.45",
+        )
+
+    def _draw_error_state(self, message: str) -> None:
+        """Show a visible canvas explanation when every requested series fails."""
+        self._remove_right_axes()
+        self.axes.clear()
+        self.axes.set_xscale("linear")
+        self.axes.set_yscale("linear")
+        self.axes.set_xticks([])
+        self.axes.set_yticks([])
+        self.axes.grid(False)
+        self.axes.set_title("Plot could not be rendered")
+        clean_message = " ".join(str(message).split())
+        if len(clean_message) > 220:
+            clean_message = clean_message[:217] + "..."
+        self.axes.text(
+            0.5,
+            0.5,
+            clean_message,
+            ha="center",
+            va="center",
+            wrap=True,
+            transform=self.axes.transAxes,
+            color="tab:red",
         )
 
     def _remove_right_axes(self) -> None:
@@ -1631,6 +1688,7 @@ class PlotCanvas(QWidget):
         locators: list[PlotLocator],
         plotted_series_values: dict[int, tuple[pd.Series, pd.Series, PlotSeries]],
         plotted_surface_values: dict[int, _SurfaceValues],
+        include_in_legend: bool,
     ) -> tuple[list[str], list[LocatedPoint]]:
         """Draw locator markers and return interpolation summaries."""
         messages: list[str] = []
@@ -1639,7 +1697,7 @@ class PlotCanvas(QWidget):
         for locator_index, locator in enumerate(locators):
             surface_values = plotted_surface_values.get(locator.series_index)
             if surface_values is not None:
-                if locator.y_value is None:
+                if locator.x_value is None or locator.y_value is None:
                     messages.append(
                         f"{surface_values.series.label}: locator needs both X and Y coordinates"
                     )
@@ -1667,6 +1725,8 @@ class PlotCanvas(QWidget):
                     label=(
                         f"{surface_values.series.label} @ "
                         f"x={locator.x_value:g}, y={locator.y_value:g}"
+                        if include_in_legend
+                        else "_nolegend_"
                     ),
                 )
                 located_points.append(
@@ -1688,13 +1748,53 @@ class PlotCanvas(QWidget):
                 continue
 
             x_values, y_values, series = series_values
+            target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
+            if locator.lookup_mode == "y_to_x":
+                if locator.y_value is None:
+                    messages.append(f"{series.label}: locator needs a Y value")
+                    continue
+                try:
+                    x_matches = self._interpolate_x_values(x_values, y_values, locator.y_value)
+                except ValueError as exc:
+                    messages.append(f"{series.label}: {exc}")
+                    continue
+                target_axes.scatter(
+                    x_matches,
+                    np.full(len(x_matches), locator.y_value, dtype=float),
+                    marker=locator.marker,
+                    s=locator.size,
+                    color=locator.color,
+                    edgecolors="black",
+                    linewidths=0.7,
+                    zorder=5,
+                    label=(
+                        f"{series.label} @ y={locator.y_value:g}"
+                        if include_in_legend
+                        else "_nolegend_"
+                    ),
+                )
+                located_points.extend(
+                    LocatedPoint(
+                        locator_index=locator_index,
+                        series_index=locator.series_index,
+                        series_label=series.label,
+                        x_value=x_match,
+                        y_value=locator.y_value,
+                        y_axis=series.y_axis,
+                    )
+                    for x_match in x_matches
+                )
+                continue
+
+            if locator.x_value is None:
+                messages.append(f"{series.label}: locator needs an X value")
+                continue
             try:
                 y_value = self._interpolate_y(x_values, y_values, locator.x_value)
             except ValueError as exc:
                 messages.append(f"{series.label}: {exc}")
                 continue
 
-            target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
             target_axes.scatter(
                 [locator.x_value],
                 [y_value],
@@ -1704,7 +1804,11 @@ class PlotCanvas(QWidget):
                 edgecolors="black",
                 linewidths=0.7,
                 zorder=5,
-                label=f"{series.label} @ x={locator.x_value:g}",
+                label=(
+                    f"{series.label} @ x={locator.x_value:g}"
+                    if include_in_legend
+                    else "_nolegend_"
+                ),
             )
             located_points.append(
                 LocatedPoint(
@@ -1739,6 +1843,49 @@ class PlotCanvas(QWidget):
 
         return float(np.interp(x_value, unique_x, unique_y))
 
+    @staticmethod
+    def _interpolate_x_values(
+        x_values: pd.Series,
+        y_values: pd.Series,
+        y_value: float,
+    ) -> list[float]:
+        """Return every piecewise-linear X intersection for a requested Y value."""
+        points = pd.DataFrame({"x": x_values.to_numpy(), "y": y_values.to_numpy()}).dropna()
+        if len(points) < 2:
+            raise ValueError("locator needs at least two numeric points for interpolation")
+
+        x_array = points["x"].to_numpy(dtype=float)
+        y_array = points["y"].to_numpy(dtype=float)
+        y_min = float(np.min(y_array))
+        y_max = float(np.max(y_array))
+        if y_value < y_min or y_value > y_max:
+            raise ValueError(f"locator y={y_value:g} is outside the data range [{y_min:g}, {y_max:g}]")
+
+        scale = max(1.0, abs(y_min), abs(y_max), abs(y_value))
+        tolerance = np.finfo(float).eps * scale * 32.0
+        matches: list[float] = []
+        plateau_found = False
+        for index in range(len(points) - 1):
+            x0, x1 = x_array[index], x_array[index + 1]
+            y0, y1 = y_array[index], y_array[index + 1]
+            if abs(y0 - y_value) <= tolerance and abs(y1 - y_value) <= tolerance:
+                plateau_found = True
+                continue
+            if y_value < min(y0, y1) - tolerance or y_value > max(y0, y1) + tolerance:
+                continue
+            fraction = (y_value - y0) / (y1 - y0)
+            x_match = float(x0 + fraction * (x1 - x0))
+            if not any(np.isclose(x_match, existing, rtol=1.0e-10, atol=1.0e-12) for existing in matches):
+                matches.append(x_match)
+
+        if plateau_found:
+            raise ValueError(
+                f"locator y={y_value:g} overlaps a horizontal segment, so X is not unique"
+            )
+        if not matches:
+            raise ValueError(f"locator y={y_value:g} does not cross a connected plot segment")
+        return matches
+
     def _interpolate_z(
         self,
         surface_values: _SurfaceValues,
@@ -1766,9 +1913,13 @@ class PlotCanvas(QWidget):
             raise ValueError("locator coordinate is outside the interpolation hull")
         return z_value
 
-    def _draw_legend(self, legend_enabled: bool, legend_position: str) -> None:
-        """Draw a combined legend for left and right axes when requested."""
-        if not legend_enabled:
+    def _draw_legend(
+        self,
+        settings: LegendSettings,
+        series_list: list[PlotSeries],
+    ) -> None:
+        """Draw a configurable, ordered legend combined across both Y axes."""
+        if not settings.enabled:
             return
 
         handles, labels = self.axes.get_legend_handles_labels()
@@ -1777,5 +1928,66 @@ class PlotCanvas(QWidget):
             handles.extend(right_handles)
             labels.extend(right_labels)
 
-        if handles:
-            self.axes.legend(handles, labels, loc=legend_position)
+        if not handles:
+            return
+
+        unique_entries: list[tuple[object, str, int]] = []
+        seen_labels: set[str] = set()
+        for source_index, (handle, label) in enumerate(zip(handles, labels, strict=False)):
+            if not label or label.startswith("_") or label in seen_labels:
+                continue
+            seen_labels.add(label)
+            unique_entries.append((handle, label, source_index))
+
+        series_order = {series.label: index for index, series in enumerate(series_list)}
+
+        def entry_key(entry: tuple[object, str, int]) -> tuple[int, int, int]:
+            _handle, label, source_index = entry
+            for series_label, series_index in series_order.items():
+                if label == series_label:
+                    return series_index, 0, source_index
+                if label == f"{series_label} confidence":
+                    return series_index, 1, source_index
+                if label.startswith(f"{series_label} @"):
+                    return series_index, 2, source_index
+            return len(series_order), 3, source_index
+
+        unique_entries.sort(key=entry_key)
+        ordered_handles = [entry[0] for entry in unique_entries]
+        ordered_labels = [entry[1] for entry in unique_entries]
+        location, bbox_anchor = self._legend_placement(settings.location)
+        if settings.location == "outside right":
+            self.figure.subplots_adjust(right=0.75)
+        elif settings.location == "outside top":
+            self.figure.subplots_adjust(top=0.76)
+        elif settings.location == "outside bottom":
+            self.figure.subplots_adjust(bottom=0.24)
+
+        legend_kwargs: dict[str, object] = {
+            "loc": location,
+            "fontsize": settings.font_size,
+            "title": settings.title or None,
+            "title_fontsize": settings.title_font_size,
+            "ncols": settings.columns,
+            "frameon": settings.frame_enabled,
+            "markerscale": settings.marker_scale,
+            "handlelength": settings.handle_length,
+        }
+        if settings.frame_enabled:
+            legend_kwargs["framealpha"] = settings.frame_alpha
+        if bbox_anchor is not None:
+            legend_kwargs["bbox_to_anchor"] = bbox_anchor
+        self.axes.legend(ordered_handles, ordered_labels, **legend_kwargs)
+
+    @staticmethod
+    def _legend_placement(
+        location: str,
+    ) -> tuple[str, tuple[float, float] | None]:
+        """Translate inspector outside presets into Matplotlib placement arguments."""
+        if location == "outside right":
+            return "center left", (1.02, 0.5)
+        if location == "outside top":
+            return "lower center", (0.5, 1.16)
+        if location == "outside bottom":
+            return "upper center", (0.5, -0.18)
+        return location, None

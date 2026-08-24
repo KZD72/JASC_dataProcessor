@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import zipfile
-from io import StringIO
+from io import TextIOWrapper
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +19,7 @@ from models.fit_functions import CustomFitModel
 PROJECT_EXTENSION = ".jasc"
 _META_FILENAME = "project.json"
 _DATASETS_DIR = "datasets"
-_PROJECT_VERSION = 1
+_PROJECT_VERSION = 2
 
 
 def save_project(workspace: Workspace, path: str | Path) -> None:
@@ -39,9 +39,9 @@ def save_project(workspace: Workspace, path: str | Path) -> None:
     with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for index, dataset in enumerate(datasets):
             csv_name = f"{_DATASETS_DIR}/{index:04d}_{_sanitise_filename(dataset.name)}.csv"
-            csv_buffer = StringIO()
-            dataset.frame.to_csv(csv_buffer, index=False, encoding="utf-8")
-            archive.writestr(csv_name, csv_buffer.getvalue())
+            with archive.open(csv_name, "w") as raw_csv:
+                with TextIOWrapper(raw_csv, encoding="utf-8", newline="") as csv_stream:
+                    dataset.frame.to_csv(csv_stream, index=False)
 
             metadata["datasets"].append({
                 "name": dataset.name,
@@ -87,8 +87,9 @@ def load_project(path: str | Path) -> Workspace:
             )
 
         for entry in metadata.get("datasets", []):
-            csv_data = archive.read(entry["csv_file"]).decode("utf-8")
-            frame = pd.read_csv(StringIO(csv_data))
+            with archive.open(entry["csv_file"], "r") as raw_csv:
+                with TextIOWrapper(raw_csv, encoding="utf-8", newline="") as csv_stream:
+                    frame = pd.read_csv(csv_stream)
             source_path = entry.get("source_path")
 
             dataset = workspace.add_dataset(
@@ -96,6 +97,7 @@ def load_project(path: str | Path) -> Workspace:
                 frame,
                 source_path=source_path,
                 backend=entry.get("backend", "pandas"),
+                copy_frame=False,
             )
 
             formulas = entry.get("formulas")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, fields, replace
 
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -27,7 +27,15 @@ from PySide6.QtWidgets import (
 )
 
 from core.workspace import Dataset, Workspace
-from models.plot_types import plot_type_label
+from models.plot_settings import (
+    PLOT_STATE_VERSION,
+    AxisSettings,
+    FigureSettings,
+    LegendSettings,
+    PlotSettings,
+    StyleSettings,
+)
+from models.plot_types import PLOT_TYPES, plot_type_label
 from ui.plot_canvas import SCIENCEPLOTS_AVAILABLE, LocatedPoint, PlotCanvas, PlotLocator, PlotSeries
 
 _LINE_LABELS: dict[str, str] = {
@@ -96,6 +104,8 @@ class PlotTab(QWidget):
     save_plot_requested = Signal()
     load_plot_requested = Signal()
     remove_plot_requested = Signal()
+    new_plot_requested = Signal()
+    plot_draft_replaced = Signal()
     options_visibility_changed = Signal(bool)
 
     def __init__(
@@ -111,6 +121,13 @@ class PlotTab(QWidget):
         self._plot_series: list[PlotSeries] = []
         self._plot_locators: list[PlotLocator] = []
         self._auto_axis_labels: dict[str, str] = {"x": "", "y": "", "right_y": ""}
+        self._loading_plot_settings = False
+        self._loading_series_controls = False
+        self._preview_dirty = False
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(200)
+        self._preview_timer.timeout.connect(self._render_scheduled_preview)
         self._plot_canvas = PlotCanvas()
         self._build_ui()
 
@@ -129,6 +146,28 @@ class PlotTab(QWidget):
         self._series_list.clear()
         self._locator_list.clear()
         self._refresh_locator_series_combo()
+        self._plot_canvas.clear_plot()
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
+        self.plot_rendered.emit()
+
+    def reset_plot_draft(self) -> None:
+        """Start a completely fresh unsaved plot using application defaults."""
+        self._plot_series.clear()
+        self._plot_locators.clear()
+        self._series_list.clear()
+        self._locator_list.clear()
+        self._refresh_locator_series_combo()
+        self._apply_plot_settings({})
+        self._series_label_edit.clear()
+        self._series_legend_checkbox.setChecked(True)
+        self._set_combo_data(self._plot_family_combo, "xy")
+        self._refresh_plot_type_combo("line")
+        self._set_combo_data(self._y_axis_combo, "left")
+        self._set_combo_data(self._line_style_combo, "-")
+        self._set_combo_data(self._marker_combo, "")
+        self._set_combo_data(self._color_combo, "")
+        self._line_width_spin.setValue(1.8)
+        self._marker_size_spin.setValue(6.0)
         self._plot_canvas.clear_plot()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self.plot_rendered.emit()
@@ -223,33 +262,10 @@ class PlotTab(QWidget):
     def current_plot_state(self) -> dict[str, object]:
         """Return the current plot definition as JSON-friendly state."""
         return {
-            "version": 1,
+            "version": PLOT_STATE_VERSION,
             "series": [asdict(series) for series in self._plot_series],
             "locators": [asdict(locator) for locator in self._plot_locators],
-            "settings": {
-                "title": self._title_edit.text(),
-                "x_label": self._x_label_edit.text(),
-                "y_label": self._y_label_edit.text(),
-                "right_y_label": self._right_y_label_edit.text(),
-                "x_scale": self._x_scale_combo.currentText(),
-                "y_scale": self._y_scale_combo.currentText(),
-                "right_y_scale": self._right_y_scale_combo.currentText(),
-                "x_min": self._x_min_edit.text(),
-                "x_max": self._x_max_edit.text(),
-                "y_min": self._y_min_edit.text(),
-                "y_max": self._y_max_edit.text(),
-                "right_y_min": self._right_y_min_edit.text(),
-                "right_y_max": self._right_y_max_edit.text(),
-                "grid_enabled": self._grid_checkbox.isChecked(),
-                "legend_enabled": self._legend_checkbox.isChecked(),
-                "legend_position": self._legend_pos_combo.currentText(),
-                "figure_width": self._width_spin.value(),
-                "figure_height": self._height_spin.value(),
-                "plot_style_preset": str(self._style_preset_combo.currentData() or ""),
-                "plot_style_cycle": str(self._style_cycle_combo.currentData() or ""),
-                "plot_style_use_latex": self._style_latex_checkbox.isChecked(),
-                "plot_style_custom": self._style_custom_edit.text(),
-            },
+            "settings": self._settings_from_controls().to_state(),
         }
 
     def options_widget(self) -> QWidget:
@@ -350,6 +366,7 @@ class PlotTab(QWidget):
         self._select_first_series_for_editing()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self._render_plot(silent_if_empty=True)
+        self.plot_draft_replaced.emit()
 
     def queue_analysis_plot(
         self,
@@ -396,6 +413,7 @@ class PlotTab(QWidget):
         self.refresh_controls(dataset.name)
         self._select_first_series_for_editing()
         self._render_plot(silent_if_empty=True)
+        self.plot_draft_replaced.emit()
 
     def queue_single_series_plot(
         self,
@@ -428,6 +446,7 @@ class PlotTab(QWidget):
         self.refresh_controls(dataset.name)
         self._select_first_series_for_editing()
         self._render_plot(silent_if_empty=True)
+        self.plot_draft_replaced.emit()
 
     def queue_plot_series(
         self,
@@ -452,6 +471,7 @@ class PlotTab(QWidget):
         self._select_first_series_for_editing()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self._render_plot(silent_if_empty=True)
+        self.plot_draft_replaced.emit()
 
     # -- UI construction ----------------------------------------------------
 
@@ -493,6 +513,8 @@ class PlotTab(QWidget):
             self._color_combo.addItem(label, data)
 
         self._series_label_edit = QLineEdit()
+        self._series_legend_checkbox = QCheckBox("Show this series in legend")
+        self._series_legend_checkbox.setChecked(True)
 
         self._line_width_spin = QDoubleSpinBox()
         self._line_width_spin.setRange(0.0, 10.0)
@@ -582,6 +604,9 @@ class PlotTab(QWidget):
         self._grid_checkbox.setChecked(True)
 
         self._locator_series_combo = QComboBox()
+        self._locator_mode_combo = QComboBox()
+        self._locator_mode_combo.addItem("Find Y from X", "x_to_y")
+        self._locator_mode_combo.addItem("Find X from Y", "y_to_x")
         self._locator_x_edit = QLineEdit()
         self._locator_x_edit.setPlaceholderText("X value")
         self._locator_y_edit = QLineEdit()
@@ -607,10 +632,56 @@ class PlotTab(QWidget):
         self._legend_checkbox = QCheckBox("Show Legend")
         self._legend_checkbox.setChecked(True)
         self._legend_pos_combo = QComboBox()
-        self._legend_pos_combo.addItems([
-            "best", "upper right", "upper left", "lower left", "lower right", 
-            "right", "center left", "center right", "lower center", "upper center", "center"
-        ])
+        for label, location in (
+            ("Automatic", "best"),
+            ("Upper right", "upper right"),
+            ("Upper left", "upper left"),
+            ("Lower left", "lower left"),
+            ("Lower right", "lower right"),
+            ("Center right", "center right"),
+            ("Center left", "center left"),
+            ("Upper center", "upper center"),
+            ("Lower center", "lower center"),
+            ("Center", "center"),
+            ("Outside right", "outside right"),
+            ("Outside top", "outside top"),
+            ("Outside bottom", "outside bottom"),
+        ):
+            self._legend_pos_combo.addItem(label, location)
+
+        self._legend_font_size_spin = QDoubleSpinBox()
+        self._legend_font_size_spin.setRange(5.0, 72.0)
+        self._legend_font_size_spin.setSingleStep(0.5)
+        self._legend_font_size_spin.setValue(10.0)
+        self._legend_font_size_spin.setSuffix(" pt")
+        self._legend_title_edit = QLineEdit()
+        self._legend_title_edit.setPlaceholderText("Optional")
+        self._legend_title_size_spin = QDoubleSpinBox()
+        self._legend_title_size_spin.setRange(5.0, 72.0)
+        self._legend_title_size_spin.setSingleStep(0.5)
+        self._legend_title_size_spin.setValue(10.0)
+        self._legend_title_size_spin.setSuffix(" pt")
+        self._legend_columns_spin = QSpinBox()
+        self._legend_columns_spin.setRange(1, 20)
+        self._legend_columns_spin.setValue(1)
+        self._legend_frame_checkbox = QCheckBox("Show frame")
+        self._legend_frame_checkbox.setChecked(True)
+        self._legend_frame_alpha_spin = QDoubleSpinBox()
+        self._legend_frame_alpha_spin.setRange(0.0, 1.0)
+        self._legend_frame_alpha_spin.setSingleStep(0.05)
+        self._legend_frame_alpha_spin.setValue(0.8)
+        self._legend_marker_scale_spin = QDoubleSpinBox()
+        self._legend_marker_scale_spin.setRange(0.1, 10.0)
+        self._legend_marker_scale_spin.setSingleStep(0.1)
+        self._legend_marker_scale_spin.setValue(1.0)
+        self._legend_handle_length_spin = QDoubleSpinBox()
+        self._legend_handle_length_spin.setRange(0.0, 20.0)
+        self._legend_handle_length_spin.setSingleStep(0.25)
+        self._legend_handle_length_spin.setValue(2.0)
+        self._legend_include_locators_checkbox = QCheckBox("Include locator markers")
+        self._legend_include_locators_checkbox.setChecked(True)
+        self._legend_include_bands_checkbox = QCheckBox("Include confidence bands")
+        self._legend_include_bands_checkbox.setChecked(True)
 
         self._width_spin = QDoubleSpinBox()
         self._width_spin.setRange(3.0, 20.0)
@@ -624,6 +695,11 @@ class PlotTab(QWidget):
         self._height_spin.setValue(4.8)
         self._height_spin.setSuffix(" in")
 
+        self._auto_preview_checkbox = QCheckBox("Auto preview")
+        self._auto_preview_checkbox.setChecked(True)
+        self._preview_status_label = QLabel("Preview current")
+        self._preview_status_label.setObjectName("MutedLabel")
+
         self._series_list = QListWidget()
         self._series_list.itemSelectionChanged.connect(self._handle_series_selection_changed)
 
@@ -632,19 +708,19 @@ class PlotTab(QWidget):
             lambda: self._set_controls_enabled(bool(self._workspace.dataset_names()))
         )
 
-        add_btn = QPushButton("Add Series")
+        add_btn = QPushButton("Add as New")
         add_btn.clicked.connect(self._add_series)
         self._add_series_button = add_btn
 
-        update_btn = QPushButton("Update Series")
+        update_btn = QPushButton("Apply to Selected")
         update_btn.clicked.connect(self._update_selected_series)
         self._update_series_button = update_btn
 
-        rm_btn = QPushButton("Remove Series")
+        rm_btn = QPushButton("Remove Selected")
         rm_btn.clicked.connect(self._remove_selected_series)
         self._remove_series_button = rm_btn
 
-        clr_btn = QPushButton("Clear")
+        clr_btn = QPushButton("Clear All")
         clr_btn.clicked.connect(self._clear_series)
         self._clear_series_button = clr_btn
 
@@ -687,6 +763,7 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "y_error", "Y error", self._y_err_column_combo)
         self._add_series_row(sf, "y_axis", "Y axis", self._y_axis_combo)
         self._add_series_row(sf, "label", "Label", self._series_label_edit)
+        self._add_series_row(sf, "show_in_legend", None, self._series_legend_checkbox)
         self._add_series_row(sf, "line", "Line", self._line_style_combo)
         self._add_series_row(sf, "line_width", "Line width", self._line_width_spin)
         self._add_series_row(sf, "marker", "Marker", self._marker_combo)
@@ -698,8 +775,15 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "distribution_options", None, self._distribution_options_panel)
         self._add_series_row(sf, "surface_options", None, self._surface_options_panel)
         self._add_series_row(sf, "voronoi_options", None, self._voronoi_options_panel)
-        sb = QHBoxLayout()
-        sb.addWidget(add_btn); sb.addWidget(update_btn); sb.addWidget(rm_btn); sb.addWidget(clr_btn)
+        sb = QVBoxLayout()
+        series_add_row = QHBoxLayout()
+        series_add_row.addWidget(add_btn)
+        series_add_row.addWidget(update_btn)
+        series_remove_row = QHBoxLayout()
+        series_remove_row.addWidget(rm_btn)
+        series_remove_row.addWidget(clr_btn)
+        sb.addLayout(series_add_row)
+        sb.addLayout(series_remove_row)
         sf.addRow(sb)
         sf.addRow("Queued", self._series_list)
 
@@ -720,13 +804,34 @@ class PlotTab(QWidget):
         af.addRow("", self._style_latex_checkbox)
         af.addRow("Custom styles", self._style_custom_edit)
         af.addRow("", self._grid_checkbox)
-        af.addRow(self._legend_checkbox, self._legend_pos_combo)
         af.addRow("Width", self._width_spin)
         af.addRow("Height", self._height_spin)
+
+        legend_group = QGroupBox("Legend")
+        legend_form = QFormLayout(legend_group)
+        legend_form.addRow("", self._legend_checkbox)
+        legend_form.addRow("Location", self._legend_pos_combo)
+        legend_form.addRow("Text size", self._legend_font_size_spin)
+        legend_form.addRow("Title", self._legend_title_edit)
+        legend_form.addRow("Title size", self._legend_title_size_spin)
+        legend_form.addRow("Columns", self._legend_columns_spin)
+        legend_form.addRow("", self._legend_frame_checkbox)
+        legend_form.addRow("Frame opacity", self._legend_frame_alpha_spin)
+        legend_form.addRow("Marker scale", self._legend_marker_scale_spin)
+        legend_form.addRow("Handle length", self._legend_handle_length_spin)
+        legend_form.addRow("", self._legend_include_locators_checkbox)
+        legend_form.addRow("", self._legend_include_bands_checkbox)
+        legend_help = QLabel(
+            "Legend entries follow queued-series order across left and right axes. "
+            "Outside positions reserve figure space for export."
+        )
+        legend_help.setWordWrap(True)
+        legend_form.addRow("", legend_help)
 
         locator_group = QGroupBox("Data Location")
         lf = QFormLayout(locator_group)
         lf.addRow("Series", self._locator_series_combo)
+        lf.addRow("Lookup", self._locator_mode_combo)
         lf.addRow("X value", self._locator_x_edit)
         lf.addRow("Y value", self._locator_y_edit)
         lf.addRow("Marker", self._locator_marker_combo)
@@ -740,18 +845,25 @@ class PlotTab(QWidget):
         ctrl_tabs = QTabWidget()
         ctrl_tabs.addTab(series_group, "Series")
         ctrl_tabs.addTab(axes_group, "Axes")
+        ctrl_tabs.addTab(legend_group, "Legend")
         ctrl_tabs.addTab(locator_group, "Locator")
 
         ctrl_panel = QWidget()
-        ctrl_panel.setMinimumWidth(420)
+        ctrl_panel.setMinimumWidth(330)
         cl = QVBoxLayout(ctrl_panel)
         cl.addWidget(ctrl_tabs)
         cl.addStretch(1)
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(self._auto_preview_checkbox)
+        preview_row.addStretch(1)
+        preview_row.addWidget(self._preview_status_label)
+        cl.addLayout(preview_row)
+        self._render_button.setText("Apply")
         cl.addWidget(self._render_button)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(440)
+        scroll.setMinimumWidth(350)
         scroll.setWidget(ctrl_panel)
         self._plot_options_scroll = scroll
 
@@ -771,6 +883,8 @@ class PlotTab(QWidget):
 
         self._save_plot_button = QPushButton("Save Plot")
         self._save_plot_button.clicked.connect(self.save_plot_requested.emit)
+        self._new_plot_button = QPushButton("New Plot")
+        self._new_plot_button.clicked.connect(self.new_plot_requested.emit)
         self._load_plot_button = QPushButton("Load Selected")
         self._load_plot_button.clicked.connect(self.load_plot_requested.emit)
         self._remove_plot_button = QPushButton("Remove Saved")
@@ -781,6 +895,7 @@ class PlotTab(QWidget):
         top_row = QHBoxLayout()
         top_row.addWidget(self._active_plot_label)
         top_row.addStretch(1)
+        top_row.addWidget(self._new_plot_button)
         top_row.addWidget(self._save_plot_button)
         top_row.addWidget(self._load_plot_button)
         top_row.addWidget(self._remove_plot_button)
@@ -819,11 +934,15 @@ class PlotTab(QWidget):
         )
         self._plot_family_combo.currentIndexChanged.connect(self._handle_plot_family_changed)
         self._plot_type_combo.currentIndexChanged.connect(self._apply_plot_type_defaults)
-        self._style_preset_combo.currentIndexChanged.connect(self._render_plot_if_possible)
-        self._style_cycle_combo.currentIndexChanged.connect(self._render_plot_if_possible)
-        self._style_latex_checkbox.toggled.connect(self._render_plot_if_possible)
-        self._style_custom_edit.editingFinished.connect(self._render_plot_if_possible)
+        self._locator_series_combo.currentIndexChanged.connect(self._update_locator_mode_controls)
+        self._locator_mode_combo.currentIndexChanged.connect(self._update_locator_mode_controls)
         self._connect_axis_label_prefill_signals()
+        self._connect_series_editor_signals()
+        self._connect_global_preview_signals()
+        self._legend_checkbox.toggled.connect(self._update_legend_controls_enabled)
+        self._legend_frame_checkbox.toggled.connect(self._update_legend_controls_enabled)
+        self._auto_preview_checkbox.toggled.connect(self._handle_auto_preview_toggled)
+        self._update_legend_controls_enabled()
         self._update_plot_type_option_visibility()
         self.refresh_controls()
 
@@ -951,6 +1070,152 @@ class PlotTab(QWidget):
             self._prefill_axis_labels_from_plot_context
         )
 
+    def _connect_global_preview_signals(self) -> None:
+        """Debounce redraws for global appearance controls."""
+        for combo in (
+            self._x_scale_combo,
+            self._y_scale_combo,
+            self._right_y_scale_combo,
+            self._style_preset_combo,
+            self._style_cycle_combo,
+            self._legend_pos_combo,
+        ):
+            combo.currentIndexChanged.connect(self._schedule_preview)
+        for edit in (
+            self._title_edit,
+            self._x_label_edit,
+            self._y_label_edit,
+            self._right_y_label_edit,
+            self._x_min_edit,
+            self._x_max_edit,
+            self._y_min_edit,
+            self._y_max_edit,
+            self._right_y_min_edit,
+            self._right_y_max_edit,
+            self._style_custom_edit,
+            self._legend_title_edit,
+        ):
+            edit.textChanged.connect(self._schedule_preview)
+        for checkbox in (
+            self._grid_checkbox,
+            self._style_latex_checkbox,
+            self._legend_checkbox,
+            self._legend_frame_checkbox,
+            self._legend_include_locators_checkbox,
+            self._legend_include_bands_checkbox,
+        ):
+            checkbox.toggled.connect(self._schedule_preview)
+        for spin in (
+            self._width_spin,
+            self._height_spin,
+            self._legend_font_size_spin,
+            self._legend_title_size_spin,
+            self._legend_columns_spin,
+            self._legend_frame_alpha_spin,
+            self._legend_marker_scale_spin,
+            self._legend_handle_length_spin,
+        ):
+            spin.valueChanged.connect(self._schedule_preview)
+
+    def _connect_series_editor_signals(self) -> None:
+        """Apply selected-series editor changes directly to queued state."""
+        for combo in (
+            self._plot_family_combo,
+            self._plot_type_combo,
+            self._x_dataset_combo,
+            self._x_column_combo,
+            self._x_err_column_combo,
+            self._y_dataset_combo,
+            self._y_column_combo,
+            self._y_err_column_combo,
+            self._z_dataset_combo,
+            self._z_column_combo,
+            self._y_axis_combo,
+            self._line_style_combo,
+            self._marker_combo,
+            self._color_combo,
+            self._interpolation_method_combo,
+            self._voronoi_shape_combo,
+        ):
+            combo.currentIndexChanged.connect(self._handle_series_editor_changed)
+        self._series_label_edit.textChanged.connect(self._handle_series_editor_changed)
+        for spin in (
+            self._line_width_spin,
+            self._marker_size_spin,
+            self._bar_width_spin,
+            self._fill_alpha_spin,
+            self._histogram_bins_spin,
+            self._surface_resolution_spin,
+        ):
+            spin.valueChanged.connect(self._handle_series_editor_changed)
+        for checkbox in (
+            self._series_legend_checkbox,
+            self._histogram_density_checkbox,
+            self._histogram_cumulative_checkbox,
+            self._distribution_mean_checkbox,
+            self._distribution_median_checkbox,
+            self._distribution_outliers_checkbox,
+        ):
+            checkbox.toggled.connect(self._handle_series_editor_changed)
+        self._distribution_columns_list.itemSelectionChanged.connect(
+            self._handle_series_editor_changed
+        )
+
+    def _handle_series_editor_changed(self, _value: object = None) -> None:
+        """Commit controls to the selected queued series and refresh its live preview."""
+        if self._loading_series_controls:
+            return
+        row = self._selected_series_row()
+        if row is None or not 0 <= row < len(self._plot_series):
+            return
+        self._plot_series[row] = self._series_from_controls()
+        item = self._series_list.item(row)
+        if item is not None:
+            item.setText(self._series_text(self._plot_series[row]))
+        self._refresh_locator_series_combo()
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
+        self._schedule_preview()
+
+    def _schedule_preview(self, _value: object = None) -> None:
+        """Mark the canvas stale and schedule one redraw when live preview is enabled."""
+        if self._loading_plot_settings or not self._plot_series:
+            return
+        self._preview_dirty = True
+        self._preview_status_label.setText("Preview out of date")
+        if self._auto_preview_checkbox.isChecked():
+            self._preview_status_label.setText("Preview pending")
+            self._preview_timer.start()
+
+    def _render_scheduled_preview(self) -> None:
+        """Render the latest coalesced appearance state."""
+        if self._auto_preview_checkbox.isChecked() and self._plot_series:
+            self._render_plot(silent_if_empty=True, show_validation_messages=False)
+
+    def _handle_auto_preview_toggled(self, enabled: bool) -> None:
+        """Render pending changes when automatic preview is switched back on."""
+        if enabled and self._preview_dirty:
+            self._schedule_preview()
+
+    def _update_legend_controls_enabled(self, _checked: bool = False) -> None:
+        """Enable legend detail fields only when their parent option is active."""
+        enabled = self._legend_checkbox.isChecked()
+        for widget in (
+            self._legend_pos_combo,
+            self._legend_font_size_spin,
+            self._legend_title_edit,
+            self._legend_title_size_spin,
+            self._legend_columns_spin,
+            self._legend_frame_checkbox,
+            self._legend_marker_scale_spin,
+            self._legend_handle_length_spin,
+            self._legend_include_locators_checkbox,
+            self._legend_include_bands_checkbox,
+        ):
+            widget.setEnabled(enabled)
+        self._legend_frame_alpha_spin.setEnabled(
+            enabled and self._legend_frame_checkbox.isChecked()
+        )
+
     def _refresh_plot_type_combo(self, preferred: str | None = None) -> None:
         """Populate the subtype selector with plot types from the selected family."""
         family_key = str(self._plot_family_combo.currentData() or "xy")
@@ -963,10 +1228,19 @@ class PlotTab(QWidget):
         self._plot_type_combo.clear()
         for plot_type_key in plot_types:
             self._plot_type_combo.addItem(plot_type_label(plot_type_key), plot_type_key)
+            plot_type = PLOT_TYPES.get(plot_type_key)
+            if plot_type is not None:
+                self._plot_type_combo.setItemData(
+                    self._plot_type_combo.count() - 1,
+                    plot_type.description,
+                    Qt.ToolTipRole,
+                )
         index = self._plot_type_combo.findData(selected)
         if index >= 0:
             self._plot_type_combo.setCurrentIndex(index)
         self._plot_type_combo.blockSignals(False)
+        current_type = PLOT_TYPES.get(str(self._plot_type_combo.currentData() or ""))
+        self._plot_type_combo.setToolTip(current_type.description if current_type else "")
 
     def _handle_plot_family_changed(self, _index: int = 0) -> None:
         """Refresh subtype choices after changing the plot family."""
@@ -1169,60 +1443,119 @@ class PlotTab(QWidget):
             clean_state["grid_resolution"] = 120
         return PlotSeries(**clean_state)
 
-    def _plot_locator_from_state(self, state: dict[str, object]) -> PlotLocator:
+    @staticmethod
+    def _plot_locator_from_state(state: dict[str, object]) -> PlotLocator:
         """Deserialize one saved locator dictionary into a PlotLocator."""
         clean_state = {key: value for key, value in state.items() if key in _PLOT_LOCATOR_FIELDS}
-        if clean_state.get("y_value") in ("", None):
-            clean_state["y_value"] = None
-        elif "y_value" in clean_state:
-            try:
-                clean_state["y_value"] = float(clean_state["y_value"])
-            except (TypeError, ValueError):
-                clean_state["y_value"] = None
+        for key in ("x_value", "y_value"):
+            if clean_state.get(key) in ("", None):
+                clean_state[key] = None
+            elif key in clean_state:
+                try:
+                    clean_state[key] = float(clean_state[key])
+                except (TypeError, ValueError):
+                    clean_state[key] = None
+        if clean_state.get("lookup_mode") not in {"x_to_y", "y_to_x", "xy_to_z"}:
+            clean_state["lookup_mode"] = "x_to_y"
         return PlotLocator(**clean_state)
 
     def _apply_plot_settings(self, state: object) -> None:
         """Apply saved axis, legend, range, and figure settings."""
-        if not isinstance(state, dict):
-            state = {}
-
-        self._title_edit.setText(self._setting_text(state, "title"))
-        self._x_label_edit.setText(self._setting_text(state, "x_label"))
-        self._y_label_edit.setText(self._setting_text(state, "y_label"))
-        self._right_y_label_edit.setText(self._setting_text(state, "right_y_label"))
-        self._set_combo_text(self._x_scale_combo, str(state.get("x_scale", "linear")))
-        self._set_combo_text(self._y_scale_combo, str(state.get("y_scale", "linear")))
-        self._set_combo_text(self._right_y_scale_combo, str(state.get("right_y_scale", "linear")))
-        self._x_min_edit.setText(self._setting_text(state, "x_min"))
-        self._x_max_edit.setText(self._setting_text(state, "x_max"))
-        self._y_min_edit.setText(self._setting_text(state, "y_min"))
-        self._y_max_edit.setText(self._setting_text(state, "y_max"))
-        self._right_y_min_edit.setText(self._setting_text(state, "right_y_min"))
-        self._right_y_max_edit.setText(self._setting_text(state, "right_y_max"))
-        self._grid_checkbox.setChecked(bool(state.get("grid_enabled", True)))
-        self._legend_checkbox.setChecked(bool(state.get("legend_enabled", True)))
-        self._set_combo_text(self._legend_pos_combo, str(state.get("legend_position", "best")))
-        self._width_spin.setValue(self._setting_float(state, "figure_width", 7.0))
-        self._height_spin.setValue(self._setting_float(state, "figure_height", 4.8))
-        self._set_combo_data(self._style_preset_combo, str(state.get("plot_style_preset", "")))
-        self._set_combo_data(self._style_cycle_combo, str(state.get("plot_style_cycle", "")))
-        self._style_latex_checkbox.setChecked(bool(state.get("plot_style_use_latex", False)))
-        self._style_custom_edit.setText(self._setting_text(state, "plot_style_custom"))
-        self._auto_axis_labels = {"x": "", "y": "", "right_y": ""}
-
-    @staticmethod
-    def _setting_text(state: dict[str, object], key: str) -> str:
-        """Return a text setting, treating None as blank."""
-        value = state.get(key, "")
-        return "" if value is None else str(value)
-
-    @staticmethod
-    def _setting_float(state: dict[str, object], key: str, fallback: float) -> float:
-        """Return a numeric setting with a fallback for malformed state."""
+        settings = PlotSettings.from_state(state)
+        self._preview_timer.stop()
+        self._loading_plot_settings = True
         try:
-            return float(state.get(key, fallback))
-        except (TypeError, ValueError):
-            return fallback
+            self._title_edit.setText(settings.title)
+            self._x_label_edit.setText(settings.x_axis.label)
+            self._y_label_edit.setText(settings.left_y_axis.label)
+            self._right_y_label_edit.setText(settings.right_y_axis.label)
+            self._set_combo_text(self._x_scale_combo, settings.x_axis.scale)
+            self._set_combo_text(self._y_scale_combo, settings.left_y_axis.scale)
+            self._set_combo_text(self._right_y_scale_combo, settings.right_y_axis.scale)
+            self._x_min_edit.setText(settings.x_axis.minimum)
+            self._x_max_edit.setText(settings.x_axis.maximum)
+            self._y_min_edit.setText(settings.left_y_axis.minimum)
+            self._y_max_edit.setText(settings.left_y_axis.maximum)
+            self._right_y_min_edit.setText(settings.right_y_axis.minimum)
+            self._right_y_max_edit.setText(settings.right_y_axis.maximum)
+            self._grid_checkbox.setChecked(settings.grid_enabled)
+            self._legend_checkbox.setChecked(settings.legend.enabled)
+            self._set_combo_data(self._legend_pos_combo, settings.legend.location)
+            self._legend_font_size_spin.setValue(settings.legend.font_size)
+            self._legend_title_edit.setText(settings.legend.title)
+            self._legend_title_size_spin.setValue(settings.legend.title_font_size)
+            self._legend_columns_spin.setValue(settings.legend.columns)
+            self._legend_frame_checkbox.setChecked(settings.legend.frame_enabled)
+            self._legend_frame_alpha_spin.setValue(settings.legend.frame_alpha)
+            self._legend_marker_scale_spin.setValue(settings.legend.marker_scale)
+            self._legend_handle_length_spin.setValue(settings.legend.handle_length)
+            self._legend_include_locators_checkbox.setChecked(
+                settings.legend.include_locators
+            )
+            self._legend_include_bands_checkbox.setChecked(
+                settings.legend.include_confidence_bands
+            )
+            self._width_spin.setValue(settings.figure.width)
+            self._height_spin.setValue(settings.figure.height)
+            self._set_combo_data(self._style_preset_combo, settings.style.preset)
+            self._set_combo_data(self._style_cycle_combo, settings.style.cycle)
+            self._style_latex_checkbox.setChecked(settings.style.use_latex)
+            self._style_custom_edit.setText(settings.style.custom)
+            self._auto_axis_labels = {"x": "", "y": "", "right_y": ""}
+            self._preview_dirty = False
+            self._preview_status_label.setText("Preview current")
+        finally:
+            self._loading_plot_settings = False
+        self._update_legend_controls_enabled()
+
+    def _settings_from_controls(self) -> PlotSettings:
+        """Return typed global settings from the current inspector controls."""
+        return PlotSettings(
+            title=self._title_edit.text(),
+            x_axis=AxisSettings(
+                label=self._x_label_edit.text(),
+                scale=self._x_scale_combo.currentText(),
+                minimum=self._x_min_edit.text(),
+                maximum=self._x_max_edit.text(),
+            ),
+            left_y_axis=AxisSettings(
+                label=self._y_label_edit.text(),
+                scale=self._y_scale_combo.currentText(),
+                minimum=self._y_min_edit.text(),
+                maximum=self._y_max_edit.text(),
+            ),
+            right_y_axis=AxisSettings(
+                label=self._right_y_label_edit.text(),
+                scale=self._right_y_scale_combo.currentText(),
+                minimum=self._right_y_min_edit.text(),
+                maximum=self._right_y_max_edit.text(),
+            ),
+            grid_enabled=self._grid_checkbox.isChecked(),
+            legend=LegendSettings(
+                enabled=self._legend_checkbox.isChecked(),
+                location=str(self._legend_pos_combo.currentData() or "best"),
+                font_size=self._legend_font_size_spin.value(),
+                title=self._legend_title_edit.text(),
+                title_font_size=self._legend_title_size_spin.value(),
+                columns=self._legend_columns_spin.value(),
+                frame_enabled=self._legend_frame_checkbox.isChecked(),
+                frame_alpha=self._legend_frame_alpha_spin.value(),
+                marker_scale=self._legend_marker_scale_spin.value(),
+                handle_length=self._legend_handle_length_spin.value(),
+                include_locators=self._legend_include_locators_checkbox.isChecked(),
+                include_confidence_bands=self._legend_include_bands_checkbox.isChecked(),
+            ),
+            figure=FigureSettings(
+                width=self._width_spin.value(),
+                height=self._height_spin.value(),
+            ),
+            style=StyleSettings(
+                preset=str(self._style_preset_combo.currentData() or ""),
+                cycle=str(self._style_cycle_combo.currentData() or ""),
+                use_latex=self._style_latex_checkbox.isChecked(),
+                custom=self._style_custom_edit.text(),
+            ),
+        )
 
     @staticmethod
     def _set_combo_text(combo: QComboBox, value: str) -> None:
@@ -1259,6 +1592,7 @@ class PlotTab(QWidget):
         series = self._series_from_controls()
         self._plot_series.append(series)
         self._series_list.addItem(self._series_text(series))
+        self._series_list.setCurrentRow(len(self._plot_series) - 1)
         self._refresh_locator_series_combo()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self._render_plot()
@@ -1293,6 +1627,7 @@ class PlotTab(QWidget):
                 else str(self._y_axis_combo.currentData() or "left")
             ),
             custom_label=self._series_label_edit.text().strip(),
+            show_in_legend=self._series_legend_checkbox.isChecked(),
             line_width=self._line_width_spin.value(),
             marker_size=self._marker_size_spin.value(),
             fill_alpha=self._fill_alpha_spin.value(),
@@ -1337,6 +1672,7 @@ class PlotTab(QWidget):
 
     def _load_series_controls(self, series: PlotSeries) -> None:
         """Populate series edit controls from a PlotSeries."""
+        self._loading_series_controls = True
         self._x_dataset_combo.setCurrentText(series.x_dataset)
         self._update_column_combo(self._x_dataset_combo, self._x_column_combo)
         self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo)
@@ -1360,6 +1696,7 @@ class PlotTab(QWidget):
         self._set_combo_data(self._plot_type_combo, series.plot_type)
         self._set_combo_data(self._y_axis_combo, series.y_axis)
         self._series_label_edit.setText(series.custom_label)
+        self._series_legend_checkbox.setChecked(series.show_in_legend)
         self._set_combo_data(self._line_style_combo, series.line_style)
         self._set_combo_data(self._marker_combo, series.marker)
         self._set_combo_data(self._color_combo, series.color)
@@ -1380,6 +1717,7 @@ class PlotTab(QWidget):
             self._normalized_voronoi_shape(series.voronoi_shape),
         )
         self._update_plot_type_option_visibility()
+        self._loading_series_controls = False
 
     def _selected_distribution_columns(self) -> list[str]:
         """Return selected distribution columns from the multi-select list."""
@@ -1415,6 +1753,10 @@ class PlotTab(QWidget):
     def _apply_plot_type_defaults(self) -> None:
         """Apply practical line/marker defaults when the user changes plot type."""
         plot_type = str(self._plot_type_combo.currentData() or "line")
+        plot_type_info = PLOT_TYPES.get(plot_type)
+        self._plot_type_combo.setToolTip(
+            plot_type_info.description if plot_type_info is not None else ""
+        )
         self._update_plot_type_option_visibility()
         if plot_type == "scatter":
             self._set_combo_data(self._line_style_combo, "")
@@ -1449,6 +1791,7 @@ class PlotTab(QWidget):
     def _update_plot_type_option_visibility(self) -> None:
         """Show only the option rows relevant to the selected plot type."""
         plot_type = str(self._plot_type_combo.currentData() or "line")
+        self._set_series_row_label("line_width", "Line width")
         x_y_types = {
             "line",
             "scatter",
@@ -1473,11 +1816,22 @@ class PlotTab(QWidget):
         self._set_series_row_visible("distribution_columns", plot_type in distribution_types)
         self._set_series_row_visible("y_axis", plot_type in {"line", "scatter", "line_marker", "errorbar", "bar", "area"})
         self._set_series_row_visible("line", plot_type in line_types)
-        self._set_series_row_visible("line_width", plot_type in line_types)
+        self._set_series_row_visible("line_width", plot_type in (line_types | {"violin"}))
         self._set_series_row_visible("marker", plot_type in marker_types)
         self._set_series_row_visible("marker_size", plot_type in marker_types)
+        self._set_series_row_visible(
+            "color",
+            plot_type not in (_SURFACE_PLOT_TYPES | _COMPOSITION_PLOT_TYPES),
+        )
+        self._set_series_row_visible(
+            "show_in_legend",
+            plot_type not in (_SURFACE_PLOT_TYPES | _COMPOSITION_PLOT_TYPES),
+        )
         self._set_series_row_visible("bar_options", plot_type in {"bar", "barh"})
-        self._set_series_row_visible("fill_options", plot_type in {"area", "histogram"})
+        self._set_series_row_visible(
+            "fill_options",
+            plot_type in ({"area", "histogram", "bar", "barh"} | distribution_types),
+        )
         self._set_series_row_visible("histogram_options", plot_type == "histogram")
         self._set_series_row_visible("distribution_options", plot_type in distribution_types)
         self._set_series_row_visible("surface_options", plot_type in _SURFACE_PLOT_TYPES)
@@ -1489,6 +1843,10 @@ class PlotTab(QWidget):
         elif plot_type in distribution_types:
             self._set_series_row_label("y_dataset", "Data dataset")
             self._set_series_row_label("distribution_columns", "Value columns")
+            self._set_series_row_label(
+                "line_width",
+                "Statistic line width" if plot_type == "violin" else "Line width",
+            )
         elif plot_type in _SURFACE_PLOT_TYPES:
             self._set_series_row_label("x_dataset", "X dataset")
             self._set_series_row_label("x_column", "X coordinate")
@@ -1567,16 +1925,20 @@ class PlotTab(QWidget):
         if not self._plot_series:
             QMessageBox.information(self, "Add Locator", "Add a plotted series before locating data.")
             return
-        x_val, errs = self._parse_optional_float(self._locator_x_edit.text(), "Locator X value")
-        if errs or x_val is None:
-            QMessageBox.warning(self, "Add Locator", "\n".join(errs or ["Locator X value is required."]))
-            return
         idx = self._locator_series_combo.currentData()
         if not isinstance(idx, int) or not 0 <= idx < len(self._plot_series):
             QMessageBox.warning(self, "Add Locator", "Choose a valid queued series.")
             return
+        is_surface = self._plot_series[idx].plot_type in _SURFACE_PLOT_TYPES
+        lookup_mode = "xy_to_z" if is_surface else str(self._locator_mode_combo.currentData() or "x_to_y")
+        x_val: float | None = None
         y_val: float | None = None
-        if self._plot_series[idx].plot_type in _SURFACE_PLOT_TYPES:
+        if lookup_mode in {"x_to_y", "xy_to_z"}:
+            x_val, errs = self._parse_optional_float(self._locator_x_edit.text(), "Locator X value")
+            if errs or x_val is None:
+                QMessageBox.warning(self, "Add Locator", "\n".join(errs or ["Locator X value is required."]))
+                return
+        if lookup_mode in {"y_to_x", "xy_to_z"}:
             y_val, y_errs = self._parse_optional_float(
                 self._locator_y_edit.text(),
                 "Locator Y value",
@@ -1585,12 +1947,12 @@ class PlotTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "Add Locator",
-                    "\n".join(y_errs or ["Locator Y value is required for 2D maps."]),
+                    "\n".join(y_errs or ["Locator Y value is required."]),
                 )
                 return
         loc = PlotLocator(
             series_index=idx, x_value=x_val,
-            y_value=y_val,
+            y_value=y_val, lookup_mode=lookup_mode,
             marker=str(self._locator_marker_combo.currentData() or "o"),
             size=self._locator_size_spin.value(),
             color=str(self._locator_color_combo.currentData() or "tab:red"),
@@ -1628,6 +1990,22 @@ class PlotTab(QWidget):
             if ci >= 0:
                 self._locator_series_combo.setCurrentIndex(ci)
         self._locator_series_combo.blockSignals(False)
+        self._update_locator_mode_controls()
+
+    def _update_locator_mode_controls(self) -> None:
+        """Enable the coordinates required by the selected locator lookup mode."""
+        index = self._locator_series_combo.currentData()
+        is_surface = (
+            isinstance(index, int)
+            and 0 <= index < len(self._plot_series)
+            and self._plot_series[index].plot_type in _SURFACE_PLOT_TYPES
+        )
+        self._locator_mode_combo.setEnabled(not is_surface)
+        mode = "xy_to_z" if is_surface else str(self._locator_mode_combo.currentData() or "x_to_y")
+        self._locator_x_edit.setEnabled(mode in {"x_to_y", "xy_to_z"})
+        self._locator_y_edit.setEnabled(mode in {"y_to_x", "xy_to_z"})
+        self._locator_x_edit.setPlaceholderText("X coordinate" if is_surface else "X value")
+        self._locator_y_edit.setPlaceholderText("Y coordinate" if is_surface else "Y value")
 
     def _reindex_locators_after_removal(self, removed: list[int]) -> None:
         """Drop or shift locators after series rows have been removed."""
@@ -1639,7 +2017,7 @@ class PlotTab(QWidget):
             shift = sum(1 for r in removed_set if r < loc.series_index)
             new.append(PlotLocator(
                 series_index=loc.series_index - shift,
-                x_value=loc.x_value, y_value=loc.y_value, marker=loc.marker,
+                x_value=loc.x_value, y_value=loc.y_value, lookup_mode=loc.lookup_mode, marker=loc.marker,
                 size=loc.size, color=loc.color,
             ))
         self._plot_locators = new
@@ -1647,7 +2025,9 @@ class PlotTab(QWidget):
 
     def _refresh_locator_list(self, located: list[LocatedPoint] | None = None) -> None:
         """Refresh locator list text, including computed values when available."""
-        by_idx = {lp.locator_index: lp for lp in located or []}
+        by_idx: dict[int, list[LocatedPoint]] = {}
+        for point in located or []:
+            by_idx.setdefault(point.locator_index, []).append(point)
         self._locator_list.clear()
         for i, loc in enumerate(self._plot_locators):
             self._locator_list.addItem(self._locator_text(loc, by_idx.get(i)))
@@ -1754,8 +2134,13 @@ class PlotTab(QWidget):
         if self._plot_series:
             self._render_plot(silent_if_empty=True)
 
-    def _render_plot(self, silent_if_empty: bool = False) -> None:
+    def _render_plot(
+        self,
+        silent_if_empty: bool = False,
+        show_validation_messages: bool = True,
+    ) -> None:
         """Render queued series and locators to the Matplotlib canvas."""
+        self._preview_timer.stop()
         if not self._plot_series:
             self._plot_canvas.clear_plot()
             self._set_controls_enabled(bool(self._workspace.dataset_names()))
@@ -1800,7 +2185,12 @@ class PlotTab(QWidget):
 
         inputs, errors = self._plot_inputs()
         if errors:
-            QMessageBox.warning(self, "Plot Settings", "\n".join(errors))
+            self._preview_dirty = True
+            self._preview_status_label.setText("Fix invalid plot settings")
+            if show_validation_messages:
+                QMessageBox.warning(self, "Plot Settings", "\n".join(errors))
+            else:
+                self.status_message.emit(errors[0])
             return
 
         result = self._plot_canvas.plot_series(
@@ -1815,7 +2205,14 @@ class PlotTab(QWidget):
         self._refresh_locator_list(result.located_points)
 
         if result.skipped_messages and result.plotted_count == 0:
-            QMessageBox.warning(self, "Plot Failed", "\n".join(result.skipped_messages[:5]))
+            if show_validation_messages:
+                QMessageBox.warning(
+                    self,
+                    "Plot Failed",
+                    "\n".join(result.skipped_messages[:5]),
+                )
+            else:
+                self.status_message.emit(result.skipped_messages[0])
         elif result.skipped_messages:
             self.status_message.emit(
                 f"Plotted {result.plotted_count} series; skipped {len(result.skipped_messages)}"
@@ -1827,6 +2224,12 @@ class PlotTab(QWidget):
         else:
             self.status_message.emit(f"Plotted {result.plotted_count} series")
 
+        if result.plotted_count:
+            self._preview_dirty = False
+            self._preview_status_label.setText("Preview current")
+        else:
+            self._preview_dirty = True
+            self._preview_status_label.setText("Preview failed")
         self.plot_rendered.emit()
 
     def _column_axis_label(self, dataset_name: str, column_name: str) -> str:
@@ -1884,19 +2287,27 @@ class PlotTab(QWidget):
             ])
         return f"{series.label} ({', '.join(bits)})"
 
-    def _locator_text(self, loc: PlotLocator, pt: LocatedPoint | None = None) -> str:
+    def _locator_text(self, loc: PlotLocator, points: list[LocatedPoint] | None = None) -> str:
         """Return locator list text before or after interpolation."""
         label = self._plot_series[loc.series_index].label
-        if pt is not None:
+        if points:
+            pt = points[0]
             if pt.z_value is not None:
                 return (
                     f"{label}: x={pt.x_value:g}, y={pt.y_value:g}, "
                     f"z={pt.z_value:g}"
                 )
+            if loc.lookup_mode == "y_to_x":
+                x_text = ", ".join(f"{point.x_value:g}" for point in points)
+                return f"{label}: y={pt.y_value:g} -> x={x_text} ({pt.y_axis})"
             return f"{label}: x={pt.x_value:g}, y={pt.y_value:g} ({pt.y_axis})"
+        if loc.lookup_mode == "y_to_x" and loc.y_value is not None:
+            return f"{label}: y={loc.y_value:g} -> x (pending)"
         if loc.y_value is not None:
             return f"{label}: x={loc.x_value:g}, y={loc.y_value:g} (pending)"
-        return f"{label}: x={loc.x_value:g} (pending)"
+        if loc.x_value is not None:
+            return f"{label}: x={loc.x_value:g} (pending)"
+        return f"{label}: incomplete locator"
 
     # -- input parsing ------------------------------------------------------
 
@@ -1914,8 +2325,7 @@ class PlotTab(QWidget):
                 "right_y_scale": self._right_y_scale_combo.currentText(),
                 "x_limits": xl, "y_limits": yl, "right_y_limits": rl,
                 "grid_enabled": self._grid_checkbox.isChecked(),
-                "legend_enabled": self._legend_checkbox.isChecked(),
-                "legend_position": self._legend_pos_combo.currentText(),
+                "legend_settings": self._settings_from_controls().legend,
                 "locators": self._plot_locators,
                 "style_names": self._style_names(),
             },

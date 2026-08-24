@@ -5,16 +5,17 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 ## Features
 
 - **Data Ingestion**: Import tabular datasets (CSV/TXT) with dynamic type detection, or manually enter data in a spreadsheet interface.
-- **Data Editing**: Edit imported datasets directly with undo/redo, append/insert/delete row and column operations, spreadsheet-style copy/paste, whole-column copy/paste, large-dataset warnings, size-aware table auto-sizing, and per-column name/role/unit/long-name/comment metadata.
+- **Data Editing**: Edit imported datasets directly with bounded undo/redo, append/insert/delete row and column operations, fast block-oriented spreadsheet copy/paste, whole-column copy/paste, large-dataset warnings, sampled table auto-sizing, and per-column name/role/unit/long-name/comment metadata.
 - **Formula Engine**: Apply safe math operations to columns using a sandboxed expression evaluator with NumPy/SciPy support, positional aliases such as `col1`, exact-name insertion helpers, worksheet batch targets, and protected output naming by default.
-- **Signal Processing & Calculus**: Perform numerical differentiation, cumulative integration, and Fast Fourier Transforms (FFT).
+- **Signal Processing & Calculus**: Perform numerical differentiation, cumulative integration, FFT, and previewed smoothing with adjacent-average, median, Savitzky-Golay, LOWESS, FFT low-pass, or derivative-smoothing reconstruction.
 - **Interpolation Workbench**: Generate 1D, 2D, and N-D prediction datasets with linear, spline, piecewise cubic, nearest-neighbor, and RBF methods.
 - **Statistics Workbench**: Generate single-column summaries, multi-column summaries/correlations/covariance/PCA, grouped/factor analyses, normality tests, outlier checks, regression metrics, paired tests, independent-sample tests, one-way ANOVA, Kruskal-Wallis, post-hoc comparisons, and optional companion plots.
 - **Curve Fitting**: Fit analytical models (Linear, Exponential, Gaussian, Peak functions, etc.) with customizable parameters using Levenberg-Marquardt or Trust-Region algorithms.
 - **Custom Fit Models**: Define project-saved fit models from safe NumPy/SciPy expressions and use them in the standard fitting workflow.
 - **Dynamic Plotting**: High-performance multi-axis plotting with Matplotlib, featuring data locators, scaling controls, SciencePlots journal styling, visual customization, error bars, reporting plots, histograms, box/violin distribution comparisons, and early interpolated 2D maps.
-- **Saved Plots**: Store named plot definitions in the workspace so plot series, locators, axes, legends, and sizing can be restored later.
-- **Docked Workspace Layout**: Keep datasets, saved plots, data tools, manual entry, and plot options in dockable panels so the central Data and Plot work areas stay focused.
+- **Saved Plots**: Start from a default empty plot, protect unsaved drafts with Save/Discard/Cancel before replacement, and store named definitions so series, locators, axes, legends, and sizing can be restored later.
+- **Data Preparation**: Create non-destructive result sheets for filtering, sorting, duplicate removal, missing-value cleanup, binning, grouping, joins, and reshaping.
+- **Docked Workspace Layout**: Keep datasets and saved plots in the workspace navigator, show plot controls in a plot-specific inspector, and give the Data editor the full central width.
 - **Project Persistence**: Save and load complete workspaces, including datasets, column metadata, mathematical formulas, custom fit models, and saved plots using `.jasc` project files.
 
 ## Installation
@@ -29,6 +30,7 @@ A lightweight, modular application for data ingestion, visualization, mathematic
    ```bash
    python main.py
    ```
+   Run `main.py` from the repository root; `ui/main_window.py` is an internal module and is not a standalone entry point. In VS Code, use the **Run JASC Data Processor** launch configuration.
 
 ## Development
 

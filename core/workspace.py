@@ -166,8 +166,14 @@ class Workspace:
         frame: pd.DataFrame,
         source_path: str | Path | None = None,
         backend: str = PANDAS_BACKEND,
+        *,
+        copy_frame: bool = True,
     ) -> Dataset:
-        """Add a DataFrame under a unique display name and return its dataset."""
+        """Add a DataFrame under a unique display name and return its dataset.
+
+        ``copy_frame=False`` is reserved for ownership-transfer paths such as a
+        freshly parsed import, where no caller will continue mutating ``frame``.
+        """
         if not isinstance(frame, pd.DataFrame):
             raise TypeError("Workspace datasets must be pandas DataFrames.")
 
@@ -175,7 +181,7 @@ class Workspace:
         unique_name = self._make_unique_name(clean_name)
         dataset = Dataset(
             name=unique_name,
-            frame=frame.copy(),
+            frame=frame.copy() if copy_frame else frame,
             source_path=Path(source_path) if source_path else None,
             backend=normalize_backend(backend),
         )

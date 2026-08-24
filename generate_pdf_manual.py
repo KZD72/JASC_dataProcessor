@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 import sys
 import re
+from datetime import date
 from pathlib import Path
 from fpdf import FPDF
 
-# Custom PDF class with styling
 class JASCManualPDF(FPDF):
+    """Styled PDF renderer for the JASC user manual."""
+
     def __init__(self, *args, **kwargs):
+        """Initialize manual-specific state and total-page numbering."""
         super().__init__(*args, **kwargs)
         self.chapter_title = ""
         # Register a page numbering alias
         self.alias_nb_pages()
         
     def header(self):
+        """Draw the repeated page header after the cover and TOC pages."""
         # Skip header on cover page (page 1) and TOC page (page 2)
         if self.page_no() <= 2:
             return
@@ -33,6 +37,7 @@ class JASCManualPDF(FPDF):
         self.ln(12)
 
     def footer(self):
+        """Draw the repeated page footer after the cover page."""
         # Skip footer on cover page (page 1)
         if self.page_no() == 1:
             return
@@ -83,7 +88,76 @@ def parse_inline_styles(pdf, text, line_height=5):
         pdf.write(line_height, content)
 
 
+def plain_markdown_text(text):
+    """Return readable text for wrapped PDF cells without inline markdown markers."""
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text
+
+
+def ensure_space(pdf, height):
+    """Start a new page when the next block would collide with the footer."""
+    if pdf.get_y() + height > pdf.page_break_trigger:
+        pdf.add_page()
+
+
+def write_wrapped(pdf, text, line_height=5.2, indent=0, font=("Helvetica", "", 10), color=(38, 55, 71)):
+    """Write a wrapped text block that advances the cursor safely."""
+    content = plain_markdown_text(text)
+    pdf.set_font(*font)
+    pdf.set_text_color(*color)
+    available_width = pdf.w - pdf.l_margin - pdf.r_margin - indent
+    lines = pdf.multi_cell(available_width, line_height, content, dry_run=True, output="LINES")
+    ensure_space(pdf, max(len(lines), 1) * line_height + 1)
+    if indent:
+        pdf.set_x(pdf.l_margin + indent)
+    pdf.multi_cell(available_width, line_height, content, new_x="LMARGIN", new_y="NEXT")
+
+
+def render_table(pdf, table_rows):
+    """Render markdown table rows with wrapped cells and page-aware row heights."""
+    if not table_rows:
+        return
+
+    printable_width = pdf.w - pdf.l_margin - pdf.r_margin
+    num_cols = max(len(row) for row in table_rows)
+    col_width = printable_width / max(num_cols, 1)
+    line_height = 4.2
+    padding = 2
+
+    for row_index, row in enumerate(table_rows):
+        normalized = row + [""] * (num_cols - len(row))
+        pdf.set_font("Helvetica", "B" if row_index == 0 else "", 8.5)
+        row_lines = [
+            pdf.multi_cell(col_width - padding, line_height, plain_markdown_text(cell), dry_run=True, output="LINES")
+            for cell in normalized
+        ]
+        row_height = max(max(len(lines), 1) * line_height + padding for lines in row_lines)
+        ensure_space(pdf, row_height)
+
+        x_start = pdf.get_x()
+        y_start = pdf.get_y()
+        if row_index == 0:
+            pdf.set_fill_color(47, 119, 188)
+            pdf.set_text_color(255, 255, 255)
+        else:
+            fill_color = (244, 247, 250) if row_index % 2 == 0 else (255, 255, 255)
+            pdf.set_fill_color(*fill_color)
+            pdf.set_text_color(38, 55, 71)
+        pdf.set_draw_color(200, 210, 220)
+
+        for col_index, cell in enumerate(normalized):
+            x = x_start + col_index * col_width
+            pdf.rect(x, y_start, col_width, row_height, "DF")
+            pdf.set_xy(x + 1, y_start + 1)
+            pdf.multi_cell(col_width - padding, line_height, plain_markdown_text(cell), border=0)
+
+        pdf.set_xy(x_start, y_start + row_height)
+    pdf.ln(4)
+
+
 def render_pdf_manual():
+    """Render JASC_Manual.md into the styled JASC_Manual.pdf file."""
     workspace_dir = Path(__file__).parent
     md_file = workspace_dir / "JASC_Manual.md"
     pdf_file = workspace_dir / "JASC_Manual.pdf"
@@ -150,8 +224,15 @@ def render_pdf_manual():
     pdf.cell(0, 5, "Reference Manual & Guide", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(100, 110, 120)
-    pdf.cell(0, 5, "Version 0.1.0 (Stable release)", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 5, "Compiled: June 2026", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, "Version 0.1.0", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(
+        0,
+        5,
+        f"Compiled: {date.today().strftime('%B %Y')}",
+        align="C",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
     pdf.cell(0, 5, "License: GNU General Public License v3.0", align="C", new_x="LMARGIN", new_y="NEXT")
     
     # ==========================================
@@ -232,45 +313,7 @@ def render_pdf_manual():
             # End of table, render accumulated rows
             in_table = False
             if table_rows:
-                pdf.set_font("Helvetica", "", 9)
-                
-                # Simple width allocation: divide evenly or customize
-                num_cols = len(table_rows[0])
-                col_width = (215.9 - 40) / num_cols # Printable width (175.9) / num_cols
-                
-                # Draw header row
-                pdf.set_font("Helvetica", "B", 9)
-                pdf.set_fill_color(47, 119, 188) # Slate Blue
-                pdf.set_draw_color(200, 210, 220)
-                pdf.set_text_color(255, 255, 255)
-                for cell in table_rows[0]:
-                    pdf.cell(col_width, 8, cell, border=1, fill=True, align="C")
-                pdf.ln()
-                
-                # Draw data rows
-                pdf.set_font("Helvetica", "", 8.5)
-                pdf.set_text_color(38, 55, 71)
-                zebra = False
-                for row_idx, row in enumerate(table_rows[1:]):
-                    # Check height and add page if needed
-                    if pdf.get_y() + 8 > pdf.page_break_trigger:
-                        pdf.add_page()
-                        # Redraw header
-                        pdf.set_font("Helvetica", "B", 9)
-                        pdf.set_fill_color(47, 119, 188)
-                        pdf.set_text_color(255, 255, 255)
-                        for cell in table_rows[0]:
-                            pdf.cell(col_width, 8, cell, border=1, fill=True, align="C")
-                        pdf.ln()
-                        pdf.set_font("Helvetica", "", 8.5)
-                        pdf.set_text_color(38, 55, 71)
-                    
-                    pdf.set_fill_color(244, 247, 250)
-                    for col_idx, cell in enumerate(row):
-                        pdf.cell(col_width, 8, cell, border=1, fill=zebra, align="L")
-                    pdf.ln()
-                    zebra = not zebra
-                pdf.ln(4)
+                render_table(pdf, table_rows)
                 table_rows = []
             # Fall through or continue depending on current line
             
@@ -437,25 +480,20 @@ def render_pdf_manual():
             pdf.set_font("Helvetica", "", 10)
             pdf.set_text_color(38, 55, 71)
             
-            # Print list content with inline style support
-            parse_inline_styles(pdf, content, line_height=5.5)
-            pdf.ln(5.5)
+            write_wrapped(pdf, content, line_height=5.2, indent=14)
         else:
             in_list = False
             # Standard Paragraph
-            pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(38, 55, 71)
-            
+
             # Indent slightly if it's text art / layout diagram (checking if it starts with special lines or has spaces)
             if stripped.startswith("+----") or stripped.startswith("|  "):
                 pdf.set_font("Courier", "", 8)
                 pdf.set_fill_color(248, 250, 252)
+                ensure_space(pdf, 4.5)
                 # Simple box border around diagram
                 pdf.cell(0, 4, line.replace("\n", ""), new_x="LMARGIN", new_y="NEXT", fill=True)
             else:
-                # Wrap long paragraphs properly using cell wrapping
-                parse_inline_styles(pdf, stripped, line_height=5.2)
-                pdf.ln(5.2)
+                write_wrapped(pdf, stripped, line_height=5.2)
                 
     # ==========================================
     # WRITE TABLE OF CONTENTS (PAGE 2 CONTENT)
@@ -472,19 +510,17 @@ def render_pdf_manual():
     pdf.rect(20, pdf.get_y() + 1, 40, 1.5, "F")
     pdf.ln(8)
     
-    # Write TOC entries
+    # Write chapter entries only. A comprehensive manual can contain enough
+    # subsections to overflow the reserved TOC page and append stray pages at
+    # the end of the document if every H3 entry is rendered here.
     for entry, page_num, depth in toc_entries:
-        # We only list level 2 (Chapters) and level 3 (Subsections)
-        if depth == 2:
-            pdf.set_font("Helvetica", "B", 10.5)
-            pdf.set_text_color(15, 32, 66)
-            indent = ""
-            dot_color = (200, 210, 220)
-        else: # level 3
-            pdf.set_font("Helvetica", "", 9.5)
-            pdf.set_text_color(38, 55, 71)
-            indent = "    "
-            dot_color = (230, 235, 240)
+        if depth != 2:
+            continue
+
+        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.set_text_color(15, 32, 66)
+        indent = ""
+        dot_color = (200, 210, 220)
             
         full_entry = f"{indent}{entry}"
         entry_width = pdf.get_string_width(full_entry)
@@ -508,12 +544,8 @@ def render_pdf_manual():
         pdf.write(5.5, f" {dot_leader} ")
         
         # Restore text color for page number
-        if depth == 2:
-            pdf.set_font("Helvetica", "B", 10.5)
-            pdf.set_text_color(15, 32, 66)
-        else:
-            pdf.set_font("Helvetica", "", 9.5)
-            pdf.set_text_color(38, 55, 71)
+        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.set_text_color(15, 32, 66)
             
         pdf.cell(0, 5.5, page_str, align="R", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(1)

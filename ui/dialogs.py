@@ -7,6 +7,9 @@ import os
 from html import escape
 
 import numpy as np
+import pandas as pd
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
@@ -62,6 +65,12 @@ from math_engine.interpolation import (
     FILL_POLICIES,
     INTERPOLATION_METHODS,
     MAX_GENERATED_QUERY_POINTS,
+)
+from math_engine.smoothing import (
+    DERIVATIVE_SMOOTHING_METHODS,
+    SMOOTHING_METHODS,
+    SmoothingParameters,
+    smooth_values,
 )
 from math_engine.statistics import STATISTIC_OPERATIONS
 from models.fit_functions import (
@@ -311,6 +320,75 @@ class DataSortDialog(QDialog):
             return
         if not self.output_name():
             QMessageBox.warning(self, "Sort", "Enter an output sheet name.")
+            return
+        super().accept()
+
+
+class RemoveDuplicatesDialog(QDialog):
+    """Choose duplicate-key columns and which matching row to retain."""
+
+    def __init__(
+        self,
+        column_names: list[str],
+        default_output_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build duplicate-removal controls with all columns selected by default."""
+        super().__init__(parent)
+        self.setWindowTitle("Remove Duplicates")
+        self.setModal(True)
+        self.setMinimumWidth(430)
+
+        self._columns_list = QListWidget()
+        self._columns_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._columns_list.addItems(column_names)
+        for row in range(self._columns_list.count()):
+            self._columns_list.item(row).setSelected(True)
+
+        self._keep_combo = QComboBox()
+        self._keep_combo.addItem("Keep first occurrence", "first")
+        self._keep_combo.addItem("Keep last occurrence", "last")
+        self._keep_combo.addItem("Remove every row in a duplicate group", "none")
+        self._output_name_edit = QLineEdit(default_output_name)
+
+        hint = QLabel(
+            "Rows are duplicates when all selected columns match. Blank/NaN values in the "
+            "same selected columns are treated as matching values."
+        )
+        hint.setWordWrap(True)
+
+        form = QFormLayout()
+        form.addRow("Match columns", self._columns_list)
+        form.addRow("Duplicate policy", self._keep_combo)
+        form.addRow("Output sheet", self._output_name_edit)
+        form.addRow("", hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def columns(self) -> list[str]:
+        """Return columns used to determine duplicate groups."""
+        return selected_list_items(self._columns_list)
+
+    def keep_policy(self) -> str:
+        """Return first, last, or none."""
+        return str(self._keep_combo.currentData() or "first")
+
+    def output_name(self) -> str:
+        """Return the requested result-sheet name."""
+        return self._output_name_edit.text().strip()
+
+    def accept(self) -> None:
+        """Require columns and an output name."""
+        if not self.columns():
+            QMessageBox.warning(self, "Remove Duplicates", "Choose at least one match column.")
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Remove Duplicates", "Enter an output sheet name.")
             return
         super().accept()
 
@@ -925,6 +1003,12 @@ class FigureDigitizerDialog(QDialog):
         ("y1", "Y axis point 1"),
         ("y2", "Y axis point 2"),
     )
+    _WARP_KEYS: tuple[tuple[str, str], ...] = (
+        ("warp_tl", "Correction top-left"),
+        ("warp_tr", "Correction top-right"),
+        ("warp_br", "Correction bottom-right"),
+        ("warp_bl", "Correction bottom-left"),
+    )
 
     def __init__(
         self,
@@ -938,10 +1022,13 @@ class FigureDigitizerDialog(QDialog):
         self.resize(1180, 680)
 
         self._image_path = ""
+        self._original_image = QImage()
         self._image = QImage()
         self._scene = QGraphicsScene(self)
         self._pixmap_item: QGraphicsPixmapItem | None = None
         self._marker_items: list[object] = []
+        self._warp_pixels: dict[str, tuple[float, float]] = {}
+        self._warp_applied = False
         self._calibration_pixels: dict[str, tuple[float, float]] = {}
         self._manual_points: list[dict[str, object]] = []
         self._manual_error_samples: list[tuple[float, float]] = []
@@ -1017,7 +1104,9 @@ class FigureDigitizerDialog(QDialog):
         canvas_widget.setLayout(canvas_layout)
 
         controls = QTabWidget()
-        controls.addTab(self._build_calibration_tab(), "Calibration")
+        calibration_tab = self._build_calibration_tab()
+        controls.addTab(self._build_correction_tab(), "Correction")
+        controls.addTab(calibration_tab, "Calibration")
         controls.addTab(self._build_extraction_tab(), "Extraction")
         controls.addTab(self._build_output_tab(), "Output")
 
@@ -1204,6 +1293,8 @@ class FigureDigitizerDialog(QDialog):
         tab = QWidget()
 
         self._click_target_combo = QComboBox()
+        for key, label in self._WARP_KEYS:
+            self._click_target_combo.addItem(label, key)
         for key, label in self._CALIBRATION_KEYS:
             self._click_target_combo.addItem(label, key)
         self._click_target_combo.addItem("No active picking tool", "none")
@@ -1264,6 +1355,61 @@ class FigureDigitizerDialog(QDialog):
         layout.addWidget(values_group)
         layout.addWidget(clear_calibration_button)
         layout.addWidget(self._calibration_status_label)
+        layout.addStretch()
+        return tab
+
+    def _build_correction_tab(self) -> QWidget:
+        """Build optional perspective correction controls."""
+        tab = QWidget()
+
+        pick_group = QGroupBox("Perspective / Warp Correction")
+        pick_layout = QVBoxLayout(pick_group)
+        pick_hint = QLabel(
+            "Optional first step: pick the four corners of the plotted frame or the axis-bar "
+            "rectangle, then apply correction. Calibration and extraction use the corrected image."
+        )
+        pick_hint.setWordWrap(True)
+        pick_layout.addWidget(pick_hint)
+
+        pick_grid = QGridLayout()
+        for index, (key, label) in enumerate(self._WARP_KEYS):
+            button = QPushButton(label.replace("Correction ", "Pick "))
+            button.clicked.connect(lambda _checked=False, target=key: self._set_click_target(target))
+            pick_grid.addWidget(button, index // 2, index % 2)
+        pick_layout.addLayout(pick_grid)
+
+        size_group = QGroupBox("Corrected Image Size")
+        size_form = QFormLayout(size_group)
+        self._warp_width_spin = QSpinBox()
+        self._warp_width_spin.setRange(50, 50_000)
+        self._warp_width_spin.setValue(1000)
+        self._warp_width_spin.setSuffix(" px")
+        self._warp_height_spin = QSpinBox()
+        self._warp_height_spin.setRange(50, 50_000)
+        self._warp_height_spin.setValue(700)
+        self._warp_height_spin.setSuffix(" px")
+        size_form.addRow("Width", self._warp_width_spin)
+        size_form.addRow("Height", self._warp_height_spin)
+
+        button_row = QHBoxLayout()
+        apply_button = QPushButton("Apply Correction")
+        apply_button.clicked.connect(self._apply_warp_correction)
+        clear_button = QPushButton("Clear Points")
+        clear_button.clicked.connect(self._clear_warp_points)
+        reset_button = QPushButton("Reset Original")
+        reset_button.clicked.connect(self._reset_warp_correction)
+        button_row.addWidget(apply_button)
+        button_row.addWidget(clear_button)
+        button_row.addWidget(reset_button)
+
+        self._warp_status_label = QLabel("Load an image, then pick correction points if needed.")
+        self._warp_status_label.setWordWrap(True)
+
+        layout = QVBoxLayout(tab)
+        layout.addWidget(pick_group)
+        layout.addWidget(size_group)
+        layout.addLayout(button_row)
+        layout.addWidget(self._warp_status_label)
         layout.addStretch()
         return tab
 
@@ -1568,7 +1714,44 @@ class FigureDigitizerDialog(QDialog):
             return
 
         self._image_path = image_path
+        self._original_image = image.copy()
+        self._warp_applied = False
+        self._warp_pixels.clear()
+        self._set_working_image(image.copy(), reset_view=False)
+        self._clear_digitized_points()
+        self._set_default_warp_size_from_image()
+        self._set_click_target("warp_tl")
+        self._update_source_label()
+        current_name = self._dataset_name_edit.text().strip()
+        if current_name in {"", "digitized_data"}:
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            self._dataset_name_edit.setText(f"{base_name}_digitized")
+        self._fit_image_in_view()
+        self._refresh_all()
+
+    def _set_working_image(self, image: QImage, reset_view: bool = True) -> None:
+        """Replace the image shown on the canvas."""
         self._image = image
+        self._scene.clear()
+        self._marker_items.clear()
+        self._pixmap_item = self._scene.addPixmap(QPixmap.fromImage(self._image))
+        self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        if reset_view:
+            self._fit_image_in_view()
+
+    def _update_source_label(self) -> None:
+        """Refresh loaded-image text with correction state."""
+        if self._image.isNull():
+            self._source_label.setText("No image loaded")
+            return
+        correction_text = "corrected" if self._warp_applied else "original"
+        self._source_label.setText(
+            f"{os.path.basename(self._image_path)} - {self._image.width()} x "
+            f"{self._image.height()} px ({correction_text})"
+        )
+
+    def _clear_digitized_points(self) -> None:
+        """Clear calibration and extraction state tied to working-image pixels."""
         self._calibration_pixels.clear()
         self._manual_points.clear()
         self._manual_error_samples.clear()
@@ -1592,20 +1775,238 @@ class FigureDigitizerDialog(QDialog):
             self._manual_status_label.setText(
                 "Manual errors apply to the selected manual point. Use Radius Error or 4-Point Error after placing it."
             )
-        self._set_click_target("x1")
-        self._scene.clear()
-        self._marker_items.clear()
-        self._pixmap_item = self._scene.addPixmap(QPixmap.fromImage(self._image))
-        self._scene.setSceneRect(self._pixmap_item.boundingRect())
-        self._source_label.setText(
-            f"{os.path.basename(image_path)} - {self._image.width()} x {self._image.height()} px"
-        )
-        current_name = self._dataset_name_edit.text().strip()
-        if current_name in {"", "digitized_data"}:
-            base_name = os.path.splitext(os.path.basename(image_path))[0]
-            self._dataset_name_edit.setText(f"{base_name}_digitized")
-        self._fit_image_in_view()
+
+    def _set_default_warp_size_from_image(self) -> None:
+        """Initialize correction output size from the current working image."""
+        if self._image.isNull() or not hasattr(self, "_warp_width_spin"):
+            return
+        self._warp_width_spin.setValue(max(50, self._image.width()))
+        self._warp_height_spin.setValue(max(50, self._image.height()))
+
+    def _update_warp_output_size(self) -> None:
+        """Estimate corrected image size from the selected correction corners."""
+        if not all(key in self._warp_pixels for key, _label in self._WARP_KEYS):
+            return
+        top_left = np.asarray(self._warp_pixels["warp_tl"], dtype=float)
+        top_right = np.asarray(self._warp_pixels["warp_tr"], dtype=float)
+        bottom_right = np.asarray(self._warp_pixels["warp_br"], dtype=float)
+        bottom_left = np.asarray(self._warp_pixels["warp_bl"], dtype=float)
+        width = int(round(max(
+            np.linalg.norm(top_right - top_left),
+            np.linalg.norm(bottom_right - bottom_left),
+        )))
+        height = int(round(max(
+            np.linalg.norm(bottom_left - top_left),
+            np.linalg.norm(bottom_right - top_right),
+        )))
+        self._warp_width_spin.setValue(max(50, width))
+        self._warp_height_spin.setValue(max(50, height))
+
+    def _clear_warp_points(self) -> None:
+        """Clear perspective correction points without changing the image."""
+        self._warp_pixels.clear()
+        self._set_click_target("warp_tl")
         self._refresh_all()
+
+    def _reset_warp_correction(self) -> None:
+        """Restore the originally loaded image and clear derived digitizer state."""
+        if self._original_image.isNull():
+            return
+        self._warp_applied = False
+        self._warp_pixels.clear()
+        self._set_working_image(self._original_image.copy())
+        self._clear_digitized_points()
+        self._set_default_warp_size_from_image()
+        self._set_click_target("warp_tl")
+        self._update_source_label()
+        self._refresh_all()
+
+    def _apply_warp_correction(self) -> None:
+        """Rectify the working image with a four-corner perspective transform."""
+        if self._image.isNull():
+            QMessageBox.information(self, "Image Correction", "Load an image before applying correction.")
+            return
+        missing = [
+            label
+            for key, label in self._WARP_KEYS
+            if key not in self._warp_pixels
+        ]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Image Correction",
+                "Pick correction points: " + ", ".join(missing),
+            )
+            return
+
+        width = int(self._warp_width_spin.value())
+        height = int(self._warp_height_spin.value())
+        try:
+            corrected = self._perspective_corrected_image(self._image, self._warp_pixels, width, height)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Image Correction", str(exc))
+            return
+
+        self._warp_applied = True
+        self._warp_pixels.clear()
+        self._set_working_image(corrected)
+        self._clear_digitized_points()
+        self._set_click_target("x1")
+        self._update_source_label()
+        self._refresh_all()
+
+    def _refresh_warp_status(self) -> None:
+        """Update perspective correction status text."""
+        if not hasattr(self, "_warp_status_label"):
+            return
+        if self._image.isNull():
+            self._warp_status_label.setText("Load an image, then pick correction points if needed.")
+            return
+        if self._warp_applied:
+            self._warp_status_label.setText(
+                f"Correction applied. Working image is {self._image.width()} x {self._image.height()} px. "
+                "Calibrate and extract on this corrected image, or reset to the original."
+            )
+            return
+        missing = [
+            label.replace("Correction ", "")
+            for key, label in self._WARP_KEYS
+            if key not in self._warp_pixels
+        ]
+        if missing:
+            self._warp_status_label.setText("Perspective correction not applied. Missing: " + ", ".join(missing))
+        else:
+            self._warp_status_label.setText("Correction points ready. Review the green quadrilateral, then apply correction.")
+
+    @classmethod
+    def _perspective_corrected_image(
+        cls,
+        image: QImage,
+        corner_pixels: dict[str, tuple[float, float]],
+        width: int,
+        height: int,
+    ) -> QImage:
+        """Return a perspective-corrected image from four source corners."""
+        if width < 2 or height < 2:
+            raise ValueError("Corrected image size must be at least 2 x 2 pixels.")
+
+        source = np.asarray(
+            [
+                corner_pixels["warp_tl"],
+                corner_pixels["warp_tr"],
+                corner_pixels["warp_br"],
+                corner_pixels["warp_bl"],
+            ],
+            dtype=float,
+        )
+        destination = np.asarray(
+            [
+                (0.0, 0.0),
+                (width - 1.0, 0.0),
+                (width - 1.0, height - 1.0),
+                (0.0, height - 1.0),
+            ],
+            dtype=float,
+        )
+        if cls._polygon_area(source) < 1.0:
+            raise ValueError("Correction points must form a non-empty quadrilateral.")
+
+        destination_to_source = cls._homography(destination, source)
+        rgb = cls._qimage_to_rgb_array(image).astype(float)
+
+        y_grid, x_grid = np.indices((height, width), dtype=float)
+        flat_x = x_grid.ravel()
+        flat_y = y_grid.ravel()
+        denominator = (
+            destination_to_source[2, 0] * flat_x
+            + destination_to_source[2, 1] * flat_y
+            + destination_to_source[2, 2]
+        )
+        valid = np.abs(denominator) > 1.0e-12
+        source_x = np.full_like(flat_x, -1.0)
+        source_y = np.full_like(flat_y, -1.0)
+        source_x[valid] = (
+            destination_to_source[0, 0] * flat_x[valid]
+            + destination_to_source[0, 1] * flat_y[valid]
+            + destination_to_source[0, 2]
+        ) / denominator[valid]
+        source_y[valid] = (
+            destination_to_source[1, 0] * flat_x[valid]
+            + destination_to_source[1, 1] * flat_y[valid]
+            + destination_to_source[1, 2]
+        ) / denominator[valid]
+
+        corrected = np.empty((height, width, 3), dtype=float)
+        coordinates = np.vstack([source_y, source_x])
+        for channel in range(3):
+            corrected[:, :, channel] = ndimage.map_coordinates(
+                rgb[:, :, channel],
+                coordinates,
+                order=1,
+                mode="constant",
+                cval=255.0,
+            ).reshape((height, width))
+        return cls._rgb_array_to_qimage(np.clip(corrected, 0, 255).astype(np.uint8))
+
+    @staticmethod
+    def _homography(source: np.ndarray, destination: np.ndarray) -> np.ndarray:
+        """Return the 3x3 projective transform mapping source to destination."""
+        if source.shape != (4, 2) or destination.shape != (4, 2):
+            raise ValueError("Perspective correction requires exactly four source and destination points.")
+        matrix_rows: list[list[float]] = []
+        targets: list[float] = []
+        for (source_x, source_y), (dest_x, dest_y) in zip(source, destination):
+            matrix_rows.append([source_x, source_y, 1.0, 0.0, 0.0, 0.0, -dest_x * source_x, -dest_x * source_y])
+            targets.append(dest_x)
+            matrix_rows.append([0.0, 0.0, 0.0, source_x, source_y, 1.0, -dest_y * source_x, -dest_y * source_y])
+            targets.append(dest_y)
+        try:
+            coefficients = np.linalg.solve(np.asarray(matrix_rows, dtype=float), np.asarray(targets, dtype=float))
+        except np.linalg.LinAlgError as exc:
+            raise ValueError("Correction points are degenerate; pick four distinct frame corners.") from exc
+        return np.asarray(
+            [
+                [coefficients[0], coefficients[1], coefficients[2]],
+                [coefficients[3], coefficients[4], coefficients[5]],
+                [coefficients[6], coefficients[7], 1.0],
+            ],
+            dtype=float,
+        )
+
+    @staticmethod
+    def _polygon_area(points: np.ndarray) -> float:
+        """Return absolute polygon area for ordered 2D points."""
+        x = points[:, 0]
+        y = points[:, 1]
+        return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2.0)
+
+    @classmethod
+    def _qimage_to_rgb_array(cls, image: QImage) -> np.ndarray:
+        """Convert a QImage to an RGB uint8 array."""
+        rgb_format = cls._qimage_format("Format_RGB888")
+        rgb_image = image.convertToFormat(rgb_format)
+        width = rgb_image.width()
+        height = rgb_image.height()
+        bytes_per_line = rgb_image.bytesPerLine()
+        buffer = rgb_image.bits()
+        array = np.frombuffer(buffer, dtype=np.uint8).reshape((height, bytes_per_line))
+        return array[:, : width * 3].reshape((height, width, 3)).copy()
+
+    @classmethod
+    def _rgb_array_to_qimage(cls, rgb: np.ndarray) -> QImage:
+        """Convert an RGB uint8 array to a detached QImage."""
+        contiguous = np.ascontiguousarray(rgb, dtype=np.uint8)
+        height, width, _channels = contiguous.shape
+        rgb_format = cls._qimage_format("Format_RGB888")
+        return QImage(contiguous.data, width, height, width * 3, rgb_format).copy()
+
+    @staticmethod
+    def _qimage_format(name: str):
+        """Return a QImage format across PySide6 enum styles."""
+        image_format = getattr(QImage, name, None)
+        if image_format is not None:
+            return image_format
+        return getattr(QImage.Format, name)
 
     def _fit_image_in_view(self) -> None:
         """Fit the loaded image inside the canvas view."""
@@ -1635,8 +2036,11 @@ class FigureDigitizerDialog(QDialog):
             return
 
         target = str(self._click_target_combo.currentData()) if hasattr(self, "_click_target_combo") else "none"
+        warp_labels = dict(self._WARP_KEYS)
         calibration_labels = dict(self._CALIBRATION_KEYS)
-        if target in calibration_labels:
+        if target in warp_labels:
+            self._tool_mode_label.setText(f"Mode: {warp_labels[target]} - click that plot-frame corner.")
+        elif target in calibration_labels:
             self._tool_mode_label.setText(f"Mode: {calibration_labels[target]} - click that axis reference point.")
         elif target == "manual":
             self._tool_mode_label.setText("Mode: Manual pick - canvas clicks add data points.")
@@ -1667,7 +2071,11 @@ class FigureDigitizerDialog(QDialog):
             return
 
         target = str(self._click_target_combo.currentData())
-        if target in {key for key, _label in self._CALIBRATION_KEYS}:
+        if target in {key for key, _label in self._WARP_KEYS}:
+            self._warp_pixels[target] = (pixel_x, pixel_y)
+            self._update_warp_output_size()
+            self._advance_warp_target()
+        elif target in {key for key, _label in self._CALIBRATION_KEYS}:
             self._calibration_pixels[target] = (pixel_x, pixel_y)
             self._advance_click_target()
         elif target == "manual_error_radius":
@@ -1696,6 +2104,15 @@ class FigureDigitizerDialog(QDialog):
                     f"Manual point {len(self._manual_points)} added. Use Radius Error or 4-Point Error to assign uncertainty."
                 )
         self._refresh_all()
+
+    def _advance_warp_target(self) -> None:
+        """Advance click target to the next unpicked correction point."""
+        for index in range(self._click_target_combo.count()):
+            key = str(self._click_target_combo.itemData(index))
+            if key in {warp_key for warp_key, _label in self._WARP_KEYS} and key not in self._warp_pixels:
+                self._click_target_combo.setCurrentIndex(index)
+                return
+        self._set_click_target("none")
 
     def _handle_canvas_drag(self, pixel_x: float, pixel_y: float) -> None:
         """Handle drag operations for brush-defined regions."""
@@ -2962,6 +3379,7 @@ class FigureDigitizerDialog(QDialog):
         """Refresh markers, calibration status, and preview."""
         self._refresh_manual_target_selector()
         self._redraw_markers()
+        self._refresh_warp_status()
         self._refresh_calibration_status()
         self._refresh_roi_status()
         self._refresh_tool_mode_label()
@@ -2983,6 +3401,7 @@ class FigureDigitizerDialog(QDialog):
             )
         if self._symbol_template_rect is not None:
             self._add_template_rect_marker(self._symbol_template_rect)
+        self._add_warp_markers()
         for index, (pixel_x, pixel_y, radius) in enumerate(self._roi_points, start=1):
             self._add_roi_marker(pixel_x, pixel_y, radius, f"ROI brush mark {index}")
         for key, label in self._CALIBRATION_KEYS:
@@ -3012,6 +3431,42 @@ class FigureDigitizerDialog(QDialog):
                 "#7c3aed",
                 f"Symbol center {index}",
             )
+
+    def _add_warp_markers(self) -> None:
+        """Draw perspective correction corner markers and connecting edges."""
+        if not self._warp_pixels:
+            return
+        ordered_points = [
+            self._warp_pixels[key]
+            for key, _label in self._WARP_KEYS
+            if key in self._warp_pixels
+        ]
+        for key, label in self._WARP_KEYS:
+            point = self._warp_pixels.get(key)
+            if point is not None:
+                self._add_marker(point[0], point[1], "#16a34a", label, radius=5.0)
+        if len(ordered_points) < 2:
+            return
+        pen = QPen(QColor("#16a34a"), 1.6)
+        pen_color = QColor("#16a34a")
+        pen_color.setAlpha(190)
+        pen.setColor(pen_color)
+        for first, second in zip(ordered_points, ordered_points[1:]):
+            item = QGraphicsLineItem(first[0], first[1], second[0], second[1])
+            item.setPen(pen)
+            item.setToolTip("Perspective correction edge")
+            item.setZValue(8)
+            self._scene.addItem(item)
+            self._marker_items.append(item)
+        if len(ordered_points) == len(self._WARP_KEYS):
+            first = ordered_points[-1]
+            second = ordered_points[0]
+            item = QGraphicsLineItem(first[0], first[1], second[0], second[1])
+            item.setPen(pen)
+            item.setToolTip("Perspective correction edge")
+            item.setZValue(8)
+            self._scene.addItem(item)
+            self._marker_items.append(item)
 
     def _add_marker(
         self,
@@ -4061,6 +4516,300 @@ class ColumnMathDialog(QDialog):
         index = combo.findText(value)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+
+class SmoothingDialog(QDialog):
+    """Collect smoothing, preview, output, and worksheet-batch settings."""
+
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        column_names: list[str],
+        default_x_column: str | None,
+        default_y_column: str | None,
+        dataset_names: list[str],
+        current_dataset_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build a smoothing workbench with a live source/result preview."""
+        super().__init__(parent)
+        self.setWindowTitle("Smoothing")
+        self.setModal(True)
+        self.resize(940, 650)
+        self._preview_frame = frame
+
+        self._x_column_combo = QComboBox()
+        self._x_column_combo.addItems(column_names)
+        self._set_combo_text(self._x_column_combo, default_x_column)
+
+        self._y_column_list = QListWidget()
+        self._y_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._y_column_list.setMaximumHeight(110)
+        self._y_column_list.addItems(column_names)
+        if default_y_column:
+            select_list_items(self._y_column_list, [default_y_column])
+        elif len(column_names) > 1:
+            self._y_column_list.item(1).setSelected(True)
+
+        self._method_combo = QComboBox()
+        for key, label in SMOOTHING_METHODS.items():
+            self._method_combo.addItem(label, key)
+
+        self._derivative_method_combo = QComboBox()
+        for key, label in DERIVATIVE_SMOOTHING_METHODS.items():
+            self._derivative_method_combo.addItem(label, key)
+        self._derivative_method_combo.setCurrentIndex(
+            self._derivative_method_combo.findData("savgol")
+        )
+
+        self._window_spin = QSpinBox()
+        self._window_spin.setRange(2, 100_001)
+        self._window_spin.setValue(11)
+        self._polynomial_spin = QSpinBox()
+        self._polynomial_spin.setRange(0, 20)
+        self._polynomial_spin.setValue(3)
+
+        self._lowess_fraction_spin = QDoubleSpinBox()
+        self._lowess_fraction_spin.setRange(0.001, 1.0)
+        self._lowess_fraction_spin.setDecimals(3)
+        self._lowess_fraction_spin.setSingleStep(0.025)
+        self._lowess_fraction_spin.setValue(0.15)
+        self._lowess_iterations_spin = QSpinBox()
+        self._lowess_iterations_spin.setRange(0, 10)
+        self._lowess_iterations_spin.setValue(2)
+
+        self._fft_cutoff_spin = QDoubleSpinBox()
+        self._fft_cutoff_spin.setRange(0.1, 100.0)
+        self._fft_cutoff_spin.setDecimals(1)
+        self._fft_cutoff_spin.setValue(10.0)
+        self._fft_cutoff_spin.setSuffix(" % of Nyquist")
+
+        self._derivative_median_spin = QSpinBox()
+        self._derivative_median_spin.setRange(1, 100_001)
+        self._derivative_median_spin.setSingleStep(2)
+        self._derivative_median_spin.setValue(1)
+        self._preserve_endpoints_checkbox = QCheckBox("Preserve first and last data values")
+        self._preserve_endpoints_checkbox.setChecked(True)
+        derivative_help = QLabel(
+            "Derivative reconstruction calculates dy/dx, optionally rejects slope spikes with a "
+            "moving median, smooths the derivative, and integrates it from the original first value."
+        )
+        derivative_help.setWordWrap(True)
+
+        self._target_edit = QLineEdit("{column}_smoothed")
+        self._target_conflict_combo = QComboBox()
+        self._target_conflict_combo.addItem("Create unique new column if target exists", "unique")
+        self._target_conflict_combo.addItem("Stop and warn if target exists", "stop")
+        self._target_conflict_combo.addItem("Overwrite/update existing column", "overwrite")
+        self._column_binding_combo = batch_column_binding_combo()
+        self._plot_result_checkbox = QCheckBox("Plot original and smoothed data immediately")
+        self._plot_result_checkbox.setChecked(True)
+
+        self._dataset_list = QListWidget()
+        self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._dataset_list.setMinimumHeight(90)
+        for dataset_name in dataset_names:
+            self._dataset_list.addItem(dataset_name)
+            item = self._dataset_list.item(self._dataset_list.count() - 1)
+            item.setSelected(dataset_name == current_dataset_name)
+
+        controls = QWidget()
+        form = QFormLayout(controls)
+        form.addRow("X column", self._x_column_combo)
+        form.addRow("Y columns", self._y_column_list)
+        form.addRow("Column matching", self._column_binding_combo)
+        form.addRow("Method", self._method_combo)
+        form.addRow("Derivative smoother", self._derivative_method_combo)
+        form.addRow("Window points", self._window_spin)
+        form.addRow("Polynomial order", self._polynomial_spin)
+        form.addRow("LOWESS fraction", self._lowess_fraction_spin)
+        form.addRow("Robust iterations", self._lowess_iterations_spin)
+        form.addRow("FFT cutoff", self._fft_cutoff_spin)
+        form.addRow("Slope-spike prefilter", self._derivative_median_spin)
+        form.addRow("", self._preserve_endpoints_checkbox)
+        form.addRow("", derivative_help)
+        form.addRow("Target column", self._target_edit)
+        form.addRow("If target exists", self._target_conflict_combo)
+        form.addRow("Apply to sheets", self._dataset_list)
+        form.addRow("", self._plot_result_checkbox)
+
+        self._preview_figure = Figure(figsize=(6.0, 4.0), constrained_layout=True)
+        self._preview_canvas = FigureCanvasQTAgg(self._preview_figure)
+        self._preview_axes = self._preview_figure.add_subplot(111)
+        self._preview_status = QLabel()
+        self._preview_status.setWordWrap(True)
+        preview_panel = QWidget()
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_layout.addWidget(self._preview_canvas, 1)
+        preview_layout.addWidget(self._preview_status)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(controls)
+        splitter.addWidget(preview_panel)
+        splitter.setSizes([380, 560])
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(splitter, 1)
+        layout.addWidget(buttons)
+
+        self._method_combo.currentIndexChanged.connect(self._update_method_controls)
+        self._derivative_method_combo.currentIndexChanged.connect(self._update_method_controls)
+        self._x_column_combo.currentIndexChanged.connect(self._refresh_preview)
+        self._y_column_list.itemSelectionChanged.connect(self._refresh_preview)
+        for spin in (
+            self._window_spin,
+            self._polynomial_spin,
+            self._lowess_fraction_spin,
+            self._lowess_iterations_spin,
+            self._fft_cutoff_spin,
+            self._derivative_median_spin,
+        ):
+            spin.valueChanged.connect(self._refresh_preview)
+        self._preserve_endpoints_checkbox.toggled.connect(self._refresh_preview)
+        self._update_method_controls()
+
+    def x_column(self) -> str:
+        """Return the selected coordinate column."""
+        return self._x_column_combo.currentText()
+
+    def y_columns(self) -> list[str]:
+        """Return the selected signal columns."""
+        return selected_list_items(self._y_column_list)
+
+    def method(self) -> str:
+        """Return the selected smoothing method key."""
+        return str(self._method_combo.currentData() or "adjacent_average")
+
+    def parameters(self) -> SmoothingParameters:
+        """Return the currently configured engine parameters."""
+        return SmoothingParameters(
+            window_length=self._window_spin.value(),
+            polynomial_order=self._polynomial_spin.value(),
+            lowess_fraction=self._lowess_fraction_spin.value(),
+            lowess_iterations=self._lowess_iterations_spin.value(),
+            fft_cutoff_fraction=self._fft_cutoff_spin.value() / 100.0,
+            derivative_smoothing_method=str(
+                self._derivative_method_combo.currentData() or "savgol"
+            ),
+            derivative_median_window=self._derivative_median_spin.value(),
+            preserve_endpoints=self._preserve_endpoints_checkbox.isChecked(),
+        )
+
+    def target_column(self) -> str:
+        """Return the output column template."""
+        return self._target_edit.text().strip()
+
+    def target_conflict_policy(self) -> str:
+        """Return the requested existing-output policy."""
+        return str(self._target_conflict_combo.currentData() or "unique")
+
+    def column_binding_mode(self) -> str:
+        """Return name or position input matching."""
+        return str(self._column_binding_combo.currentData() or BATCH_COLUMN_BINDING_NAME)
+
+    def target_dataset_names(self) -> list[str]:
+        """Return selected worksheet names."""
+        return [item.text() for item in self._dataset_list.selectedItems()]
+
+    def plot_result_immediately(self) -> bool:
+        """Return whether a comparison plot should be created."""
+        return self._plot_result_checkbox.isChecked()
+
+    def _update_method_controls(self) -> None:
+        """Show which parameters affect the selected method and refresh preview."""
+        method = self.method()
+        derivative_mode = method == "derivative_integral"
+        effective_method = (
+            str(self._derivative_method_combo.currentData() or "savgol")
+            if derivative_mode
+            else method
+        )
+        self._derivative_method_combo.setEnabled(derivative_mode)
+        self._window_spin.setEnabled(effective_method in {
+            "adjacent_average", "moving_median", "savgol"
+        })
+        self._polynomial_spin.setEnabled(effective_method == "savgol")
+        self._lowess_fraction_spin.setEnabled(effective_method == "lowess")
+        self._lowess_iterations_spin.setEnabled(effective_method == "lowess")
+        self._fft_cutoff_spin.setEnabled(effective_method == "fft")
+        self._derivative_median_spin.setEnabled(method == "derivative_integral")
+        self._preserve_endpoints_checkbox.setEnabled(method == "derivative_integral")
+        self._refresh_preview()
+
+    def _refresh_preview(self) -> None:
+        """Render the first selected signal and its current smoothing result."""
+        self._preview_axes.clear()
+        columns = self.y_columns()
+        if not self.x_column() or not columns:
+            self._preview_status.setText("Choose X and at least one Y column to preview smoothing.")
+            self._preview_canvas.draw_idle()
+            return
+        try:
+            values = pd.DataFrame({
+                "x": pd.to_numeric(self._preview_frame[self.x_column()], errors="coerce"),
+                "y": pd.to_numeric(self._preview_frame[columns[0]], errors="coerce"),
+            }).replace([np.inf, -np.inf], np.nan).dropna()
+            if len(values) > 4000:
+                stride = int(math.ceil(len(values) / 4000))
+                values = values.iloc[::stride]
+                preview_note = " Preview uses up to 4,000 evenly sampled points."
+            else:
+                preview_note = ""
+            smoothed = smooth_values(
+                values["x"].to_numpy(dtype=float),
+                values["y"].to_numpy(dtype=float),
+                method=self.method(),
+                parameters=self.parameters(),
+            )
+            self._preview_axes.plot(values["x"], values["y"], color="0.6", linewidth=1.0, label="Original")
+            self._preview_axes.plot(values["x"], smoothed, color="tab:red", linewidth=1.8, label="Smoothed")
+            self._preview_axes.legend(loc="best")
+            self._preview_axes.grid(True, alpha=0.25)
+            self._preview_status.setText(
+                f"Previewing {SMOOTHING_METHODS.get(self.method(), self.method())} on {columns[0]}."
+                f"{preview_note}"
+            )
+        except Exception as exc:
+            self._preview_status.setText(str(exc))
+        self._preview_canvas.draw_idle()
+
+    def accept(self) -> None:
+        """Validate required selections and odd-window constraints."""
+        if not self.x_column() or not self.y_columns():
+            QMessageBox.warning(self, "Smoothing", "Choose X and at least one Y column.")
+            return
+        if not self.target_column():
+            QMessageBox.warning(self, "Smoothing", "Enter a target column name or template.")
+            return
+        if not self.target_dataset_names():
+            QMessageBox.warning(self, "Smoothing", "Choose at least one target sheet.")
+            return
+        effective_method = (
+            str(self._derivative_method_combo.currentData() or "savgol")
+            if self.method() == "derivative_integral"
+            else self.method()
+        )
+        if effective_method in {"moving_median", "savgol"} and self._window_spin.value() % 2 == 0:
+            QMessageBox.warning(self, "Smoothing", "This method requires an odd smoothing window.")
+            return
+        if effective_method == "savgol" and self._polynomial_spin.value() >= self._window_spin.value():
+            QMessageBox.warning(self, "Smoothing", "Polynomial order must be smaller than the smoothing window.")
+            return
+        if self.method() == "derivative_integral" and self._derivative_median_spin.value() % 2 == 0:
+            QMessageBox.warning(self, "Smoothing", "The derivative median window must be 1 or an odd number.")
+            return
+        super().accept()
+
+    @staticmethod
+    def _set_combo_text(combo: QComboBox, value: str | None) -> None:
+        """Select a combo item by text when present."""
+        if value:
+            index = combo.findText(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
 
 
 class FFTDialog(QDialog):

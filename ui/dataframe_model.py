@@ -33,12 +33,15 @@ class _DatasetSnapshot:
 
 
 _INVALID_TYPED_VALUE = object()
+_DEFAULT_MAX_HISTORY_ENTRIES = 20
+_DEFAULT_MAX_HISTORY_BYTES = 256 * 1024 * 1024
 
 
 class DataFrameTableModel(QAbstractTableModel):
     """Editable table model that writes changes directly into a workspace dataset."""
 
     history_changed = Signal()
+    history_warning = Signal(str)
     columns_renamed = Signal(dict)
     edit_rejected = Signal(str)
 
@@ -48,6 +51,8 @@ class DataFrameTableModel(QAbstractTableModel):
         self._dataset: Dataset | None = None
         self._undo_stack: list[_DatasetSnapshot] = []
         self._redo_stack: list[_DatasetSnapshot] = []
+        self._max_history_entries = _DEFAULT_MAX_HISTORY_ENTRIES
+        self._max_history_bytes = _DEFAULT_MAX_HISTORY_BYTES
 
     @property
     def dataset(self) -> Dataset | None:
@@ -61,7 +66,6 @@ class DataFrameTableModel(QAbstractTableModel):
         self._undo_stack.clear()
         self._redo_stack.clear()
         self.endResetModel()
-        self.history_changed.emit()
 
     def can_undo(self) -> bool:
         """Return whether a dataset edit can be undone."""
@@ -75,7 +79,15 @@ class DataFrameTableModel(QAbstractTableModel):
         """Push the current dataset state before an external in-place edit."""
         if self._dataset is None:
             return
-        self._undo_stack.append(self._snapshot())
+        snapshot = self._snapshot_if_within_budget()
+        if snapshot is None:
+            self._undo_stack.clear()
+            self.history_warning.emit(
+                "This edit is larger than the "
+                f"{self._max_history_bytes / (1024 * 1024):g} MiB undo budget and cannot be undone."
+            )
+        else:
+            self._push_history(self._undo_stack, snapshot)
         self._redo_stack.clear()
 
     def discard_latest_undo_state(self) -> None:
@@ -88,7 +100,11 @@ class DataFrameTableModel(QAbstractTableModel):
         """Restore the previous dataset state."""
         if self._dataset is None or not self._undo_stack:
             return False
-        self._redo_stack.append(self._snapshot())
+        current_snapshot = self._snapshot_if_within_budget()
+        if current_snapshot is None:
+            self._redo_stack.clear()
+        else:
+            self._push_history(self._redo_stack, current_snapshot)
         self._restore_snapshot(self._undo_stack.pop())
         self.history_changed.emit()
         return True
@@ -97,7 +113,11 @@ class DataFrameTableModel(QAbstractTableModel):
         """Restore the next dataset state after an undo."""
         if self._dataset is None or not self._redo_stack:
             return False
-        self._undo_stack.append(self._snapshot())
+        current_snapshot = self._snapshot_if_within_budget()
+        if current_snapshot is None:
+            self._undo_stack.clear()
+        else:
+            self._push_history(self._undo_stack, current_snapshot)
         self._restore_snapshot(self._redo_stack.pop())
         self.history_changed.emit()
         return True
@@ -248,44 +268,83 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return insert_position
 
-    def paste_block(self, start_row: int, start_column: int, rows: list[list[str]]) -> tuple[int, int]:
+    def paste_block(
+        self,
+        start_row: int,
+        start_column: int,
+        rows: pd.DataFrame | list[list[object]],
+    ) -> tuple[int, int]:
         """Paste a rectangular text block into the dataset, growing rows/columns as needed."""
-        if self._dataset is None or not rows:
+        if self._dataset is None:
             return (0, 0)
 
+        block = self._coerce_paste_block(rows)
+        if block.empty and len(block.columns) == 0:
+            return (0, 0)
         normalized_start_row = max(start_row, 0)
         normalized_start_column = max(start_column, 0)
-        row_count = len(rows)
-        column_count = max((len(row) for row in rows), default=0)
+        row_count, column_count = block.shape
         if column_count == 0:
             return (0, 0)
 
-        self.capture_undo_state()
         self.beginResetModel()
         try:
             frame = self._dataset.frame
             target_rows = normalized_start_row + row_count
             target_columns = normalized_start_column + column_count
 
-            while len(frame.columns) < target_columns:
-                column_name = self._make_unique_column_name(f"Column {len(frame.columns) + 1}")
-                frame[column_name] = pd.NA
+            missing_column_count = max(0, target_columns - len(frame.columns))
+            if missing_column_count:
+                new_column_names = self._new_column_names(missing_column_count)
+                new_columns = pd.DataFrame(
+                    {
+                        column_name: pd.Series(pd.NA, index=frame.index, dtype="object")
+                        for column_name in new_column_names
+                    },
+                    index=frame.index,
+                )
+                frame = pd.concat([frame, new_columns], axis=1)
+
+            if len(frame) < target_rows or not isinstance(frame.index, pd.RangeIndex):
+                frame = frame.reset_index(drop=True).reindex(range(max(len(frame), target_rows)))
+
+            normalized_columns: list[pd.Series] = []
+            touched_column_names: list[str] = []
+            for column_offset in range(column_count):
+                target_column = normalized_start_column + column_offset
+                column_name = str(frame.columns[target_column])
+                metadata = self._dataset.column_metadata.get(column_name)
+                normalized_columns.append(
+                    self._normalize_pasted_series(
+                        frame.iloc[:, target_column],
+                        block.iloc[:, column_offset],
+                        metadata,
+                    )
+                )
+                touched_column_names.append(column_name)
+
+            self.capture_undo_state()
+            row_slice = slice(normalized_start_row, normalized_start_row + row_count)
+            for column_offset, normalized_values in enumerate(normalized_columns):
+                target_column = normalized_start_column + column_offset
+                column_name = touched_column_names[column_offset]
+                target_series = frame.iloc[:, target_column]
+                if is_numeric_dtype(target_series) and not is_numeric_dtype(normalized_values):
+                    frame[column_name] = target_series.astype("object")
+                elif (
+                    is_numeric_dtype(target_series)
+                    and target_series.dtype.kind in "iu"
+                    and normalized_values.isna().any()
+                ):
+                    frame[column_name] = target_series.astype("float64")
+
+                frame.iloc[row_slice, target_column] = normalized_values.to_numpy()
                 self._dataset.formulas.pop(column_name, None)
-                self._dataset.column_metadata.pop(column_name, None)
 
-            while len(frame) < target_rows:
-                frame.loc[len(frame)] = pd.Series([pd.NA] * len(frame.columns), index=frame.columns)
-
-            for row_offset, row_values in enumerate(rows):
-                for column_offset, value in enumerate(row_values):
-                    target_column = normalized_start_column + column_offset
-                    column_name = frame.columns[target_column]
-                    self._dataset.formulas.pop(str(column_name), None)
-                    normalized_value = self._normalize_value(frame[column_name], value)
-                    if not self._value_fits_column(frame[column_name], normalized_value):
-                        frame[column_name] = frame[column_name].astype("object")
-                    frame.iat[normalized_start_row + row_offset, target_column] = normalized_value
-
+            for column_name in frame.columns[len(self._dataset.frame.columns):]:
+                self._dataset.formulas.pop(str(column_name), None)
+                self._dataset.column_metadata.pop(str(column_name), None)
+            self._dataset.frame = frame
             return (row_count, column_count)
         finally:
             self.endResetModel()
@@ -295,17 +354,15 @@ class DataFrameTableModel(QAbstractTableModel):
         self,
         position: int,
         column_names: list[str],
-        rows: list[list[str]],
+        rows: pd.DataFrame | list[list[object]],
         column_metadata: list[ColumnMetadata | dict[str, object] | None] | None = None,
     ) -> list[str]:
         """Insert pasted columns before the requested position and return final names."""
         if self._dataset is None:
             raise ValueError("No dataset is selected.")
 
-        column_count = max(
-            len(column_names),
-            max((len(row) for row in rows), default=0),
-        )
+        block = self._coerce_paste_block(rows)
+        column_count = max(len(column_names), len(block.columns))
         if column_count == 0:
             return []
 
@@ -315,17 +372,9 @@ class DataFrameTableModel(QAbstractTableModel):
         self.beginResetModel()
         try:
             frame = self._dataset.frame
-            target_row_count = max(len(frame), len(rows))
+            target_row_count = max(len(frame), len(block))
             if len(frame) < target_row_count:
-                additional_rows = pd.DataFrame(
-                    [[pd.NA] * len(frame.columns)] * (target_row_count - len(frame)),
-                    columns=frame.columns,
-                )
-                self._dataset.frame = pd.concat(
-                    [frame.reset_index(drop=True), additional_rows],
-                    ignore_index=True,
-                )
-                frame = self._dataset.frame
+                frame = frame.reset_index(drop=True).reindex(range(target_row_count))
 
             inserted_names: list[str] = []
             for column_offset in range(column_count):
@@ -336,7 +385,11 @@ class DataFrameTableModel(QAbstractTableModel):
                 )
                 base_name = requested_name or f"Pasted Column {column_offset + 1}"
                 column_name = self._make_unique_column_name(base_name)
-                values = self._pasted_column_values(rows, column_offset, target_row_count)
+                values = (
+                    block.iloc[:, column_offset].reindex(range(target_row_count))
+                    if column_offset < len(block.columns)
+                    else pd.Series(pd.NA, index=range(target_row_count), dtype="object")
+                )
                 series = self._series_from_pasted_values(values)
                 series.index = frame.index
                 frame.insert(
@@ -367,6 +420,7 @@ class DataFrameTableModel(QAbstractTableModel):
                     self._dataset.column_metadata[column_name] = metadata
                 inserted_names.append(column_name)
 
+            self._dataset.frame = frame
             self._dataset.sync_column_metadata_attrs()
             return inserted_names
         finally:
@@ -454,14 +508,8 @@ class DataFrameTableModel(QAbstractTableModel):
                 self._dataset.formulas.pop(column_name, None)
                 self._dataset.column_metadata.pop(column_name, None)
 
-            while len(frame) < end_index:
-                frame.loc[len(frame)] = pd.Series(
-                    [
-                        float("nan") if is_numeric_dtype(frame[column]) else pd.NA
-                        for column in frame.columns
-                    ],
-                    index=frame.columns,
-                )
+            if len(frame) < end_index:
+                frame = frame.reset_index(drop=True).reindex(range(end_index))
 
             if is_numeric_dtype(frame[column_name]):
                 frame[column_name] = pd.to_numeric(
@@ -469,10 +517,10 @@ class DataFrameTableModel(QAbstractTableModel):
                     errors="coerce",
                 ).astype("float64")
 
-            values = [start_value + offset * step for offset in range(count)]
+            values = pd.Series(range(count), dtype="float64").mul(step).add(start_value)
             column_position = list(frame.columns).index(column_name)
-            for offset, value in enumerate(values):
-                frame.iat[start_index + offset, column_position] = value
+            frame.iloc[start_index:end_index, column_position] = values.to_numpy()
+            self._dataset.frame = frame
             self._dataset.formulas.pop(column_name, None)
             set_column_operation_comment(
                 self._dataset,
@@ -638,41 +686,75 @@ class DataFrameTableModel(QAbstractTableModel):
             counter += 1
         return f"{base_name} ({counter})"
 
-    def _pasted_column_values(
-        self,
-        rows: list[list[str]],
-        column_offset: int,
-        target_row_count: int,
-    ) -> list[object]:
-        """Return one pasted column padded to the dataset row count."""
-        values: list[object] = []
-        for row_index in range(target_row_count):
-            if row_index < len(rows) and column_offset < len(rows[row_index]):
-                values.append(rows[row_index][column_offset])
-            else:
-                values.append(pd.NA)
-        return values
-
-    def _series_from_pasted_values(self, values: list[object]) -> pd.Series:
+    def _series_from_pasted_values(self, values: pd.Series | list[object]) -> pd.Series:
         """Build a Series from clipboard text, preserving numeric columns when possible."""
-        normalized_values: list[object] = []
-        for value in values:
-            if pd.isna(value):
-                normalized_values.append(pd.NA)
-                continue
-
-            text = str(value).strip()
-            normalized_values.append(pd.NA if text == "" else text)
-
-        series = pd.Series(normalized_values, dtype="object")
+        series = pd.Series(values, dtype="object").astype("string").str.strip()
+        series = series.mask(series.eq(""), pd.NA)
         non_empty = series.dropna()
         if non_empty.empty:
-            return series
+            return series.astype("object")
 
         converted = pd.to_numeric(non_empty, errors="coerce")
         if not converted.isna().any():
             return pd.to_numeric(series, errors="coerce")
-        return series
+        return series.astype("object")
+
+    @staticmethod
+    def _coerce_paste_block(rows: pd.DataFrame | list[list[object]]) -> pd.DataFrame:
+        """Return clipboard values as a reset-index rectangular DataFrame."""
+        if isinstance(rows, pd.DataFrame):
+            return rows.reset_index(drop=True)
+        if not rows:
+            return pd.DataFrame()
+        column_count = max((len(row) for row in rows), default=0)
+        padded_rows = [list(row) + [""] * (column_count - len(row)) for row in rows]
+        return pd.DataFrame(padded_rows, dtype="object")
+
+    @staticmethod
+    def _normalize_pasted_series(
+        target: pd.Series,
+        source: pd.Series,
+        metadata: ColumnMetadata | None,
+    ) -> pd.Series:
+        """Normalize one pasted column in bulk for its worksheet destination."""
+        text = source.astype("string").str.strip()
+        blank = text.isna() | text.eq("")
+        value_type = metadata.value_type if metadata is not None else ""
+
+        if value_type == "text" or (not value_type and not is_numeric_dtype(target)):
+            return text.mask(blank, pd.NA).astype("object")
+
+        numeric = pd.to_numeric(text.mask(blank), errors="coerce")
+        invalid = ~blank & numeric.isna()
+        if value_type in COLUMN_NUMERIC_TYPES and invalid.any():
+            bad_value = str(text.loc[invalid].iloc[0])
+            raise ValueError(
+                f"Column '{target.name}' is marked {column_type_label(value_type)}; "
+                f"clipboard value '{bad_value}' is not numeric."
+            )
+        if invalid.any():
+            mixed = numeric.astype("object")
+            mixed.loc[invalid] = text.loc[invalid]
+            mixed.loc[blank] = pd.NA
+            return mixed
+        return numeric
+
+    def _new_column_names(self, count: int) -> list[str]:
+        """Return unique default names for columns appended by a pasted block."""
+        if self._dataset is None:
+            return []
+        used = {str(column) for column in self._dataset.frame.columns}
+        names: list[str] = []
+        for offset in range(count):
+            base_name = f"Column {len(used) + 1}"
+            candidate = base_name
+            suffix = 2
+            while candidate in used:
+                candidate = f"{base_name} ({suffix})"
+                suffix += 1
+            names.append(candidate)
+            used.add(candidate)
+        return names
 
     def _snapshot(self) -> _DatasetSnapshot:
         """Return a deep copy of the current dataset edit state."""
@@ -683,6 +765,54 @@ class DataFrameTableModel(QAbstractTableModel):
             formulas=dict(self._dataset.formulas),
             column_metadata=copy_column_metadata(self._dataset.column_metadata),
         )
+
+    def _snapshot_if_within_budget(self) -> _DatasetSnapshot | None:
+        """Copy the current edit state only when one snapshot fits the budget."""
+        if self._dataset is None:
+            return None
+        estimated_bytes = self._frame_memory_bytes(self._dataset.frame)
+        estimated_bytes += len(self._dataset.formulas) * 256
+        estimated_bytes += len(self._dataset.column_metadata) * 512
+        if estimated_bytes > self._max_history_bytes:
+            return None
+        return self._snapshot()
+
+    def _push_history(
+        self,
+        stack: list[_DatasetSnapshot],
+        snapshot: _DatasetSnapshot,
+    ) -> bool:
+        """Push a snapshot while enforcing entry-count and memory budgets."""
+        snapshot_bytes = self._snapshot_memory_bytes(snapshot)
+        if snapshot_bytes > self._max_history_bytes:
+            stack.clear()
+            return False
+
+        stack.append(snapshot)
+        while len(stack) > self._max_history_entries:
+            stack.pop(0)
+        while len(stack) > 1 and self._history_memory_bytes(stack) > self._max_history_bytes:
+            stack.pop(0)
+        return True
+
+    @staticmethod
+    def _snapshot_memory_bytes(snapshot: _DatasetSnapshot) -> int:
+        """Return a conservative buffer-size estimate for one history snapshot."""
+        frame_bytes = DataFrameTableModel._frame_memory_bytes(snapshot.frame)
+        metadata_bytes = len(snapshot.formulas) * 256 + len(snapshot.column_metadata) * 512
+        return frame_bytes + metadata_bytes
+
+    @staticmethod
+    def _frame_memory_bytes(frame: pd.DataFrame) -> int:
+        """Return the estimated copied buffer size for one DataFrame."""
+        try:
+            return int(frame.memory_usage(index=True, deep=False).sum())
+        except Exception:
+            return 0
+
+    def _history_memory_bytes(self, stack: list[_DatasetSnapshot]) -> int:
+        """Return the estimated memory retained by a history stack."""
+        return sum(self._snapshot_memory_bytes(snapshot) for snapshot in stack)
 
     def _restore_snapshot(self, snapshot: _DatasetSnapshot) -> None:
         """Replace the current dataset contents with a stored snapshot."""
