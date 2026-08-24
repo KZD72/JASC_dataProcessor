@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import re
+from datetime import date
 from pathlib import Path
 from fpdf import FPDF
 
@@ -223,8 +224,15 @@ def render_pdf_manual():
     pdf.cell(0, 5, "Reference Manual & Guide", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(100, 110, 120)
-    pdf.cell(0, 5, "Version 0.1.0 (Stable release)", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 5, "Compiled: June 2026", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, "Version 0.1.0", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(
+        0,
+        5,
+        f"Compiled: {date.today().strftime('%B %Y')}",
+        align="C",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
     pdf.cell(0, 5, "License: GNU General Public License v3.0", align="C", new_x="LMARGIN", new_y="NEXT")
     
     # ==========================================
@@ -502,19 +510,17 @@ def render_pdf_manual():
     pdf.rect(20, pdf.get_y() + 1, 40, 1.5, "F")
     pdf.ln(8)
     
-    # Write TOC entries
+    # Write chapter entries only. A comprehensive manual can contain enough
+    # subsections to overflow the reserved TOC page and append stray pages at
+    # the end of the document if every H3 entry is rendered here.
     for entry, page_num, depth in toc_entries:
-        # We only list level 2 (Chapters) and level 3 (Subsections)
-        if depth == 2:
-            pdf.set_font("Helvetica", "B", 10.5)
-            pdf.set_text_color(15, 32, 66)
-            indent = ""
-            dot_color = (200, 210, 220)
-        else: # level 3
-            pdf.set_font("Helvetica", "", 9.5)
-            pdf.set_text_color(38, 55, 71)
-            indent = "    "
-            dot_color = (230, 235, 240)
+        if depth != 2:
+            continue
+
+        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.set_text_color(15, 32, 66)
+        indent = ""
+        dot_color = (200, 210, 220)
             
         full_entry = f"{indent}{entry}"
         entry_width = pdf.get_string_width(full_entry)
@@ -538,12 +544,8 @@ def render_pdf_manual():
         pdf.write(5.5, f" {dot_leader} ")
         
         # Restore text color for page number
-        if depth == 2:
-            pdf.set_font("Helvetica", "B", 10.5)
-            pdf.set_text_color(15, 32, 66)
-        else:
-            pdf.set_font("Helvetica", "", 9.5)
-            pdf.set_text_color(38, 55, 71)
+        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.set_text_color(15, 32, 66)
             
         pdf.cell(0, 5.5, page_str, align="R", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(1)
