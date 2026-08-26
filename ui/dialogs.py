@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSplitter,
     QSpinBox,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 from scipy import ndimage, signal
 
+from core.color_scale import ColorScaleCalibration
 from core.file_io import ImportOptions
 from core.workspace import (
     COLUMN_ROLE_OPTIONS,
@@ -989,6 +991,68 @@ class FigureDigitizerView(QGraphicsView):
         return getattr(QGraphicsView.ViewportAnchor, name)
 
 
+class FigureExtractionModeDialog(QDialog):
+    """Choose how values should be extracted from a raster figure."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Build the figure-type chooser shown before loading an image."""
+        super().__init__(parent)
+        self.setWindowTitle("Import From Figure")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+
+        heading = QLabel("What kind of data does the image contain?")
+        heading.setStyleSheet("font-size: 14px; font-weight: 600;")
+
+        self._xy_radio = QRadioButton("XY graph (curves, lines, or symbols)")
+        self._xy_radio.setChecked(True)
+        xy_hint = QLabel(
+            "Calibrate X and Y axes, then extract curve points or marker centres."
+        )
+        xy_hint.setWordWrap(True)
+
+        self._colorplot_radio = QRadioButton("2D colour plot / heatmap")
+        color_hint = QLabel(
+            "Calibrate X and Y, sample the displayed colour scale, then click the image "
+            "to retrieve estimated X, Y, and colour-mapped values."
+        )
+        color_hint.setWordWrap(True)
+
+        disclaimer = QLabel(
+            "Accuracy notice: colour values are estimates from rendered pixels. Image "
+            "compression, anti-aliasing, resizing, overlays, and limited colour resolution "
+            "can introduce unavoidable error."
+        )
+        disclaimer.setWordWrap(True)
+        disclaimer.setStyleSheet(
+            "QLabel { background: #fff7ed; color: #7c2d12; border: 1px solid #fb923c; "
+            "border-radius: 4px; padding: 8px; }"
+        )
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setText("Continue")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(heading)
+        layout.addSpacing(6)
+        layout.addWidget(self._xy_radio)
+        layout.addWidget(xy_hint)
+        layout.addSpacing(8)
+        layout.addWidget(self._colorplot_radio)
+        layout.addWidget(color_hint)
+        layout.addSpacing(10)
+        layout.addWidget(disclaimer)
+        layout.addWidget(buttons)
+
+    def extraction_mode(self) -> str:
+        """Return ``xy`` or ``colorplot`` for the selected workflow."""
+        return "colorplot" if self._colorplot_radio.isChecked() else "xy"
+
+
 class FigureDigitizerDialog(QDialog):
     """Import a raster figure and extract calibrated XY data from it."""
 
@@ -1142,6 +1206,10 @@ class FigureDigitizerDialog(QDialog):
     def source_path(self) -> str:
         """Return the loaded image path."""
         return self._image_path
+
+    def extraction_kind(self) -> str:
+        """Return the workflow identifier used by the dataset importer."""
+        return "xy"
 
     def extracted_rows(self) -> list[dict[str, object]]:
         """Return calibrated extracted rows from manual and automatic points."""
@@ -1497,7 +1565,7 @@ class FigureDigitizerDialog(QDialog):
         clear_roi_button.clicked.connect(self._clear_roi_points)
         roi_buttons.addWidget(roi_mode_button)
         roi_buttons.addWidget(clear_roi_button)
-        self._roi_status_label = QLabel("No ROI brush marks. Auto trace scans the calibrated plot area.")
+        self._roi_status_label = QLabel("No ROI brush marks. Auto trace scans the full working image.")
         self._roi_status_label.setWordWrap(True)
         roi_form.addRow("Brush size", self._roi_brush_size_spin)
         roi_form.addRow(roi_buttons)
@@ -3356,23 +3424,9 @@ class FigureDigitizerDialog(QDialog):
         return intervals_by_x
 
     def _plot_bounds(self) -> tuple[int, int, int, int]:
-        """Return the scan bounds, using calibration points when available."""
+        """Return full-image scan bounds; axis references only define scale."""
         if self._image.isNull():
             return (0, 0, 0, 0)
-        if all(key in self._calibration_pixels for key, _label in self._CALIBRATION_KEYS):
-            x_pixels = [
-                self._calibration_pixels["x1"][0],
-                self._calibration_pixels["x2"][0],
-            ]
-            y_pixels = [
-                self._calibration_pixels["y1"][1],
-                self._calibration_pixels["y2"][1],
-            ]
-            left = max(0, int(math.floor(min(x_pixels))))
-            right = min(self._image.width() - 1, int(math.ceil(max(x_pixels))))
-            top = max(0, int(math.floor(min(y_pixels))))
-            bottom = min(self._image.height() - 1, int(math.ceil(max(y_pixels))))
-            return left, right, top, bottom
         return (0, self._image.width() - 1, 0, self._image.height() - 1)
 
     def _refresh_all(self) -> None:
@@ -3609,7 +3663,7 @@ class FigureDigitizerDialog(QDialog):
                 f"{len(self._roi_points)} ROI brush mark(s). Auto trace is restricted to the painted region."
             )
         else:
-            self._roi_status_label.setText("No ROI brush marks. Auto trace scans the calibrated plot area.")
+            self._roi_status_label.setText("No ROI brush marks. Auto trace scans the full working image.")
 
     def _refresh_cursor_preview(self) -> None:
         """Update cursor coordinate text and magnifier crop."""
@@ -3863,6 +3917,590 @@ class FigureDigitizerDialog(QDialog):
         if width == "" or height == "":
             return ""
         return f"{width} x {height}"
+
+
+class ColorPlotDigitizerDialog(FigureDigitizerDialog):
+    """Extract calibrated X/Y/Z probes from a raster colour plot or heatmap."""
+
+    _DISCLAIMER = (
+        "Accuracy notice: extracted colour values are estimates from rendered pixels. "
+        "Image compression, anti-aliasing, resizing, overlays, and limited palette "
+        "resolution can introduce unavoidable error. Review distance, confidence, and "
+        "ambiguity diagnostics before using the data."
+    )
+
+    def __init__(
+        self,
+        image_path: str | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build the colour-plot extraction workspace."""
+        self._colorbar_pixels: dict[str, tuple[float, float]] = {}
+        self._color_probes: list[tuple[float, float]] = []
+        self._color_scale_cache: ColorScaleCalibration | None = None
+        self._color_palette_cache: np.ndarray | None = None
+        self._color_image_rgb_cache: np.ndarray | None = None
+        super().__init__(image_path, parent)
+        self.setWindowTitle("Import From Figure - 2D Colour Plot")
+
+    def extraction_kind(self) -> str:
+        """Return the colour-plot workflow identifier."""
+        return "colorplot"
+
+    def dataset_name(self) -> str:
+        """Return the requested output dataset name."""
+        return self._dataset_name_edit.text().strip() or "Digitized Colour Plot"
+
+    def load_image(self, image_path: str) -> None:
+        """Load a raster image and choose a colour-plot-specific default name."""
+        super().load_image(image_path)
+        if not self._image.isNull():
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            if self._dataset_name_edit.text().strip() == f"{base_name}_digitized":
+                self._dataset_name_edit.setText(f"{base_name}_colourplot")
+
+    def _set_working_image(self, image: QImage, reset_view: bool = True) -> None:
+        """Replace the canvas image and invalidate its cached RGB array."""
+        self._color_image_rgb_cache = None
+        super()._set_working_image(image, reset_view)
+
+    def _color_image_rgb(self) -> np.ndarray:
+        """Return one cached RGB array for repeated palette and probe sampling."""
+        if self._color_image_rgb_cache is None:
+            self._color_image_rgb_cache = self._qimage_to_rgb_array(self._image)
+        return self._color_image_rgb_cache
+
+    def _build_calibration_tab(self) -> QWidget:
+        """Build shared X/Y calibration plus empirical colour-bar controls."""
+        tab = super()._build_calibration_tab()
+        irrelevant_targets = {
+            "manual",
+            "manual_error_radius",
+            "manual_error_four",
+            "roi_brush",
+            "trace_color",
+            "symbol_sample",
+        }
+        for index in reversed(range(self._click_target_combo.count())):
+            if str(self._click_target_combo.itemData(index)) in irrelevant_targets:
+                self._click_target_combo.removeItem(index)
+        self._click_target_combo.addItem("Colour scale: low-value end", "colorbar_low")
+        self._click_target_combo.addItem("Colour scale: high-value end", "colorbar_high")
+        self._click_target_combo.addItem("Colour-value probe", "color_probe")
+
+        self._color_low_value_edit = QLineEdit("0")
+        self._color_high_value_edit = QLineEdit("1")
+        self._color_scale_combo = QComboBox()
+        self._color_scale_combo.addItem("Linear", "linear")
+        self._color_scale_combo.addItem("Log10", "log")
+        self._colorbar_width_spin = QSpinBox()
+        self._colorbar_width_spin.setRange(1, 31)
+        self._colorbar_width_spin.setSingleStep(2)
+        self._colorbar_width_spin.setValue(5)
+        self._colorbar_width_spin.setSuffix(" px")
+        self._colorbar_samples_spin = QSpinBox()
+        self._colorbar_samples_spin.setRange(16, 2048)
+        self._colorbar_samples_spin.setValue(256)
+        self._maximum_color_distance_spin = QDoubleSpinBox()
+        self._maximum_color_distance_spin.setRange(1.0, 100.0)
+        self._maximum_color_distance_spin.setDecimals(1)
+        self._maximum_color_distance_spin.setValue(18.0)
+        self._maximum_color_distance_spin.setToolTip(
+            "Maximum CIE Lab distance accepted as a valid palette match."
+        )
+        for edit in (self._color_low_value_edit, self._color_high_value_edit):
+            edit.textChanged.connect(self._invalidate_color_scale)
+        for control in (
+            self._color_scale_combo,
+            self._colorbar_width_spin,
+            self._colorbar_samples_spin,
+            self._maximum_color_distance_spin,
+        ):
+            if isinstance(control, QComboBox):
+                control.currentIndexChanged.connect(self._invalidate_color_scale)
+            else:
+                control.valueChanged.connect(self._invalidate_color_scale)
+
+        pick_low_button = QPushButton("Pick Low End")
+        pick_low_button.clicked.connect(lambda: self._set_click_target("colorbar_low"))
+        pick_high_button = QPushButton("Pick High End")
+        pick_high_button.clicked.connect(lambda: self._set_click_target("colorbar_high"))
+        rebuild_button = QPushButton("Rebuild Scale")
+        rebuild_button.clicked.connect(lambda: self._rebuild_color_scale(show_errors=True))
+        clear_button = QPushButton("Clear Scale")
+        clear_button.clicked.connect(self._clear_color_scale)
+
+        color_group = QGroupBox("Displayed Colour Scale")
+        color_layout = QFormLayout(color_group)
+        color_layout.addRow("Low-end value", self._color_low_value_edit)
+        color_layout.addRow("High-end value", self._color_high_value_edit)
+        color_layout.addRow("Value normalization", self._color_scale_combo)
+        color_layout.addRow("Bar sample width", self._colorbar_width_spin)
+        color_layout.addRow("Palette samples", self._colorbar_samples_spin)
+        color_layout.addRow("Maximum Lab distance", self._maximum_color_distance_spin)
+        pick_row = QHBoxLayout()
+        pick_row.addWidget(pick_low_button)
+        pick_row.addWidget(pick_high_button)
+        color_layout.addRow(pick_row)
+        build_row = QHBoxLayout()
+        build_row.addWidget(rebuild_button)
+        build_row.addWidget(clear_button)
+        color_layout.addRow(build_row)
+        self._color_palette_label = QLabel("Pick both ends of the colour bar.")
+        self._color_palette_label.setAlignment(Qt.AlignCenter)
+        self._color_palette_label.setMinimumHeight(34)
+        self._color_palette_label.setStyleSheet(
+            "QLabel { background: #f3f4f6; border: 1px solid #9ca3af; padding: 4px; }"
+        )
+        self._color_scale_status_label = QLabel("Colour scale is not calibrated.")
+        self._color_scale_status_label.setWordWrap(True)
+        color_layout.addRow("Sampled palette", self._color_palette_label)
+        color_layout.addRow(self._color_scale_status_label)
+
+        layout = tab.layout()
+        if isinstance(layout, QVBoxLayout):
+            stretch_item = layout.takeAt(layout.count() - 1)
+            layout.addWidget(color_group)
+            if stretch_item is not None:
+                layout.addItem(stretch_item)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(tab)
+        return scroll
+
+    def _build_extraction_tab(self) -> QWidget:
+        """Build click-probe controls and an unavoidable accuracy disclaimer."""
+        tab = QWidget()
+        disclaimer = QLabel(self._DISCLAIMER)
+        disclaimer.setObjectName("colorExtractionDisclaimer")
+        disclaimer.setWordWrap(True)
+        disclaimer.setStyleSheet(
+            "QLabel { background: #fff7ed; color: #7c2d12; border: 1px solid #fb923c; "
+            "border-radius: 4px; padding: 8px; }"
+        )
+
+        probe_group = QGroupBox("Point Probes")
+        probe_layout = QFormLayout(probe_group)
+        self._probe_patch_radius_spin = QSpinBox()
+        self._probe_patch_radius_spin.setRange(0, 10)
+        self._probe_patch_radius_spin.setValue(1)
+        self._probe_patch_radius_spin.setSuffix(" px")
+        self._probe_patch_radius_spin.setToolTip(
+            "Median RGB is taken from this radius around each click to reduce single-pixel noise."
+        )
+        self._probe_patch_radius_spin.valueChanged.connect(self._refresh_preview)
+        button_row = QHBoxLayout()
+        start_button = QPushButton("Start Probing")
+        start_button.clicked.connect(lambda: self._set_click_target("color_probe"))
+        stop_button = QPushButton("Stop")
+        stop_button.clicked.connect(lambda: self._set_click_target("none"))
+        button_row.addWidget(start_button)
+        button_row.addWidget(stop_button)
+        edit_row = QHBoxLayout()
+        undo_button = QPushButton("Undo Last")
+        undo_button.clicked.connect(self._undo_color_probe)
+        remove_button = QPushButton("Remove Selected")
+        remove_button.clicked.connect(self._remove_selected_color_probes)
+        clear_button = QPushButton("Clear Probes")
+        clear_button.clicked.connect(self._clear_color_probes)
+        edit_row.addWidget(undo_button)
+        edit_row.addWidget(remove_button)
+        edit_row.addWidget(clear_button)
+        self._color_probe_status_label = QLabel("No colour-value probes.")
+        self._color_probe_status_label.setWordWrap(True)
+        probe_layout.addRow("Median patch radius", self._probe_patch_radius_spin)
+        probe_layout.addRow(button_row)
+        probe_layout.addRow(edit_row)
+        probe_layout.addRow(self._color_probe_status_label)
+
+        instructions = QLabel(
+            "Workflow: calibrate X and Y, pick the low- and high-value centres of the "
+            "displayed colour bar, enter their values, rebuild the scale, then start "
+            "probing and click locations in the colour plot."
+        )
+        instructions.setWordWrap(True)
+
+        layout = QVBoxLayout(tab)
+        layout.addWidget(instructions)
+        layout.addWidget(disclaimer)
+        layout.addWidget(probe_group)
+        layout.addStretch()
+        return tab
+
+    def _build_output_tab(self) -> QWidget:
+        """Build the colour-probe output preview."""
+        tab = QWidget()
+        self._dataset_name_edit = QLineEdit("digitized_colourplot")
+        self._preview_table = QTableWidget(0, 13)
+        self._preview_table.setHorizontalHeaderLabels(
+            [
+                "X",
+                "Y",
+                "Z",
+                "Pixel X",
+                "Pixel Y",
+                "R",
+                "G",
+                "B",
+                "Palette",
+                "Distance",
+                "Confidence",
+                "Ambiguous",
+                "Valid",
+            ]
+        )
+        self._preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._preview_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._preview_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._preview_table.setAlternatingRowColors(True)
+        self._preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._preview_table.horizontalHeader().setStretchLastSection(True)
+        self._preview_status_label = QLabel("No extracted points.")
+        self._preview_status_label.setWordWrap(True)
+
+        layout = QVBoxLayout(tab)
+        layout.addWidget(QLabel("Dataset name"))
+        layout.addWidget(self._dataset_name_edit)
+        layout.addWidget(self._preview_table, 1)
+        layout.addWidget(self._preview_status_label)
+        return tab
+
+    def _handle_canvas_click(self, pixel_x: float, pixel_y: float) -> None:
+        """Route colour-scale and probe clicks, delegating shared calibration clicks."""
+        if self._image.isNull():
+            return
+        if pixel_x < 0 or pixel_y < 0 or pixel_x >= self._image.width() or pixel_y >= self._image.height():
+            return
+        target = str(self._click_target_combo.currentData())
+        if target == "colorbar_low":
+            self._colorbar_pixels["low"] = (float(pixel_x), float(pixel_y))
+            self._invalidate_color_scale(refresh=False)
+            self._set_click_target("colorbar_high")
+        elif target == "colorbar_high":
+            self._colorbar_pixels["high"] = (float(pixel_x), float(pixel_y))
+            self._invalidate_color_scale(refresh=False)
+            self._rebuild_color_scale(show_errors=False)
+            self._set_click_target("color_probe")
+        elif target == "color_probe":
+            self._color_probes.append((float(pixel_x), float(pixel_y)))
+            self._color_probe_status_label.setText(
+                f"{len(self._color_probes)} probe(s). Select rows in Output to remove individual probes."
+            )
+        else:
+            super()._handle_canvas_click(pixel_x, pixel_y)
+            return
+        self._refresh_all()
+
+    def _refresh_tool_mode_label(self) -> None:
+        """Show colour-specific picking modes in the shared canvas banner."""
+        super()._refresh_tool_mode_label()
+        if not hasattr(self, "_click_target_combo") or self._image.isNull():
+            return
+        if getattr(self, "_pan_checkbox", None) is not None and self._pan_checkbox.isChecked():
+            return
+        target = str(self._click_target_combo.currentData())
+        if target == "colorbar_low":
+            self._tool_mode_label.setText("Mode: Colour scale low end - click the centre of its low-value end.")
+        elif target == "colorbar_high":
+            self._tool_mode_label.setText("Mode: Colour scale high end - click the centre of its high-value end.")
+        elif target == "color_probe":
+            self._tool_mode_label.setText("Mode: Colour-value probe - click the colour plot to add X/Y/Z samples.")
+
+    def _clear_digitized_points(self) -> None:
+        """Clear shared calibration and colour state tied to image pixels."""
+        super()._clear_digitized_points()
+        self._colorbar_pixels.clear()
+        self._color_probes.clear()
+        self._color_scale_cache = None
+        self._color_palette_cache = None
+        if hasattr(self, "_color_scale_status_label"):
+            self._color_scale_status_label.setText("Colour scale is not calibrated.")
+        if hasattr(self, "_color_palette_label"):
+            self._color_palette_label.setPixmap(QPixmap())
+            self._color_palette_label.setText("Pick both ends of the colour bar.")
+        if hasattr(self, "_color_probe_status_label"):
+            self._color_probe_status_label.setText("No colour-value probes.")
+
+    def _clear_color_scale(self) -> None:
+        """Remove sampled colour-bar endpoints and cached calibration."""
+        self._colorbar_pixels.clear()
+        self._color_scale_cache = None
+        self._color_palette_cache = None
+        self._color_palette_label.setPixmap(QPixmap())
+        self._color_palette_label.setText("Pick both ends of the colour bar.")
+        self._color_scale_status_label.setText("Colour scale is not calibrated.")
+        self._set_click_target("colorbar_low")
+        self._refresh_all()
+
+    def _invalidate_color_scale(self, _value: object = None, refresh: bool = True) -> None:
+        """Discard cached palette values after a calibration-control change."""
+        self._color_scale_cache = None
+        self._color_palette_cache = None
+        if hasattr(self, "_color_scale_status_label"):
+            self._color_scale_status_label.setText("Colour-scale settings changed; rebuild or continue to preview.")
+        if refresh and hasattr(self, "_preview_table"):
+            self._refresh_preview()
+            self._refresh_cursor_preview()
+
+    def _color_endpoint_values(self) -> tuple[float, float]:
+        """Parse colour-scale endpoint values."""
+        try:
+            low_value = float(self._color_low_value_edit.text().strip())
+            high_value = float(self._color_high_value_edit.text().strip())
+        except ValueError as exc:
+            raise ValueError("Colour-scale endpoint values must be numeric.") from exc
+        return low_value, high_value
+
+    def _sample_colorbar_palette(self) -> np.ndarray:
+        """Sample a median RGB stripe along the picked colour-bar segment."""
+        if self._image.isNull():
+            raise ValueError("Load an image before calibrating its colour scale.")
+        if "low" not in self._colorbar_pixels or "high" not in self._colorbar_pixels:
+            raise ValueError("Pick both the low- and high-value ends of the colour bar.")
+        low = np.asarray(self._colorbar_pixels["low"], dtype=float)
+        high = np.asarray(self._colorbar_pixels["high"], dtype=float)
+        direction = high - low
+        length = float(np.linalg.norm(direction))
+        if length < 2.0:
+            raise ValueError("Colour-bar endpoints must be at least two pixels apart.")
+        perpendicular = np.asarray([-direction[1], direction[0]], dtype=float) / length
+        sample_count = int(self._colorbar_samples_spin.value())
+        width = int(self._colorbar_width_spin.value())
+        positions = low[None, :] + np.linspace(0.0, 1.0, sample_count)[:, None] * direction[None, :]
+        offsets = np.arange(width, dtype=float) - (width - 1.0) / 2.0
+        sample_positions = positions[:, None, :] + offsets[None, :, None] * perpendicular[None, None, :]
+        sample_x = np.clip(np.rint(sample_positions[:, :, 0]).astype(int), 0, self._image.width() - 1)
+        sample_y = np.clip(np.rint(sample_positions[:, :, 1]).astype(int), 0, self._image.height() - 1)
+        rgb = self._color_image_rgb()
+        return np.median(rgb[sample_y, sample_x], axis=1)
+
+    def _get_color_scale(self) -> ColorScaleCalibration:
+        """Return the current empirical colour scale, rebuilding it when needed."""
+        if self._color_scale_cache is not None:
+            return self._color_scale_cache
+        palette = self._sample_colorbar_palette()
+        low_value, high_value = self._color_endpoint_values()
+        model = ColorScaleCalibration(
+            palette,
+            low_value,
+            high_value,
+            str(self._color_scale_combo.currentData()),
+            float(self._maximum_color_distance_spin.value()),
+        )
+        self._color_palette_cache = palette
+        self._color_scale_cache = model
+        return model
+
+    def _rebuild_color_scale(self, show_errors: bool = True) -> bool:
+        """Build the colour calibration and update its visual preview."""
+        self._color_scale_cache = None
+        self._color_palette_cache = None
+        try:
+            model = self._get_color_scale()
+        except ValueError as exc:
+            self._color_scale_status_label.setText(str(exc))
+            if show_errors:
+                QMessageBox.warning(self, "Colour Scale Calibration", str(exc))
+            return False
+        self._update_palette_preview(model.palette_rgb)
+        self._color_scale_status_label.setText(
+            f"Colour scale ready: {len(model.palette_rgb)} samples, "
+            f"{model.low_value:g} to {model.high_value:g} ({model.scale}); "
+            f"valid-match Lab distance {model.maximum_distance:g}."
+        )
+        self._refresh_preview()
+        self._refresh_cursor_preview()
+        return True
+
+    def _update_palette_preview(self, palette: np.ndarray) -> None:
+        """Render the sampled palette inside the calibration panel."""
+        width = 320
+        indices = np.rint(np.linspace(0, len(palette) - 1, width)).astype(int)
+        strip = np.clip(palette[indices], 0, 255).astype(np.uint8)
+        preview = np.repeat(strip[None, :, :], 24, axis=0)
+        pixmap = QPixmap.fromImage(self._rgb_array_to_qimage(preview))
+        self._color_palette_label.setText("")
+        self._color_palette_label.setPixmap(pixmap)
+
+    def _sample_probe_rgb(self, pixel_x: float, pixel_y: float) -> np.ndarray:
+        """Return median RGB around a probe location."""
+        radius = int(self._probe_patch_radius_spin.value())
+        center_x = min(max(0, int(round(pixel_x))), self._image.width() - 1)
+        center_y = min(max(0, int(round(pixel_y))), self._image.height() - 1)
+        left = max(0, center_x - radius)
+        right = min(self._image.width(), center_x + radius + 1)
+        top = max(0, center_y - radius)
+        bottom = min(self._image.height(), center_y + radius + 1)
+        rgb = self._color_image_rgb()
+        return np.median(rgb[top:bottom, left:right].reshape(-1, 3), axis=0)
+
+    def extracted_rows(self) -> list[dict[str, object]]:
+        """Return one diagnostic-rich X/Y/Z row for each colour probe."""
+        try:
+            model = self._get_color_scale()
+        except ValueError:
+            model = None
+        rows: list[dict[str, object]] = []
+        for pixel_x, pixel_y in self._color_probes:
+            data = self._pixel_to_data(pixel_x, pixel_y)
+            data_x, data_y = data if data is not None else (None, None)
+            rgb = self._sample_probe_rgb(pixel_x, pixel_y)
+            match = model.match_rgb(rgb) if model is not None else None
+            rows.append(
+                {
+                    "x": data_x,
+                    "y": data_y,
+                    "z": match.value if match is not None else None,
+                    "pixel_x": pixel_x,
+                    "pixel_y": pixel_y,
+                    "red": int(round(float(rgb[0]))),
+                    "green": int(round(float(rgb[1]))),
+                    "blue": int(round(float(rgb[2]))),
+                    "palette_position": match.palette_position if match is not None else None,
+                    "color_distance": match.distance if match is not None else None,
+                    "color_confidence": match.confidence if match is not None else None,
+                    "color_ambiguous": match.ambiguous if match is not None else True,
+                    "color_valid": match.valid if match is not None else False,
+                    "patch_radius": int(self._probe_patch_radius_spin.value()),
+                    "method": "color_probe",
+                    "source_image": self._image_path,
+                }
+            )
+        return rows
+
+    def _redraw_markers(self) -> None:
+        """Draw shared calibration, the colour-bar segment, and all probes."""
+        super()._redraw_markers()
+        low = self._colorbar_pixels.get("low")
+        high = self._colorbar_pixels.get("high")
+        if low is not None:
+            self._add_marker(low[0], low[1], "#0ea5e9", "Colour scale low-value end", radius=5.0)
+        if high is not None:
+            self._add_marker(high[0], high[1], "#ec4899", "Colour scale high-value end", radius=5.0)
+        if low is not None and high is not None:
+            line = QGraphicsLineItem(low[0], low[1], high[0], high[1])
+            line.setPen(QPen(QColor("#7c3aed"), 2.0))
+            line.setToolTip("Sampled colour-bar path")
+            line.setZValue(9)
+            self._scene.addItem(line)
+            self._marker_items.append(line)
+        for index, (pixel_x, pixel_y) in enumerate(self._color_probes, start=1):
+            self._add_cross_marker(pixel_x, pixel_y, "#dc2626", f"Colour probe {index}", radius=5.0)
+
+    def _refresh_cursor_preview(self) -> None:
+        """Append live colour/value diagnostics to the shared X/Y cursor preview."""
+        super()._refresh_cursor_preview()
+        if self._image.isNull() or self._cursor_pixel is None or not hasattr(self, "_probe_patch_radius_spin"):
+            return
+        try:
+            model = self._get_color_scale()
+            rgb = self._sample_probe_rgb(*self._cursor_pixel)
+            match = model.match_rgb(rgb)
+        except ValueError:
+            return
+        validity = "valid" if match.valid else ("ambiguous" if match.ambiguous else "outside limit")
+        base_text = self._cursor_status_label.text()
+        self._cursor_status_label.setText(
+            f"{base_text}\nZ: {match.value:.10g}\n"
+            f"RGB: ({rgb[0]:.0f}, {rgb[1]:.0f}, {rgb[2]:.0f})\n"
+            f"Confidence: {match.confidence:.1%}; {validity}"
+        )
+
+    def _refresh_preview(self) -> None:
+        """Refresh colour-probe rows and diagnostic status."""
+        if not hasattr(self, "_preview_table"):
+            return
+        rows = self.extracted_rows()
+        self._preview_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                self._format_number(row.get("x")),
+                self._format_number(row.get("y")),
+                self._format_number(row.get("z")),
+                self._format_number(row.get("pixel_x")),
+                self._format_number(row.get("pixel_y")),
+                row.get("red", ""),
+                row.get("green", ""),
+                row.get("blue", ""),
+                self._format_number(row.get("palette_position")),
+                self._format_number(row.get("color_distance")),
+                self._format_number(row.get("color_confidence")),
+                "yes" if row.get("color_ambiguous") else "no",
+                "yes" if row.get("color_valid") else "no",
+            ]
+            for column_index, value in enumerate(values):
+                self._preview_table.setItem(row_index, column_index, QTableWidgetItem(str(value)))
+        valid_count = sum(bool(row.get("color_valid")) for row in rows)
+        ambiguous_count = sum(bool(row.get("color_ambiguous")) for row in rows)
+        if rows:
+            self._preview_status_label.setText(
+                f"{len(rows)} probe(s): {valid_count} valid; {ambiguous_count} ambiguous. "
+                "All rows are retained so diagnostics can be reviewed."
+            )
+        else:
+            self._preview_status_label.setText("No extracted points.")
+
+    def _undo_color_probe(self) -> None:
+        """Remove the most recently added colour probe."""
+        if self._color_probes:
+            self._color_probes.pop()
+        self._color_probe_status_label.setText(f"{len(self._color_probes)} probe(s).")
+        self._refresh_all()
+
+    def _remove_selected_color_probes(self) -> None:
+        """Remove probes represented by selected Output table rows."""
+        selected_rows = sorted({index.row() for index in self._preview_table.selectedIndexes()}, reverse=True)
+        for row in selected_rows:
+            if 0 <= row < len(self._color_probes):
+                self._color_probes.pop(row)
+        self._color_probe_status_label.setText(f"{len(self._color_probes)} probe(s).")
+        self._refresh_all()
+
+    def _clear_color_probes(self) -> None:
+        """Remove all colour probes without changing calibration."""
+        self._color_probes.clear()
+        self._color_probe_status_label.setText("No colour-value probes.")
+        self._refresh_all()
+
+    def calibration_summary(self) -> str:
+        """Return X/Y and empirical colour-scale calibration provenance."""
+        xy_summary = super().calibration_summary()
+        try:
+            model = self._get_color_scale()
+        except ValueError as exc:
+            return f"{xy_summary}; colour scale incomplete ({exc})"
+        return (
+            f"{xy_summary}; colour scale={model.low_value:g} to {model.high_value:g} "
+            f"{model.scale}, samples={len(model.palette_rgb)}, max_Lab_distance={model.maximum_distance:g}"
+        )
+
+    def extraction_summary(self) -> str:
+        """Return colour-probe settings and explicit raster-error provenance."""
+        return (
+            f"mode=colourplot, probes={len(self._color_probes)}, "
+            f"patch_radius={self._probe_patch_radius_spin.value()} px; "
+            "values estimated from rendered pixels; compression/anti-aliasing may introduce error"
+        )
+
+    def accept(self) -> None:  # type: ignore[override]
+        """Validate X/Y, colour scale, and probes before dataset creation."""
+        if self._image.isNull():
+            QMessageBox.warning(self, "Import From Figure", "Load an image before creating a dataset.")
+            return
+        values, errors = self._calibration_values()
+        if values is None or errors:
+            QMessageBox.warning(self, "Calibration Required", "\n".join(errors))
+            return
+        try:
+            self._get_color_scale()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Colour Scale Calibration", str(exc))
+            return
+        if not self._color_probes:
+            QMessageBox.warning(self, "No Extracted Points", "Start probing and click at least one colour-plot location.")
+            return
+        QDialog.accept(self)
 
 
 class ColumnMetadataDialog(QDialog):

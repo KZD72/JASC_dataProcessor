@@ -24,6 +24,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPalette, QShort
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
     QDockWidget,
     QFileDialog,
     QHBoxLayout,
@@ -124,10 +125,12 @@ from ui.dialogs import (
     ColumnExpressionDialog,
     ColumnMathDialog,
     ColumnMetadataDialog,
+    ColorPlotDigitizerDialog,
     CustomFitModelsDialog,
     DataFilterDialog,
     FFTDialog,
     FigureDigitizerDialog,
+    FigureExtractionModeDialog,
     FitDialog,
     FitReportDialog,
     GroupAggregateDialog,
@@ -1674,6 +1677,12 @@ class MainWindow(QMainWindow):
 
     def _import_from_figure(self) -> None:
         """Open a raster figure digitizer and add extracted data as a dataset."""
+        mode_dialog = FigureExtractionModeDialog(self)
+        if mode_dialog.exec() != QDialog.Accepted:
+            self.statusBar().showMessage("Figure import cancelled")
+            return
+        extraction_mode = mode_dialog.extraction_mode()
+
         file_name, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "Import Figure Image",
@@ -1683,8 +1692,9 @@ class MainWindow(QMainWindow):
         if not file_name:
             return
 
-        dialog = FigureDigitizerDialog(file_name, self)
-        if dialog.exec() != FigureDigitizerDialog.Accepted:
+        dialog_class = ColorPlotDigitizerDialog if extraction_mode == "colorplot" else FigureDigitizerDialog
+        dialog = dialog_class(file_name, self)
+        if dialog.exec() != QDialog.Accepted:
             self.statusBar().showMessage("Figure import cancelled")
             return
 
@@ -1696,6 +1706,7 @@ class MainWindow(QMainWindow):
         columns = [
             "x",
             "y",
+            "z",
             "x_uncertainty",
             "y_uncertainty",
             "pixel_x",
@@ -1713,6 +1724,15 @@ class MainWindow(QMainWindow):
             "symbol_score",
             "symbol_template_width",
             "symbol_template_height",
+            "red",
+            "green",
+            "blue",
+            "palette_position",
+            "color_distance",
+            "color_confidence",
+            "color_ambiguous",
+            "color_valid",
+            "patch_radius",
             "source_image",
         ]
         frame = pd.DataFrame(rows)
@@ -1738,14 +1758,25 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Figure import failed")
             return
 
-        x_metadata = dataset.metadata_for_column("x")
-        x_metadata.role = "x"
-        x_metadata.value_type = "numeric"
-        x_metadata.long_name = "Digitized X"
-        y_metadata = dataset.metadata_for_column("y")
-        y_metadata.role = "y"
-        y_metadata.value_type = "numeric"
-        y_metadata.long_name = "Digitized Y"
+        if "x" in dataset.frame.columns:
+            x_metadata = dataset.metadata_for_column("x")
+            x_metadata.role = "x"
+            x_metadata.value_type = "numeric"
+            x_metadata.long_name = "Digitized X"
+        if "y" in dataset.frame.columns:
+            y_metadata = dataset.metadata_for_column("y")
+            y_metadata.role = "y"
+            y_metadata.value_type = "numeric"
+            y_metadata.long_name = "Digitized Y"
+        if "z" in dataset.frame.columns:
+            z_metadata = dataset.metadata_for_column("z")
+            z_metadata.role = "z"
+            z_metadata.value_type = "numeric"
+            z_metadata.long_name = "Digitized colour value"
+            z_metadata.comment = (
+                "Estimated from rendered image colours; compression, anti-aliasing, resizing, "
+                "overlays, and limited palette resolution may introduce error."
+            )
         for column_name in ("pixel_x", "pixel_y"):
             if column_name in dataset.frame.columns:
                 metadata = dataset.metadata_for_column(column_name)
@@ -1755,6 +1786,24 @@ class MainWindow(QMainWindow):
             if column_name in dataset.frame.columns:
                 metadata = dataset.metadata_for_column(column_name)
                 metadata.comment = "Automatic figure-trace provenance."
+        for column_name in (
+            "red",
+            "green",
+            "blue",
+            "palette_position",
+            "color_distance",
+            "color_confidence",
+            "patch_radius",
+        ):
+            if column_name in dataset.frame.columns:
+                metadata = dataset.metadata_for_column(column_name)
+                metadata.value_type = "numeric"
+                metadata.comment = "Colour-plot raster matching diagnostic."
+        for column_name in ("color_ambiguous", "color_valid"):
+            if column_name in dataset.frame.columns:
+                dataset.metadata_for_column(column_name).comment = (
+                    "Colour-plot match quality flag; review before using the estimated Z value."
+                )
         for column_name in (
             "symbol_id",
             "symbol_area",
@@ -7844,7 +7893,7 @@ class MainWindow(QMainWindow):
         global_pos,
         context_column: int | None = None,
     ) -> None:
-        """Show undo/redo and clipboard actions for the dataset editor."""
+        """Show common editing, preparation, analysis, and plotting actions."""
         dataset = self._current_dataset()
         has_dataset = dataset is not None
         has_selection = bool(self._selected_dataset_indexes())
@@ -7870,8 +7919,17 @@ class MainWindow(QMainWindow):
             has_dataset and self._clipboard_has_dataset_columns()
         )
         menu.addSeparator()
-        metadata_action = menu.addAction("Column Metadata...")
-        metadata_action.setEnabled(has_dataset)
+        edit_actions = self._add_dataset_edit_submenus(
+            menu,
+            has_dataset=has_dataset,
+            has_selection=has_selection,
+            has_columns=has_columns,
+        )
+
+        menu.addSeparator()
+        plot_action = menu.addAction("Create Plot from Dataset")
+        plot_action.setEnabled(has_dataset)
+        self._add_dataset_workflow_submenus(menu, enabled=has_dataset)
 
         action = menu.exec(global_pos)
         if action == undo_action:
@@ -7886,8 +7944,98 @@ class MainWindow(QMainWindow):
             self._copy_dataset_columns()
         elif action == paste_columns_action:
             self._paste_dataset_columns(context_column)
-        elif action == metadata_action:
+        elif action == edit_actions["add_row"]:
+            self._add_empty_row()
+        elif action == edit_actions["insert_row"]:
+            self._insert_empty_row()
+        elif action == edit_actions["delete_rows"]:
+            self._delete_selected_rows()
+        elif action == edit_actions["add_column"]:
+            self._add_empty_column()
+        elif action == edit_actions["insert_column"]:
+            self._insert_empty_column()
+        elif action == edit_actions["delete_columns"]:
+            self._delete_selected_columns()
+        elif action == edit_actions["fill_range"]:
+            self._fill_dataset_range()
+        elif action == edit_actions["metadata"]:
             self._edit_column_metadata()
+        elif action == plot_action:
+            self._start_plot_for_current_dataset()
+
+    def _add_dataset_edit_submenus(
+        self,
+        menu: QMenu,
+        has_dataset: bool,
+        has_selection: bool,
+        has_columns: bool,
+    ) -> dict[str, object]:
+        """Add row and column operations to a worksheet context menu."""
+        rows_menu = menu.addMenu("Rows")
+        add_row_action = rows_menu.addAction("Add Row")
+        add_row_action.setEnabled(has_dataset)
+        insert_row_action = rows_menu.addAction("Insert Row")
+        insert_row_action.setEnabled(has_dataset)
+        delete_rows_action = rows_menu.addAction("Delete Selected Rows")
+        delete_rows_action.setEnabled(has_dataset and has_selection)
+
+        columns_menu = menu.addMenu("Columns")
+        add_column_action = columns_menu.addAction("Add Column...")
+        add_column_action.setEnabled(has_dataset)
+        insert_column_action = columns_menu.addAction("Insert Column...")
+        insert_column_action.setEnabled(has_dataset)
+        delete_columns_action = columns_menu.addAction("Delete Selected Columns")
+        delete_columns_action.setEnabled(has_dataset and has_columns)
+        columns_menu.addSeparator()
+        fill_range_action = columns_menu.addAction("Fill Range...")
+        fill_range_action.setEnabled(has_dataset)
+        metadata_action = columns_menu.addAction("Column Metadata...")
+        metadata_action.setEnabled(has_dataset)
+        return {
+            "add_row": add_row_action,
+            "insert_row": insert_row_action,
+            "delete_rows": delete_rows_action,
+            "add_column": add_column_action,
+            "insert_column": insert_column_action,
+            "delete_columns": delete_columns_action,
+            "fill_range": fill_range_action,
+            "metadata": metadata_action,
+        }
+
+    def _add_dataset_workflow_submenus(self, menu: QMenu, enabled: bool = True) -> None:
+        """Add reusable Data Prep and Analysis launchers to a context menu."""
+        data_prep_menu = menu.addMenu("Data Preparation")
+        data_prep_actions = (
+            ("Filter / Query...", self._run_filter_query),
+            ("Sort...", self._run_sort),
+            ("Missing Values...", self._run_missing_values),
+            ("Remove Duplicates...", self._run_remove_duplicates),
+            ("Bin / Average...", self._run_binning),
+            ("Group / Aggregate...", self._run_group_aggregate),
+            ("Merge / Join...", self._run_merge_join),
+            ("Reshape...", self._run_reshape),
+        )
+        for label, callback in data_prep_actions:
+            action = data_prep_menu.addAction(label)
+            action.setEnabled(enabled)
+            action.triggered.connect(callback)
+
+        analysis_menu = menu.addMenu("Analysis")
+        analysis_actions = (
+            ("Apply Formula...", self._apply_column_formula),
+            ("Derivative...", self._run_derivative),
+            ("Integral...", self._run_integral),
+            ("Smoothing...", self._run_smoothing),
+            ("Interpolation...", self._run_interpolation),
+            ("FFT...", self._run_fft),
+            ("Inverse FFT...", self._run_ifft),
+            ("Statistics...", self._run_statistics),
+            ("Curve Fit...", self._run_curve_fit),
+        )
+        for label, callback in analysis_actions:
+            action = analysis_menu.addAction(label)
+            action.setEnabled(enabled)
+            action.triggered.connect(callback)
 
     def _prepare_dataset_context_cell(self, index: QModelIndex) -> None:
         """Make an unselected right-clicked cell the active selection."""
@@ -8671,21 +8819,53 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Closed project")
 
     def _show_dataset_context_menu(self, pos) -> None:
-        """Show dataset rename/delete actions for a sidebar item."""
+        """Show common worksheet operations for a sidebar item."""
         item = self._dataset_list.itemAt(pos)
         if not item:
             return
-            
+
+        self._dataset_list.setCurrentItem(item)
         dataset_name = item.text()
-        menu = QMenu(self)
-        rename_action = menu.addAction("Rename...")
-        delete_action = menu.addAction("Delete")
-        
+        menu, actions = self._build_dataset_context_menu()
         action = menu.exec(self._dataset_list.mapToGlobal(pos))
-        if action == rename_action:
+        if action == actions["open"]:
+            self._show_dataset_editor(dataset_name)
+        elif action == actions["plot"]:
+            self._start_plot_for_current_dataset()
+        elif action == actions["export"]:
+            self._export_current_dataset()
+        elif action == actions["rename"]:
             self._rename_dataset(dataset_name)
-        elif action == delete_action:
+        elif action == actions["remove"]:
             self._delete_dataset(dataset_name)
+
+    def _build_dataset_context_menu(self) -> tuple[QMenu, dict[str, object]]:
+        """Build the workspace-dataset context menu and its named actions."""
+        menu = QMenu(self)
+        open_action = menu.addAction("Open Sheet")
+        plot_action = menu.addAction("Create Plot from Dataset")
+        export_action = menu.addAction("Export Dataset...")
+        self._add_dataset_workflow_submenus(menu)
+        menu.addSeparator()
+        rename_action = menu.addAction("Rename...")
+        delete_action = menu.addAction("Remove Dataset")
+        return menu, {
+            "open": open_action,
+            "plot": plot_action,
+            "export": export_action,
+            "rename": rename_action,
+            "remove": delete_action,
+        }
+
+    def _start_plot_for_current_dataset(self) -> None:
+        """Start a new plot draft with mappings prefilled from the current dataset."""
+        dataset = self._current_dataset()
+        if dataset is None or not self._start_new_plot():
+            return
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self.statusBar().showMessage(
+            f"New plot ready for '{dataset.name}'; choose a subtype and click Add Series"
+        )
 
     def _refresh_plot_list(self, selected_name: str | None = None) -> None:
         """Refresh saved plot navigation and optionally reselect one plot."""
@@ -8768,6 +8948,8 @@ class MainWindow(QMainWindow):
         """Return whether replacing the editor would discard an unsaved definition."""
         if not self._plot_tab_widget.has_plot_series():
             return False
+        if self._plot_tab_widget.has_unapplied_series_edits():
+            return True
         if self._active_plot_baseline is None:
             return True
         return self._plot_state_fingerprint() != self._active_plot_baseline
@@ -8823,6 +9005,13 @@ class MainWindow(QMainWindow):
         """Save or overwrite the current plot definition in the workspace."""
         if not self._plot_tab_widget.has_plot_series():
             QMessageBox.information(self, "Save Plot", "Create a plot before saving it.")
+            return False
+        if self._plot_tab_widget.has_unapplied_series_edits():
+            QMessageBox.information(
+                self,
+                "Unapplied Series Edits",
+                "Click Update Series to keep the staged edits, or Revert Edits to discard them, before saving.",
+            )
             return False
 
         selected_name = self._active_plot_name
@@ -8929,21 +9118,44 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Removed plot '{plot_name}'")
 
     def _show_plot_context_menu(self, pos) -> None:
-        """Show saved-plot load/remove actions for a sidebar item."""
+        """Show common saved-plot operations for a sidebar item."""
         item = self._plot_list.itemAt(pos)
         if not item:
             return
+        self._plot_list.blockSignals(True)
         self._plot_list.setCurrentItem(item)
+        self._plot_list.blockSignals(False)
+        self._update_plot_action_state()
 
-        menu = QMenu(self)
-        load_action = menu.addAction("Load")
-        delete_action = menu.addAction("Remove")
-
+        plot_name = item.data(Qt.UserRole)
+        menu, actions = self._build_plot_context_menu(plot_name)
         action = menu.exec(self._plot_list.mapToGlobal(pos))
-        if action == load_action:
+        if action == actions["new"]:
+            self._start_new_plot()
+        elif action == actions["save"]:
+            self._save_current_plot()
+        elif action == actions["load"]:
             self._load_selected_plot()
-        elif action == delete_action:
+        elif action == actions["remove"]:
             self._delete_selected_plot()
+
+    def _build_plot_context_menu(self, plot_name: object) -> tuple[QMenu, dict[str, object]]:
+        """Build the saved-plot context menu and its named actions."""
+        menu = QMenu(self)
+        new_action = menu.addAction("New Empty Plot")
+        save_action = menu.addAction("Save Current Plot...")
+        save_action.setEnabled(self._plot_tab_widget.has_plot_series())
+        menu.addSeparator()
+        load_action = menu.addAction("Load Plot")
+        load_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
+        delete_action = menu.addAction("Remove Saved Plot")
+        delete_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
+        return menu, {
+            "new": new_action,
+            "save": save_action,
+            "load": load_action,
+            "remove": delete_action,
+        }
 
     def _update_plot_action_state(self) -> None:
         """Update plot menu and header action enabled states."""

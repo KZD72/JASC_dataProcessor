@@ -12,7 +12,7 @@ This review intentionally scopes the polish pass to the current single-canvas pl
 
 | Area | Current behavior | Persistence/rendering | Main limitation |
 | --- | --- | --- | --- |
-| Series | Family/subtype, dataset/column mapping, errors, left/right Y axis, label, line, marker, color, and some type-specific fields | Stored in a 30-field `PlotSeries` dataclass and rendered by `PlotCanvas` | One long dynamic form; changes can be silently lost unless **Update Series** is clicked |
+| Series | Family/subtype, dataset/column mapping, errors, left/right Y axis, label, line, marker, color, and some type-specific fields | Stored in a 30-field `PlotSeries` dataclass and rendered by `PlotCanvas` | One long dynamic form; staged edits now have explicit dirty feedback, Update, and Revert actions |
 | Axes | Title, three labels, linear/log scales, optional ranges, style preset/cycle, LaTeX, grid, legend visibility/location, figure width/height | 22 flat settings are saved in plot-state version 2 | Typography, ticks, spines, grid details, aspect, formatting, DPI, backgrounds, and layout are absent |
 | Legend | Visible and one Matplotlib location string | Left/right handles are combined through one `Axes.legend()` call | No text size, title, columns, frame, opacity, item inclusion/order, outside placement, or spacing controls |
 | Locator | Forward/inverse/surface lookup, target series, marker, size, and color | Saved and rendered; target is a series list index | No edit action; reordering series would invalidate index-based references |
@@ -39,14 +39,14 @@ Three different interaction contracts are mixed:
 
 The most serious consequence is that a user can select a series, change its appearance, select another series, and lose the uncommitted changes without a warning.
 
-Final-state contract:
+Implemented interaction contract:
 
-- Maintain a checked **Auto preview** option by default.
-- Debounce redraws by roughly 150-250 ms so spin boxes and text edits do not trigger render storms.
-- Apply global appearance changes directly to plot state.
-- Apply selected-series appearance changes directly to that series when Auto preview is enabled.
-- Keep an explicit **Apply** button for expensive maps/large datasets and show a visible `Preview out of date` indicator when automatic rendering is paused.
-- Provide **Revert section** and **Reset plot appearance** actions.
+- Keep **Live preview** off by default so plot-wide changes are deliberate.
+- Debounce redraws by roughly 150-250 ms when Live preview is enabled.
+- Apply global Axes, Legend, style, and figure controls to the canvas through **Refresh Plot** or Live preview.
+- Stage selected-series mapping and appearance changes independently of the queue and canvas.
+- Use one contextual **Add Series** / **Update Series** action, plus **New Series** and **Revert Edits**, with visible dirty feedback.
+- Prevent saving while selected-series edits remain unresolved.
 
 ### 2. Appearance state needs a typed boundary
 
@@ -254,12 +254,12 @@ Avoid a full renderer rewrite in one change. First make the state boundary and i
 
 ## Implementation Sequence
 
-Implementation status: the first vertical slice is now in place. Plot-state version 3 and legacy flat-state migration are implemented in `models/plot_settings.py`; the dedicated Legend section, ordered combined legends, per-series inclusion, outside placement, debounced Auto preview, non-modal live validation, and direct selected-series editing are implemented. The Heatmap/Contour/Filled Contour GUI path is regression-tested and failed surfaces display a canvas explanation. Stable series IDs, deeper typography, and the remaining slices below are still pending.
+Implementation status: the first vertical slice is now in place. Plot-state version 3 and legacy flat-state migration are implemented in `models/plot_settings.py`; the dedicated Legend section, ordered combined legends, per-series inclusion, outside placement, opt-in debounced Live preview, non-modal live validation, and explicit staged selected-series editing are implemented. The Heatmap/Contour/Filled Contour GUI path is regression-tested and failed surfaces display a canvas explanation. Stable series IDs, deeper typography, and the remaining slices below are still pending.
 
 ### Slice 1: State and interaction foundation
 
 - Add typed settings with version-2 migration.
-- Add the debounced Auto preview/Apply contract and dirty feedback.
+- Add the debounced Live preview/Refresh Plot contract and dirty feedback.
 - Add inline range validation.
 - Move the queue to the top and add Duplicate/Move controls.
 - Add stable series identity and migrate locators.
@@ -300,7 +300,7 @@ Required automated coverage:
 - Exact save/load round trip for every new global and per-series option
 - New Empty Plot defaults and reset-section behavior
 - Every existing plot subtype exposes only supported controls
-- Auto preview debounce and manual Apply behavior
+- Live preview debounce and manual Refresh Plot behavior
 - Selected-series edits cannot be silently lost
 - Left/right legend ordering, text size, columns, frames, hidden entries, and deduplication
 - Locator and confidence-band legend inclusion policies

@@ -195,6 +195,8 @@ class PlotAppearanceGuiTests(unittest.TestCase):
         self.assertEqual(state["settings"]["legend"]["location"], "upper left")
         self.assertEqual(state["settings"]["figure"]["width"], 8.0)
 
+        self.assertFalse(tab._auto_preview_checkbox.isChecked())
+        tab._auto_preview_checkbox.setChecked(True)
         tab._legend_font_size_spin.setValue(15.0)
         self.assertTrue(tab._preview_dirty)
         QTest.qWait(250)
@@ -207,6 +209,7 @@ class PlotAppearanceGuiTests(unittest.TestCase):
     def test_live_preview_reports_invalid_range_without_modal_dialog(self) -> None:
         tab = PlotTab(self.workspace, external_options=False)
         tab.queue_single_series_plot(self.dataset, "x", "left", "Signal")
+        tab._auto_preview_checkbox.setChecked(True)
         with patch.object(QMessageBox, "warning") as warning:
             tab._x_min_edit.setText("not-a-number")
             QTest.qWait(250)
@@ -216,7 +219,7 @@ class PlotAppearanceGuiTests(unittest.TestCase):
         self.assertEqual(tab._preview_status_label.text(), "Fix invalid plot settings")
         tab.deleteLater()
 
-    def test_selected_series_can_be_changed_to_every_2d_map_subtype(self) -> None:
+    def test_selected_series_changes_are_staged_until_explicit_update(self) -> None:
         grid_x, grid_y = np.meshgrid(
             np.linspace(-2.0, 2.0, 8),
             np.linspace(-1.0, 1.0, 7),
@@ -233,6 +236,7 @@ class PlotAppearanceGuiTests(unittest.TestCase):
             with self.subTest(subtype=subtype):
                 tab = PlotTab(self.workspace, external_options=False)
                 tab.queue_single_series_plot(self.dataset, "x", "left", "Initial line")
+                tab._auto_preview_checkbox.setChecked(True)
                 tab._set_combo_data(tab._plot_family_combo, "surface")
                 tab._set_combo_data(tab._plot_type_combo, subtype)
                 tab._x_dataset_combo.setCurrentText(map_dataset.name)
@@ -244,11 +248,93 @@ class PlotAppearanceGuiTests(unittest.TestCase):
                 QTest.qWait(250)
                 self.app.processEvents()
 
+                self.assertEqual(tab._plot_series[0].plot_type, "line")
+                self.assertEqual(tab._plot_series[0].z_column, "")
+                self.assertTrue(tab._series_editor_dirty)
+                self.assertEqual(
+                    tab._series_editor_status_label.text(),
+                    "Series 1 has unapplied edits",
+                )
+
+                tab._commit_series_editor()
                 self.assertEqual(tab._plot_series[0].plot_type, subtype)
                 self.assertEqual(tab._plot_series[0].z_column, "z")
                 self.assertGreater(len(tab._plot_canvas.axes.collections), 0)
                 self.assertEqual(tab._preview_status_label.text(), "Preview current")
                 tab.deleteLater()
+
+    def test_new_series_mode_adds_without_changing_existing_series(self) -> None:
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_single_series_plot(self.dataset, "x", "left", "Signals")
+        original = tab._plot_series[0]
+
+        tab._start_new_series()
+        self.assertIsNone(tab._selected_series_row())
+        self.assertEqual(tab._commit_series_button.text(), "Add Series")
+        tab._y_column_combo.setCurrentText("right")
+        tab._series_label_edit.setText("Right signal")
+        tab._commit_series_editor()
+
+        self.assertEqual(len(tab._plot_series), 2)
+        self.assertEqual(tab._plot_series[0], original)
+        self.assertEqual(tab._plot_series[1].y_column, "right")
+        self.assertEqual(tab._plot_series[1].custom_label, "Right signal")
+        self.assertEqual(tab._commit_series_button.text(), "Update Series")
+        tab.deleteLater()
+
+    def test_selection_change_cannot_silently_discard_staged_edits(self) -> None:
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_plot_series(
+            [
+                PlotSeries("signals", "x", "signals", "left"),
+                PlotSeries("signals", "x", "signals", "right"),
+            ],
+            title="Signals",
+        )
+        tab._series_label_edit.setText("Staged label")
+
+        with patch.object(QMessageBox, "information") as information:
+            tab._series_list.setCurrentRow(1)
+
+        self.assertEqual(tab._selected_series_row(), 0)
+        self.assertTrue(tab.has_unapplied_series_edits())
+        self.assertEqual(tab._plot_series[0].custom_label, "")
+        information.assert_called_once()
+
+        tab._discard_series_edits()
+        tab._series_list.setCurrentRow(1)
+        self.assertEqual(tab._selected_series_row(), 1)
+        tab.deleteLater()
+
+    def test_series_and_locator_context_menus_expose_common_actions(self) -> None:
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_single_series_plot(self.dataset, "x", "left", "Signal")
+        series_menu, _series_actions = tab._build_series_context_menu()
+        locator_menu, _locator_actions = tab._build_locator_context_menu()
+        series_texts = [action.text() for action in series_menu.actions() if action.text()]
+        locator_texts = [action.text() for action in locator_menu.actions() if action.text()]
+
+        self.assertTrue({
+            "New Series",
+            "Update Series",
+            "Revert Edits",
+            "Duplicate Series",
+            "Remove Series",
+            "Clear All Series",
+        }.issubset(set(series_texts)))
+        self.assertEqual(
+            locator_texts,
+            ["Add Locator", "Remove Locator", "Clear All Locators"],
+        )
+
+        original = tab._plot_series[0]
+        self.assertFalse(tab.has_unapplied_series_edits())
+        with patch.object(QMessageBox, "information") as information:
+            tab._duplicate_selected_series()
+        information.assert_not_called()
+        self.assertEqual(tab._plot_series, [original, original])
+        self.assertEqual(tab._selected_series_row(), 1)
+        tab.deleteLater()
 
     def test_invalid_2d_map_shows_canvas_error_instead_of_white_plot(self) -> None:
         collinear = self.workspace.add_dataset(

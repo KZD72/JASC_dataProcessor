@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -123,6 +124,8 @@ class PlotTab(QWidget):
         self._auto_axis_labels: dict[str, str] = {"x": "", "y": "", "right_y": ""}
         self._loading_plot_settings = False
         self._loading_series_controls = False
+        self._series_editor_dirty = False
+        self._editing_series_row: int | None = None
         self._preview_dirty = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -141,17 +144,22 @@ class PlotTab(QWidget):
 
     def clear_plot_state(self) -> None:
         """Clear queued series, locators, and the current plot canvas."""
+        self._series_editor_dirty = False
+        self._editing_series_row = None
         self._plot_series.clear()
         self._plot_locators.clear()
         self._series_list.clear()
         self._locator_list.clear()
         self._refresh_locator_series_combo()
         self._plot_canvas.clear_plot()
+        self._update_series_editor_state()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self.plot_rendered.emit()
 
     def reset_plot_draft(self) -> None:
         """Start a completely fresh unsaved plot using application defaults."""
+        self._series_editor_dirty = False
+        self._editing_series_row = None
         self._plot_series.clear()
         self._plot_locators.clear()
         self._series_list.clear()
@@ -169,6 +177,7 @@ class PlotTab(QWidget):
         self._line_width_spin.setValue(1.8)
         self._marker_size_spin.setValue(6.0)
         self._plot_canvas.clear_plot()
+        self._update_series_editor_state()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self.plot_rendered.emit()
 
@@ -190,6 +199,10 @@ class PlotTab(QWidget):
     def has_plot_series(self) -> bool:
         """Return whether the plot tab has a restorable plot definition."""
         return bool(self._plot_series)
+
+    def has_unapplied_series_edits(self) -> bool:
+        """Return whether selected-series controls differ from the queued series."""
+        return self._series_editor_dirty
 
     def set_active_plot_name(self, name: str | None) -> None:
         """Update the plot header with the active saved plot name."""
@@ -281,6 +294,8 @@ class PlotTab(QWidget):
         if not isinstance(locator_list, list):
             raise ValueError("Saved plot locator data is invalid.")
 
+        self._series_editor_dirty = False
+        self._editing_series_row = None
         self._plot_series = [
             self._plot_series_from_state(item)
             for item in series_list
@@ -695,26 +710,57 @@ class PlotTab(QWidget):
         self._height_spin.setValue(4.8)
         self._height_spin.setSuffix(" in")
 
-        self._auto_preview_checkbox = QCheckBox("Auto preview")
-        self._auto_preview_checkbox.setChecked(True)
+        self._auto_preview_checkbox = QCheckBox("Live preview")
+        self._auto_preview_checkbox.setChecked(False)
+        self._auto_preview_checkbox.setToolTip(
+            "When enabled, plot-wide Axes and Legend changes redraw automatically. "
+            "Series edits always wait for Add Series or Update Series."
+        )
         self._preview_status_label = QLabel("Preview current")
         self._preview_status_label.setObjectName("MutedLabel")
 
+        self._series_editor_status_label = QLabel(
+            "New series - choose the mapping, then click Add Series"
+        )
+        self._series_editor_status_label.setObjectName("MutedLabel")
+        self._series_editor_status_label.setWordWrap(True)
+
         self._series_list = QListWidget()
         self._series_list.itemSelectionChanged.connect(self._handle_series_selection_changed)
+        self._series_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._series_list.customContextMenuRequested.connect(
+            self._show_series_context_menu
+        )
 
         self._locator_list = QListWidget()
         self._locator_list.itemSelectionChanged.connect(
             lambda: self._set_controls_enabled(bool(self._workspace.dataset_names()))
         )
+        self._locator_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._locator_list.customContextMenuRequested.connect(
+            self._show_locator_context_menu
+        )
 
-        add_btn = QPushButton("Add as New")
-        add_btn.clicked.connect(self._add_series)
-        self._add_series_button = add_btn
+        new_series_btn = QPushButton("New Series")
+        new_series_btn.setToolTip(
+            "Leave queued series unchanged and prepare the editor for another series."
+        )
+        new_series_btn.clicked.connect(self._start_new_series)
+        self._new_series_button = new_series_btn
 
-        update_btn = QPushButton("Apply to Selected")
-        update_btn.clicked.connect(self._update_selected_series)
-        self._update_series_button = update_btn
+        commit_series_btn = QPushButton("Add Series")
+        commit_series_btn.setToolTip(
+            "Add a new series, or explicitly update the selected queued series."
+        )
+        commit_series_btn.clicked.connect(self._commit_series_editor)
+        self._commit_series_button = commit_series_btn
+
+        discard_edits_btn = QPushButton("Revert Edits")
+        discard_edits_btn.setToolTip(
+            "Reload the selected queued series and discard uncommitted editor changes."
+        )
+        discard_edits_btn.clicked.connect(self._discard_series_edits)
+        self._discard_series_edits_button = discard_edits_btn
 
         rm_btn = QPushButton("Remove Selected")
         rm_btn.clicked.connect(self._remove_selected_series)
@@ -725,7 +771,10 @@ class PlotTab(QWidget):
         self._clear_series_button = clr_btn
 
 
-        self._render_button = QPushButton("Plot")
+        self._render_button = QPushButton("Refresh Plot")
+        self._render_button.setToolTip(
+            "Redraw the canvas using committed series and the current plot-wide settings."
+        )
         self._render_button.clicked.connect(self._render_plot)
 
         add_loc = QPushButton("Add Locator")
@@ -776,10 +825,12 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "surface_options", None, self._surface_options_panel)
         self._add_series_row(sf, "voronoi_options", None, self._voronoi_options_panel)
         sb = QVBoxLayout()
+        sb.addWidget(self._series_editor_status_label)
         series_add_row = QHBoxLayout()
-        series_add_row.addWidget(add_btn)
-        series_add_row.addWidget(update_btn)
+        series_add_row.addWidget(new_series_btn)
+        series_add_row.addWidget(commit_series_btn)
         series_remove_row = QHBoxLayout()
+        series_remove_row.addWidget(discard_edits_btn)
         series_remove_row.addWidget(rm_btn)
         series_remove_row.addWidget(clr_btn)
         sb.addLayout(series_add_row)
@@ -858,7 +909,6 @@ class PlotTab(QWidget):
         preview_row.addStretch(1)
         preview_row.addWidget(self._preview_status_label)
         cl.addLayout(preview_row)
-        self._render_button.setText("Apply")
         cl.addWidget(self._render_button)
 
         scroll = QScrollArea()
@@ -1118,7 +1168,7 @@ class PlotTab(QWidget):
             spin.valueChanged.connect(self._schedule_preview)
 
     def _connect_series_editor_signals(self) -> None:
-        """Apply selected-series editor changes directly to queued state."""
+        """Track staged editor changes without mutating queued series."""
         for combo in (
             self._plot_family_combo,
             self._plot_type_combo,
@@ -1162,19 +1212,10 @@ class PlotTab(QWidget):
         )
 
     def _handle_series_editor_changed(self, _value: object = None) -> None:
-        """Commit controls to the selected queued series and refresh its live preview."""
+        """Mark selected-series controls as staged until explicitly committed."""
         if self._loading_series_controls:
             return
-        row = self._selected_series_row()
-        if row is None or not 0 <= row < len(self._plot_series):
-            return
-        self._plot_series[row] = self._series_from_controls()
-        item = self._series_list.item(row)
-        if item is not None:
-            item.setText(self._series_text(self._plot_series[row]))
-        self._refresh_locator_series_combo()
-        self._set_controls_enabled(bool(self._workspace.dataset_names()))
-        self._schedule_preview()
+        self._update_series_editor_state()
 
     def _schedule_preview(self, _value: object = None) -> None:
         """Mark the canvas stale and schedule one redraw when live preview is enabled."""
@@ -1367,8 +1408,14 @@ class PlotTab(QWidget):
             )
         else:
             can_add = has_data and self._x_column_combo.count() > 0 and self._y_column_combo.count() > 0
-        self._add_series_button.setEnabled(can_add)
-        self._update_series_button.setEnabled(can_add and self._selected_series_row() is not None)
+        selected_row = self._selected_series_row()
+        self._commit_series_button.setEnabled(
+            can_add and (selected_row is None or self._series_editor_dirty)
+        )
+        self._new_series_button.setEnabled(has_data)
+        self._discard_series_edits_button.setEnabled(
+            selected_row is not None and self._series_editor_dirty
+        )
         self._remove_series_button.setEnabled(bool(self._series_list.selectedItems()))
         self._clear_series_button.setEnabled(bool(self._plot_series))
         self._render_button.setEnabled(bool(self._plot_series))
@@ -1406,6 +1453,8 @@ class PlotTab(QWidget):
 
     def _refresh_series_list(self) -> None:
         """Rebuild the queued-series list from current series state."""
+        self._series_editor_dirty = False
+        self._editing_series_row = None
         self._series_list.clear()
         for series in self._plot_series:
             self._series_list.addItem(self._series_text(series))
@@ -1566,6 +1615,166 @@ class PlotTab(QWidget):
 
     # -- series management --------------------------------------------------
 
+    def _commit_series_editor(self) -> None:
+        """Add a new series or explicitly update the selected queued series."""
+        if self._selected_series_row() is None:
+            self._add_series()
+        else:
+            self._update_selected_series()
+
+    def _start_new_series(self) -> None:
+        """Switch the editor to create mode without changing the queued plot."""
+        if self._series_editor_dirty:
+            QMessageBox.information(
+                self,
+                "Unapplied Series Edits",
+                "Update or revert the selected series before creating another one.",
+            )
+            return
+        self._editing_series_row = None
+        self._series_list.clearSelection()
+        self._series_label_edit.clear()
+        self._update_series_editor_state()
+        self._series_label_edit.setFocus()
+
+    def _discard_series_edits(self) -> None:
+        """Restore controls from the selected queued series."""
+        row = self._selected_series_row()
+        if row is None or not 0 <= row < len(self._plot_series):
+            return
+        self._load_series_controls(self._plot_series[row])
+        self._update_series_editor_state()
+
+    def _duplicate_selected_series(self) -> None:
+        """Append a copy of the selected committed series and render it."""
+        row = self._selected_series_row()
+        if row is None or not 0 <= row < len(self._plot_series):
+            return
+        if self._series_editor_dirty:
+            QMessageBox.information(
+                self,
+                "Unapplied Series Edits",
+                "Update or revert the selected series before duplicating it.",
+            )
+            return
+        duplicate = self._plot_series[row]
+        self._plot_series.append(duplicate)
+        self._series_list.addItem(self._series_text(duplicate))
+        self._series_list.setCurrentRow(len(self._plot_series) - 1)
+        self._refresh_locator_series_combo()
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
+        self._render_plot()
+
+    def _show_series_context_menu(self, pos) -> None:
+        """Show common queued-series operations at the pointer."""
+        item = self._series_list.itemAt(pos)
+        if item is not None:
+            target_row = self._series_list.row(item)
+            self._series_list.setCurrentRow(target_row)
+            if self._selected_series_row() != target_row:
+                return
+
+        menu, actions = self._build_series_context_menu()
+        action = menu.exec(self._series_list.mapToGlobal(pos))
+        if action == actions["new"]:
+            self._start_new_series()
+        elif action == actions["update"]:
+            self._update_selected_series()
+        elif action == actions["revert"]:
+            self._discard_series_edits()
+        elif action == actions["duplicate"]:
+            self._duplicate_selected_series()
+        elif action == actions["remove"]:
+            self._remove_selected_series()
+        elif action == actions["clear"]:
+            self._clear_series()
+
+    def _build_series_context_menu(self) -> tuple[QMenu, dict[str, object]]:
+        """Build the queued-series menu and return its named actions."""
+        has_selection = self._selected_series_row() is not None
+        menu = QMenu(self)
+        new_action = menu.addAction("New Series")
+        new_action.setEnabled(not self._series_editor_dirty)
+        update_action = menu.addAction("Update Series")
+        update_action.setEnabled(has_selection and self._series_editor_dirty)
+        revert_action = menu.addAction("Revert Edits")
+        revert_action.setEnabled(has_selection and self._series_editor_dirty)
+        menu.addSeparator()
+        duplicate_action = menu.addAction("Duplicate Series")
+        duplicate_action.setEnabled(has_selection and not self._series_editor_dirty)
+        remove_action = menu.addAction("Remove Series")
+        remove_action.setEnabled(has_selection)
+        clear_action = menu.addAction("Clear All Series")
+        clear_action.setEnabled(bool(self._plot_series))
+        return menu, {
+            "new": new_action,
+            "update": update_action,
+            "revert": revert_action,
+            "duplicate": duplicate_action,
+            "remove": remove_action,
+            "clear": clear_action,
+        }
+
+    def _show_locator_context_menu(self, pos) -> None:
+        """Show common locator operations at the pointer."""
+        item = self._locator_list.itemAt(pos)
+        if item is not None:
+            self._locator_list.setCurrentItem(item)
+
+        menu, actions = self._build_locator_context_menu()
+        action = menu.exec(self._locator_list.mapToGlobal(pos))
+        if action == actions["add"]:
+            self._add_locator()
+        elif action == actions["remove"]:
+            self._remove_selected_locator()
+        elif action == actions["clear"]:
+            self._clear_locators()
+
+    def _build_locator_context_menu(self) -> tuple[QMenu, dict[str, object]]:
+        """Build the locator menu and return its named actions."""
+        has_selection = bool(self._locator_list.selectedItems())
+        menu = QMenu(self)
+        add_action = menu.addAction("Add Locator")
+        add_action.setEnabled(
+            any(
+                series.plot_type not in _COMPOSITION_PLOT_TYPES
+                for series in self._plot_series
+            )
+        )
+        remove_action = menu.addAction("Remove Locator")
+        remove_action.setEnabled(has_selection)
+        clear_action = menu.addAction("Clear All Locators")
+        clear_action.setEnabled(bool(self._plot_locators))
+        return menu, {
+            "add": add_action,
+            "remove": remove_action,
+            "clear": clear_action,
+        }
+
+    def _update_series_editor_state(self) -> None:
+        """Refresh create/edit mode, dirty feedback, and contextual actions."""
+        row = self._selected_series_row()
+        if row is None or not 0 <= row < len(self._plot_series):
+            self._series_editor_dirty = False
+            self._commit_series_button.setText("Add Series")
+            self._series_editor_status_label.setText(
+                "New series - choose the mapping, then click Add Series"
+            )
+        else:
+            self._series_editor_dirty = (
+                self._series_from_controls() != self._plot_series[row]
+            )
+            self._commit_series_button.setText("Update Series")
+            if self._series_editor_dirty:
+                self._series_editor_status_label.setText(
+                    f"Series {row + 1} has unapplied edits"
+                )
+            else:
+                self._series_editor_status_label.setText(
+                    f"Editing queued series {row + 1}"
+                )
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
+
     def _add_series(self) -> None:
         """Append a series from the current controls and render the plot."""
         plot_type = str(self._plot_type_combo.currentData() or "line")
@@ -1594,6 +1803,7 @@ class PlotTab(QWidget):
         self._series_list.addItem(self._series_text(series))
         self._series_list.setCurrentRow(len(self._plot_series) - 1)
         self._refresh_locator_series_combo()
+        self._series_editor_dirty = False
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self._render_plot()
 
@@ -1655,6 +1865,8 @@ class PlotTab(QWidget):
         self._plot_series[row] = series
         self._series_list.item(row).setText(self._series_text(series))
         self._refresh_locator_series_combo()
+        self._series_editor_dirty = False
+        self._update_series_editor_state()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self._render_plot()
 
@@ -1666,9 +1878,24 @@ class PlotTab(QWidget):
     def _handle_series_selection_changed(self) -> None:
         """Load selected queued series details into the edit controls."""
         row = self._selected_series_row()
+        if (
+            self._series_editor_dirty
+            and self._editing_series_row is not None
+            and row != self._editing_series_row
+        ):
+            self._series_list.blockSignals(True)
+            self._series_list.setCurrentRow(self._editing_series_row)
+            self._series_list.blockSignals(False)
+            QMessageBox.information(
+                self,
+                "Unapplied Series Edits",
+                "Click Update Series or Revert Edits before selecting another series.",
+            )
+            return
+        self._editing_series_row = row
         if row is not None and 0 <= row < len(self._plot_series):
             self._load_series_controls(self._plot_series[row])
-        self._set_controls_enabled(bool(self._workspace.dataset_names()))
+        self._update_series_editor_state()
 
     def _load_series_controls(self, series: PlotSeries) -> None:
         """Populate series edit controls from a PlotSeries."""
@@ -1897,22 +2124,28 @@ class PlotTab(QWidget):
     def _remove_selected_series(self) -> None:
         """Remove selected series and reindex locators that remain."""
         rows = sorted({i.row() for i in self._series_list.selectedIndexes()}, reverse=True)
+        self._series_editor_dirty = False
+        self._editing_series_row = None
         for r in rows:
             self._plot_series.pop(r)
             self._series_list.takeItem(r)
         self._reindex_locators_after_removal(rows)
         self._refresh_locator_series_combo()
+        self._update_series_editor_state()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self._render_plot(silent_if_empty=True)
 
     def _clear_series(self) -> None:
         """Clear all queued series, locators, and rendered plot content."""
+        self._series_editor_dirty = False
+        self._editing_series_row = None
         self._plot_series.clear()
         self._series_list.clear()
         self._plot_locators.clear()
         self._locator_list.clear()
         self._refresh_locator_series_combo()
         self._plot_canvas.clear_plot()
+        self._update_series_editor_state()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
         self.status_message.emit("Cleared plot series")
         self.plot_rendered.emit()

@@ -109,6 +109,15 @@ The **View** menu can independently show or hide:
 
 Use **View > Reset View to Default** to restore the normal dock arrangement and visibility.
 
+### Mouse and context actions
+
+JASC follows the desktop convention used by spreadsheet and scientific-analysis software:
+
+- **Left-click** selects a worksheet, saved plot, cell, queued series, or locator. Double-click a worksheet cell to edit it and a saved plot to load it.
+- **Right-click** opens the actions relevant to the item under the pointer. Right-clicking an unselected worksheet cell, column, dataset, series, locator, or saved plot makes that item the context target first.
+
+The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**, export, Data Preparation and Analysis submenus, rename, and removal. **Create Plot from Dataset** starts a protected empty draft and prefills its dataset/column mappings; choose the subtype and click **Add Series** to render it. Worksheet cell and header menus include clipboard commands, Row and Column submenus, plotting, Data Preparation, and Analysis. Saved-plot, queued-series, and locator lists expose their corresponding create/save/load/update/revert/duplicate/remove actions. Disabled actions remain visible when the current selection or state does not support them.
+
 ### Menu reference
 
 | Menu | Commands |
@@ -180,7 +189,7 @@ Because worksheet payloads are CSV, specialized pandas dtypes are reconstructed 
 ### Dataset navigation and management
 
 - Select a dataset in the navigator to display it.
-- Right-click a dataset and choose **Rename...** or **Delete**.
+- Right-click a dataset for its common Open, Plot, Export, Data Preparation, Analysis, Rename, and Remove operations.
 - The same actions are available as **Data > Rename Dataset...** and **Data > Remove Dataset...**.
 - Renaming a dataset updates references inside saved plots. The active plot draft is cleared so it cannot retain stale controls.
 - Deleting a dataset asks for confirmation. Dataset deletion is not part of worksheet Undo/Redo.
@@ -230,7 +239,12 @@ JASC grows the worksheet if required and writes `start + offset * step`. It mark
 
 ## 5. Digitizing Data from Figure Images
 
-Use **File > Import From Figure...** to extract calibrated data from PNG, JPEG, BMP, TIFF, or GIF figures. The digitizer supports optional perspective correction, linear/log calibration, manual points and uncertainties, automatic curve tracing, ROI restriction, connected-symbol detection, and sampled-template symbol matching.
+Use **File > Import From Figure...** to extract calibrated data from PNG, JPEG, BMP, TIFF, or GIF figures. First choose the image type:
+
+- **XY graph** calibrates graph axes and extracts curves, lines, or symbols.
+- **2D colour plot / heatmap** calibrates X/Y plus a displayed continuous colour scale and returns clicked X/Y/Z probes.
+
+Both workflows share image loading, optional perspective correction, linear/log X/Y calibration, canvas navigation, and normal workspace-dataset output.
 
 ### Canvas controls and tool state
 
@@ -260,7 +274,7 @@ The calibration maps pixels to data coordinates using two references per axis.
 
 Calibration values must be distinct on each axis. Log10 calibration requires positive reference values and is appropriate only for logarithmic axes.
 
-### Step 3A: manual point extraction
+### XY graph: Step 3A, manual point extraction
 
 1. Open **Extraction** and click **Manual Mode**.
 2. Click data points on the image. Use **Stop Picking** when finished.
@@ -274,18 +288,18 @@ To attach uncertainty to a manual point:
 
 Manual uncertainties appear as blue error bars and are exported in both pixel and calibrated data units.
 
-### Step 3B: automatic curve or line tracing
+### XY graph: Step 3B, automatic curve or line tracing
 
 The **Automatic Extraction Region** is shared by curve tracing and symbol detection.
 
-1. Optionally click **ROI Brush** and paint the region to scan. Adjust **Brush size** as needed. Without ROI marks, JASC scans the calibrated plot area.
+1. Optionally click **ROI Brush** and paint the region to scan. Adjust **Brush size** as needed. Without ROI marks, JASC scans the full working image. X/Y calibration points define the coordinate scale only; they do not crop automatic extraction. Pixel-to-data conversion extrapolates outside the calibration references when necessary.
 2. In the **Curves/Lines** subtab, choose **Dark pixels** or **Selected color**.
 3. For dark pixels, adjust **Dark threshold**.
 4. For color tracing, use **Pick Color...** or **Sample From Image**, then set **Color tolerance**.
 5. Set **X pixel step** to control horizontal sampling density.
 6. Click **Run Auto Trace**. Use **Clear Auto** to discard the trace.
 
-### Step 3C: symbol detection
+### XY graph: Step 3C, symbol detection
 
 The **Symbols** subtab has two related paths:
 
@@ -296,7 +310,7 @@ Shape priors are **Auto from sample**, **Dot / circle**, **X cross**, **Plus cro
 
 Symbol outputs include area, width, height, match score when applicable, template dimensions, and uncertainty estimated from marker size.
 
-### Step 4: review and create the dataset
+### XY graph: Step 4, review and create the dataset
 
 Open **Output** to set the dataset name and inspect the read-only preview. Each row can include:
 
@@ -306,6 +320,25 @@ Open **Output** to set the dataset name and inspect the read-only preview. Each 
 - Symbol ID, area, score, size, and template diagnostics.
 
 Click **Create Dataset**. JASC requires a loaded image, complete four-point calibration, and at least one manual, traced, or symbol point. The created dataset receives numeric coordinate metadata, X/Y/error roles where appropriate, source/provenance comments, and the image source path.
+
+### 2D colour plot / heatmap workflow
+
+Choose **2D colour plot / heatmap** in the initial figure-type dialog. This workflow learns the palette empirically from the colour bar as it actually appears in the image, rather than assuming a named Matplotlib colour map.
+
+1. Load the image and optionally apply perspective correction.
+2. Calibrate X and Y exactly as described above. Reference points may be inside the full data region; the mapping extrapolates beyond them.
+3. In **Displayed Colour Scale**, enter the numeric values represented at the two ends and choose **Linear** or **Log10** value normalization. Log10 endpoints must be positive.
+4. Click **Pick Low End**, then click the centre of the colour bar at the entered low-value end. Click **Pick High End** and click its high-value end. Endpoints may be horizontal, vertical, diagonal, or reversed in screen direction.
+5. Adjust **Bar sample width** if necessary. JASC samples a median stripe across that width along the complete endpoint-to-endpoint segment. **Palette samples** controls its resolution. Click **Rebuild Scale** and inspect the displayed sampled palette.
+6. Set the probe **Median patch radius**. A small median patch reduces isolated compression noise, but a large radius can mix neighbouring colours near sharp boundaries.
+7. Click **Start Probing**, then click locations in the colour plot. The shared magnifier shows live X, Y, estimated Z, RGB, confidence, and validity. Click **Stop** when finished.
+8. In **Output**, inspect the rows. Use **Undo Last**, **Remove Selected**, or **Clear Probes** to clean the result, then click **Create Dataset**.
+
+Each output row contains calibrated `x`, `y`, and estimated `z`; source pixel coordinates; median red/green/blue values; normalized palette position; CIE Lab colour distance; confidence; ambiguity and validity flags; patch radius; extraction method; and source image. X, Y, and Z metadata roles are assigned automatically. Rows that fail the distance threshold or are ambiguous are deliberately retained so they can be inspected and filtered instead of silently discarded. **Maximum Lab distance** controls the validity cutoff.
+
+> **Accuracy disclaimer:** colour values are estimates from rendered raster pixels. Lossy image compression, anti-aliasing, resizing, overlaid text or contours, transparency, and limited palette resolution introduce inherent error. Always review colour distance, confidence, ambiguity, and validity before scientific use. Prefer an original lossless image and probe away from labels, grid lines, and boundaries when possible.
+
+The current colour workflow supports continuous empirical colour bars and clicked point probes. Discrete/categorical palettes and automatic full-grid reconstruction are not yet implemented.
 
 ---
 
@@ -773,13 +806,13 @@ The Plot tab holds one editable plot draft. A plot can contain multiple queued s
 
 ### Build and edit a plot
 
-1. Open the **Plot** tab.
+1. Open the **Plot** tab. Click **New Plot** first if you want to replace the current draft; JASC asks what to do with unsaved work.
 2. In **Series**, choose a plot family and subtype.
 3. Configure the data mappings and type-specific appearance.
-4. Click **Add as New**.
-5. Repeat to build a multi-series plot.
+4. Click **Add Series**. The series is queued and the plot is rendered.
+5. To add another series, click **New Series**, adjust the retained mappings and appearance, and click **Add Series** again.
 
-Selecting a queued series loads it into the editor. Changes to its subtype, mapping, or appearance update the queued state and participate in Auto preview. **Apply to Selected** performs an explicit update. Use **Remove Selected** or **Clear All** to edit the queue.
+Selecting a queued series switches the editor to **Update Series** mode. Mapping, subtype, and appearance edits are staged: they do not alter the queue or canvas, even when **Live preview** is enabled. The status line identifies unapplied edits. Click **Update Series** to commit them or **Revert Edits** to reload the queued values. Until you choose one, JASC keeps that series selected rather than silently losing the staged edits, and it will not save the plot. Use **Remove Selected** or **Clear All** to edit the queue. Right-click the queue for New, Update, Revert, Duplicate, Remove, and Clear actions.
 
 ### Plot types and mappings
 
@@ -850,9 +883,9 @@ The **Legend** tab controls:
 
 Entries follow queued-series order across both Y axes, and duplicate labels are removed.
 
-### Auto preview and Apply
+### Live preview and Refresh Plot
 
-Auto preview is enabled by default and debounces global style/axis changes to avoid excessive redraws. Turn it off for expensive surfaces or large datasets, then click **Apply** when ready. The preview indicator reports current, pending, out-of-date, invalid, or failed state.
+**Live preview** is off by default. Axes, Legend, style, and figure-setting changes mark the canvas out of date; click **Refresh Plot** when ready. Enabling Live preview redraws those plot-wide changes automatically after a short debounce. Series edits always remain staged until **Add Series** or **Update Series** is clicked, which avoids accidental queue changes while experimenting with mappings or appearance. The preview indicator reports current, pending, out-of-date, invalid, or failed state.
 
 ### Data locators
 
@@ -862,7 +895,7 @@ Open **Locator**, select a queued series, and choose a lookup:
 - **Find X from Y** finds every piecewise-linear crossing on an ordinary XY series.
 - Surface plots use entered X and Y to interpolate Z.
 
-Choose marker shape, size, and color, then click **Add Locator**. Located values appear in the list and on the correct left/right axis. Non-monotonic curves can return several X crossings; repeated shared vertices are deduplicated. A horizontal segment at the requested Y is reported as ambiguous instead of returning an arbitrary X.
+Choose marker shape, size, and color, then click **Add Locator**. Located values appear in the list and on the correct left/right axis. Right-click the located-items list to add, remove, or clear locators. Non-monotonic curves can return several X crossings; repeated shared vertices are deduplicated. A horizontal segment at the requested Y is reported as ambiguous instead of returning an arbitrary X.
 
 ### Matplotlib canvas toolbar
 
@@ -871,9 +904,9 @@ Use the embedded Matplotlib toolbar for home/reset, back/forward, pan, zoom, sub
 ### Saved plots and unsaved drafts
 
 - **New / Empty Plot** is the default unsaved workspace entry.
-- Use the Plot menu or top-row buttons to create, save, load, and remove plot definitions.
+- Use the Plot menu, top-row buttons, or saved-plot right-click menu to create, save, load, and remove plot definitions.
 - Saving under an existing name asks before replacement.
-- Starting or loading another plot while the current draft has unsaved series changes offers **Save**, **Discard**, and **Cancel**.
+- Starting or loading another plot while the current draft has unsaved changes offers **Save**, **Discard**, and **Cancel**. Resolve any staged series edits with **Update Series** or **Revert Edits** before saving.
 - Analysis-generated plots detach from a previously loaded saved plot so they cannot silently overwrite it.
 
 Saved definitions preserve queued series, locators, mappings, axes, legend, styles, figure dimensions, and type-specific settings. Save the overall `.jasc` project to persist them between application sessions.
@@ -1104,5 +1137,5 @@ Consult `Roadmap.md` for planned work; roadmap entries are not instructions for 
 - Prefer unique-output policies until a batch preflight has been reviewed.
 - Assign explicit Numeric/Text types when automatic inference could be ambiguous.
 - Use exact-name batch binding for standardized headers and position binding only when layouts are known to match.
-- Turn off Auto preview before editing expensive 2D-map settings on large datasets.
+- Leave Live preview off while editing expensive 2D-map settings on large datasets; use **Update Series** and **Refresh Plot** deliberately.
 - Treat exported CSV/TXT and figures as deliverables; treat `.jasc` as the editable project source.
