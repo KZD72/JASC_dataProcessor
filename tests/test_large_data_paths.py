@@ -11,8 +11,9 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pandas as pd
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core import project_io
 from core.clipboard_io import parse_tabular_clipboard
@@ -204,6 +205,62 @@ class EditorRefreshTests(unittest.TestCase):
             ),
         ):
             self.assertTrue(self.window._clipboard_has_dataset_columns())
+
+    def test_large_selection_context_menu_does_not_enumerate_selected_cells(self) -> None:
+        dataset = self.window._workspace.add_dataset(
+            "large",
+            pd.DataFrame({f"c{column}": range(20_000) for column in range(12)}),
+        )
+        self.window._refresh_dataset_list(dataset.name)
+        self.window._dataset_table.selectAll()
+
+        with (
+            patch.object(
+                self.window,
+                "_selected_dataset_indexes",
+                side_effect=AssertionError("context menu enumerated selected cells"),
+            ),
+            patch.object(
+                self.window,
+                "_selected_dataset_columns",
+                side_effect=AssertionError("context menu expanded selected columns"),
+            ),
+            patch("ui.main_window.QMenu") as menu_class,
+        ):
+            menu_class.return_value.exec.return_value = None
+            self.window._show_dataset_editor_context_menu(QPoint(0, 0), context_column=0)
+
+    def test_delete_requires_explicit_row_or_column_chord(self) -> None:
+        dataset = self.window._workspace.add_dataset(
+            "sheet",
+            pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]}),
+        )
+        self.window._refresh_dataset_list(dataset.name)
+        self.window.show()
+        self.window._dataset_table.setFocus()
+        self.window._dataset_table.selectRow(1)
+        self.app.processEvents()
+
+        QTest.keyClick(self.window._dataset_table, Qt.Key_Delete)
+        QTest.keyClick(self.window._dataset_table, Qt.Key_Escape)
+        self.app.processEvents()
+        self.assertEqual(len(dataset.frame), 3)
+        self.assertEqual(list(dataset.frame.columns), ["x", "y"])
+
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            QTest.keyClick(self.window._dataset_table, Qt.Key_Delete)
+            QTest.keyClick(self.window._dataset_table, Qt.Key_R)
+            self.app.processEvents()
+        self.assertEqual(len(dataset.frame), 2)
+
+        self.window._dataset_table.selectColumn(0)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            QTest.keyClick(self.window._dataset_table, Qt.Key_Delete)
+            QTest.keyClick(self.window._dataset_table, Qt.Key_C)
+            self.app.processEvents()
+        self.assertEqual(list(dataset.frame.columns), ["y"])
+        self.assertEqual(self.window._delete_rows_action.shortcut().toString(), "Del, R")
+        self.assertEqual(self.window._delete_columns_action.shortcut().toString(), "Del, C")
 
 
 class ProjectStreamingTests(unittest.TestCase):

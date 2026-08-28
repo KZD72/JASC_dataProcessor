@@ -110,6 +110,7 @@ This is the lowest-risk slice and should improve normal imports, dataset switchi
 4. Cache touched column names and clear formula/metadata state once per touched column.
 5. Emit row/column insertion and `dataChanged` signals where practical; use one reset only when the shape/dtypes make incremental notification unsafe.
 6. For context-menu enablement, inspect MIME availability/non-empty text only. Parse lazily after an action is selected.
+7. For context-menu selection enablement, use `hasSelection()` and compact `QItemSelectionRange` bounds. Do not call `selectedIndexes()` or expand selected rows/columns merely to decide whether an action is enabled. This follow-up is implemented; it removes the multi-million-`QModelIndex` pause caused by opening a menu over a large/full-table selection.
 
 Clipboard parsing must preserve quoted tabs/newlines, blanks, text columns, leading-zero identifiers where appropriate, numeric/scientific values, and ragged rows. A pandas parser is substantially faster for homogeneous numeric blocks, but type-preservation tests should decide whether it can replace or augment the CSV parser.
 
@@ -140,7 +141,7 @@ Add functional tests before tuning absolute timings:
 - `set_dataset()` and history-state changes do not trigger duplicate layout work.
 - Paste growth is one bulk row-growth operation, not one append per row.
 - A bulk paste records one undo command and undo restores values, shape, formulas, metadata, and dtypes.
-- Context-menu construction does not parse clipboard contents.
+- Context-menu construction does not parse clipboard contents or enumerate every selected cell.
 - Clipboard tests cover numeric, mixed text/numeric, empty fields, ragged rows, quotes, embedded tabs/newlines, Unicode, scientific notation, and leading zeros.
 - Project v1/v2 CSV archives remain loadable after adding streaming or a newer payload format.
 

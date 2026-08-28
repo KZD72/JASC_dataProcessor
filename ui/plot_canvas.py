@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from matplotlib import rcParams, style as mpl_style
+from matplotlib.backend_bases import MouseEvent
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.path import Path as MplPath
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QVBoxLayout, QWidget
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
 
 from core.workspace import COLUMN_NUMERIC_TYPES, Workspace, dataframe_column_metadata
@@ -136,23 +139,270 @@ class PlotResult:
     located_points: list[LocatedPoint]
 
 
+class PlotNavigationToolbar(NavigationToolbar2QT):
+    """Matplotlib toolbar whose save action respects JASC export geometry."""
+
+    def __init__(self, plot_canvas: PlotCanvas) -> None:
+        """Bind the standard navigation tools to the owning plot canvas."""
+        self._plot_canvas_owner = plot_canvas
+        super().__init__(plot_canvas.canvas, plot_canvas)
+
+    def save_figure(self, *args: object) -> str:
+        """Choose a destination and export with the configured physical size."""
+        filetypes = self.canvas.get_supported_filetypes_grouped()
+        default_filetype = self.canvas.get_default_filetype()
+        start_path = os.path.expanduser(str(rcParams["savefig.directory"]))
+        start = os.path.join(start_path, self.canvas.get_default_filename())
+        filters: list[str] = []
+        selected_filter = ""
+        for name, extensions in sorted(filetypes.items()):
+            extension_list = " ".join(f"*.{extension}" for extension in extensions)
+            file_filter = f"{name} ({extension_list})"
+            if default_filetype in extensions:
+                selected_filter = file_filter
+            filters.append(file_filter)
+        file_name, _chosen_filter = QFileDialog.getSaveFileName(
+            self._plot_canvas_owner,
+            "Choose a filename to save to",
+            start,
+            ";;".join(filters),
+            selected_filter,
+        )
+        if not file_name:
+            return ""
+        if start_path:
+            rcParams["savefig.directory"] = os.path.dirname(file_name)
+        try:
+            self._plot_canvas_owner.export_figure(file_name)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error saving file", str(exc))
+            return ""
+        return file_name
+
+
 class PlotCanvas(QWidget):
     """A QWidget wrapping a Matplotlib FigureCanvas and navigation toolbar."""
+
+    element_double_clicked = Signal(str, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create the Matplotlib figure, toolbar, and empty plot placeholder."""
         super().__init__(parent)
 
+        self._export_width = 7.0
+        self._export_height = 4.8
+        self._export_size_mode = "figure"
         self.figure = Figure(figsize=(7.0, 4.8), constrained_layout=False)
         self.canvas = FigureCanvasQTAgg(self.figure)
-        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        self.canvas.setToolTip(
+            "Double-click plotted data, the title, an axis label/tick area, the legend, "
+            "or a legend entry to edit it directly."
+        )
+        self.canvas.mpl_connect("button_press_event", self._handle_canvas_button_press)
+        self.toolbar = PlotNavigationToolbar(self)
         self.axes = self.figure.add_subplot(111)
         self.right_axes: Any | None = None
+        self._series_artists: list[tuple[int, object]] = []
         self._draw_empty_state()
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
+
+    def set_export_size(self, width: float, height: float, size_mode: str) -> None:
+        """Set physical export geometry without resizing the interactive canvas."""
+        if width <= 0 or height <= 0:
+            raise ValueError("Export width and height must be positive.")
+        if size_mode not in {"figure", "plot_area"}:
+            raise ValueError("Export size mode must be figure or plot_area.")
+        self._export_width = float(width)
+        self._export_height = float(height)
+        self._export_size_mode = size_mode
+
+    def export_figure(self, file_name: str) -> None:
+        """Save using full-image or axes-box dimensions, then restore canvas geometry."""
+        original_size = tuple(float(value) for value in self.figure.get_size_inches())
+        target_width, target_height = self._export_figure_dimensions()
+        try:
+            self.figure.set_size_inches(target_width, target_height, forward=False)
+            if self._export_size_mode == "plot_area":
+                target_width, target_height = self._refined_plot_area_figure_dimensions(
+                    target_width,
+                    target_height,
+                )
+                self.figure.set_size_inches(target_width, target_height, forward=False)
+            with mpl_style.context({"savefig.bbox": None}):
+                self.figure.savefig(file_name, bbox_inches=None)
+        finally:
+            self.figure.set_size_inches(*original_size, forward=False)
+            self.canvas.draw_idle()
+
+    def _export_figure_dimensions(self) -> tuple[float, float]:
+        """Return total figure dimensions required by the selected export basis."""
+        if self._export_size_mode == "figure":
+            return self._export_width, self._export_height
+        axes_position = self.axes.get_position()
+        if axes_position.width <= 1.0e-9 or axes_position.height <= 1.0e-9:
+            raise ValueError("The plotting area has no measurable size to export.")
+        return (
+            self._export_width / float(axes_position.width),
+            self._export_height / float(axes_position.height),
+        )
+
+    def _refined_plot_area_figure_dimensions(
+        self,
+        figure_width: float,
+        figure_height: float,
+    ) -> tuple[float, float]:
+        """Refine total size when aspect constraints alter the normalized axes box."""
+        width = figure_width
+        height = figure_height
+        for _iteration in range(3):
+            self.figure.set_size_inches(width, height, forward=False)
+            self.figure.canvas.draw()
+            axes_position = self.axes.get_position()
+            actual_width = width * float(axes_position.width)
+            actual_height = height * float(axes_position.height)
+            if actual_width <= 1.0e-9 or actual_height <= 1.0e-9:
+                break
+            width *= self._export_width / actual_width
+            height *= self._export_height / actual_height
+        return width, height
+
+    def _handle_canvas_button_press(self, event: object) -> None:
+        """Emit the rendered plot element under a left-button double-click."""
+        if not bool(getattr(event, "dblclick", False)):
+            return
+        button = getattr(event, "button", None)
+        if button not in {1, "left"} and getattr(button, "name", "").lower() != "left":
+            return
+        pixel_x = getattr(event, "x", None)
+        pixel_y = getattr(event, "y", None)
+        if pixel_x is None or pixel_y is None:
+            return
+        target = self.editable_element_at(float(pixel_x), float(pixel_y))
+        if target is not None:
+            self.element_double_clicked.emit(target[0], target[1])
+
+    def editable_element_at(self, pixel_x: float, pixel_y: float) -> tuple[str, object] | None:
+        """Return the editable artist or axis region at display-pixel coordinates."""
+        renderer = self.canvas.get_renderer()
+        legend = self.axes.get_legend()
+        if legend is not None and legend.get_visible():
+            for text in legend.get_texts():
+                if self._artist_contains(text, renderer, pixel_x, pixel_y, padding=3.0):
+                    return "legend_entry", text.get_text()
+            legend_title = legend.get_title()
+            if legend_title.get_text() and self._artist_contains(
+                legend_title, renderer, pixel_x, pixel_y, padding=3.0
+            ):
+                return "legend", None
+            if self._artist_contains(legend, renderer, pixel_x, pixel_y, padding=2.0):
+                return "legend", None
+
+        if self.axes.title.get_text() and self._artist_contains(
+            self.axes.title, renderer, pixel_x, pixel_y, padding=5.0
+        ):
+            return "title", None
+        if self.axes.xaxis.label.get_text() and self._artist_contains(
+            self.axes.xaxis.label, renderer, pixel_x, pixel_y, padding=5.0
+        ):
+            return "x_axis", None
+        if self.axes.yaxis.label.get_text() and self._artist_contains(
+            self.axes.yaxis.label, renderer, pixel_x, pixel_y, padding=5.0
+        ):
+            return "left_y_axis", None
+        if self.right_axes is not None:
+            if self.right_axes.yaxis.label.get_text() and self._artist_contains(
+                self.right_axes.yaxis.label, renderer, pixel_x, pixel_y, padding=5.0
+            ):
+                return "right_y_axis", None
+
+        if self._contains_any_artist(
+            self.axes.get_xticklabels(), renderer, pixel_x, pixel_y, padding=2.0
+        ):
+            return "x_axis", None
+        if self.right_axes is not None and self._contains_any_artist(
+            self.right_axes.get_yticklabels(), renderer, pixel_x, pixel_y, padding=2.0
+        ):
+            return "right_y_axis", None
+        if self._contains_any_artist(
+            self.axes.get_yticklabels(), renderer, pixel_x, pixel_y, padding=2.0
+        ):
+            return "left_y_axis", None
+
+        axes_bounds = self.axes.bbox
+        if axes_bounds.x0 - 8.0 <= pixel_x <= axes_bounds.x1 + 8.0:
+            if abs(pixel_y - axes_bounds.y0) <= 8.0:
+                return "x_axis", None
+        if axes_bounds.y0 - 8.0 <= pixel_y <= axes_bounds.y1 + 8.0:
+            if self.right_axes is not None and abs(pixel_x - axes_bounds.x1) <= 8.0:
+                return "right_y_axis", None
+            if abs(pixel_x - axes_bounds.x0) <= 8.0:
+                return "left_y_axis", None
+        series_index = self._plotted_series_at(pixel_x, pixel_y)
+        if series_index is not None:
+            return "series", series_index
+        return None
+
+    def _plotted_series_at(self, pixel_x: float, pixel_y: float) -> int | None:
+        """Return the source-series index of the topmost data artist at a display point."""
+        event = MouseEvent("button_press_event", self.canvas, pixel_x, pixel_y, button=1)
+        for series_index, artist in reversed(self._series_artists):
+            if not bool(getattr(artist, "get_visible", lambda: False)()):
+                continue
+            try:
+                contains, _details = artist.contains(event)  # type: ignore[attr-defined]
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                continue
+            if contains:
+                return series_index
+        return None
+
+    def _register_series_artists(
+        self,
+        series_index: int,
+        axes: Any,
+        previous_artist_ids: set[int],
+    ) -> None:
+        """Associate newly drawn Matplotlib artists with their source series."""
+        for artist in axes.get_children():
+            if id(artist) not in previous_artist_ids:
+                self._series_artists.append((series_index, artist))
+
+    @classmethod
+    def _contains_any_artist(
+        cls,
+        artists: list[object],
+        renderer: object,
+        pixel_x: float,
+        pixel_y: float,
+        padding: float,
+    ) -> bool:
+        """Return whether any visible artist contains the display point."""
+        return any(
+            cls._artist_contains(artist, renderer, pixel_x, pixel_y, padding)
+            for artist in artists
+            if bool(getattr(artist, "get_visible", lambda: False)())
+        )
+
+    @staticmethod
+    def _artist_contains(
+        artist: object,
+        renderer: object,
+        pixel_x: float,
+        pixel_y: float,
+        padding: float,
+    ) -> bool:
+        """Return whether a padded Matplotlib artist extent contains a point."""
+        try:
+            bounds = artist.get_window_extent(renderer)  # type: ignore[attr-defined]
+        except (AttributeError, RuntimeError, ValueError):
+            return False
+        return bool(
+            bounds.x0 - padding <= pixel_x <= bounds.x1 + padding
+            and bounds.y0 - padding <= pixel_y <= bounds.y1 + padding
+        )
 
     def plot_series(
         self,
@@ -171,8 +421,6 @@ class PlotCanvas(QWidget):
         grid_enabled: bool = True,
         legend_settings: LegendSettings | None = None,
         locators: list[PlotLocator] | None = None,
-        figure_width: float = 7.0,
-        figure_height: float = 4.8,
         style_names: list[str] | None = None,
     ) -> PlotResult:
         """Render selected workspace series onto the axes."""
@@ -194,8 +442,6 @@ class PlotCanvas(QWidget):
                     grid_enabled=grid_enabled,
                     legend_settings=legend_settings or LegendSettings(),
                     locators=locators,
-                    figure_width=figure_width,
-                    figure_height=figure_height,
                 )
         except (OSError, RuntimeError, ValueError) as exc:
             self._draw_error_state(str(exc))
@@ -223,17 +469,15 @@ class PlotCanvas(QWidget):
         grid_enabled: bool,
         legend_settings: LegendSettings,
         locators: list[PlotLocator] | None,
-        figure_width: float,
-        figure_height: float,
     ) -> PlotResult:
         """Render selected workspace series with active Matplotlib style settings."""
         self._remove_right_axes()
         self.figure.clear()
         self._disable_layout_engine()
         self._reset_figure_margins()
-        self.figure.set_size_inches(figure_width, figure_height, forward=True)
         self.axes = self.figure.add_subplot(111)
         self.right_axes = None
+        self._series_artists = []
 
         skipped_messages: list[str] = []
         located_points: list[LocatedPoint] = []
@@ -260,6 +504,7 @@ class PlotCanvas(QWidget):
             series_y_scale = right_y_scale if series.y_axis == "right" else y_scale
             target_axes = self.right_axes if series.y_axis == "right" and self.right_axes else self.axes
             if series.plot_type in _SURFACE_PLOT_TYPES:
+                previous_artist_ids = {id(artist) for artist in self.axes.get_children()}
                 try:
                     surface_values = self._surface_values(
                         workspace,
@@ -280,6 +525,7 @@ class PlotCanvas(QWidget):
                     continue
 
                 plotted_surface_values[series_index] = surface_values
+                self._register_series_artists(series_index, self.axes, previous_artist_ids)
                 x_axis_values.append(surface_values.x_values)
                 left_y_axis_values.append(surface_values.y_values)
                 plotted_count += 1
@@ -296,12 +542,14 @@ class PlotCanvas(QWidget):
                     skipped_messages.append(f"{series.label}: {exc}")
                     continue
 
+                previous_artist_ids = {id(artist) for artist in target_axes.get_children()}
                 self._draw_distribution_by_type(
                     target_axes=target_axes,
                     series=series,
                     values_by_column=values_by_column,
                     column_labels=column_labels,
                 )
+                self._register_series_artists(series_index, target_axes, previous_artist_ids)
                 x_axis_values.append(np.arange(1, len(values_by_column) + 1, dtype=float))
                 left_y_axis_values.extend(value.to_numpy(dtype=float) for value in values_by_column)
                 plotted_count += 1
@@ -332,6 +580,7 @@ class PlotCanvas(QWidget):
             if series.color:
                 plot_kwargs["color"] = series.color
 
+            previous_artist_ids = {id(artist) for artist in target_axes.get_children()}
             self._draw_series_by_type(
                 target_axes=target_axes,
                 series=series,
@@ -350,6 +599,7 @@ class PlotCanvas(QWidget):
                 y_scale=series_y_scale,
                 include_in_legend=legend_settings.include_confidence_bands,
             )
+            self._register_series_artists(series_index, target_axes, previous_artist_ids)
             if series.plot_type not in ({"histogram"} | _COMPOSITION_PLOT_TYPES):
                 plotted_series_values[series_index] = (x_values, y_values, series)
             self._record_axis_values(
@@ -393,7 +643,10 @@ class PlotCanvas(QWidget):
             self._seed_positive_axis_limits(self.axes, "y", left_y_axis_values)
         self.axes.set_xscale(x_scale)
         self.axes.set_yscale(y_scale)
-        self.axes.grid(grid_enabled, alpha=0.25)
+        if grid_enabled:
+            self.axes.grid(True, alpha=0.25)
+        else:
+            self.axes.grid(False)
 
         if self.right_axes is not None:
             self.right_axes.set_ylabel(right_y_label)
@@ -1603,6 +1856,7 @@ class PlotCanvas(QWidget):
 
     def _draw_empty_state(self, clear_axes: bool = True) -> None:
         """Show the placeholder plot when no series can be rendered."""
+        self._series_artists = []
         self._remove_right_axes()
         if clear_axes:
             self.axes.clear()
@@ -1625,6 +1879,7 @@ class PlotCanvas(QWidget):
 
     def _draw_error_state(self, message: str) -> None:
         """Show a visible canvas explanation when every requested series fails."""
+        self._series_artists = []
         self._remove_right_axes()
         self.axes.clear()
         self.axes.set_xscale("linear")

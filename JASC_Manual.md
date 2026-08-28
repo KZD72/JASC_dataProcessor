@@ -113,7 +113,7 @@ Use **View > Reset View to Default** to restore the normal dock arrangement and 
 
 JASC follows the desktop convention used by spreadsheet and scientific-analysis software:
 
-- **Left-click** selects a worksheet, saved plot, cell, queued series, or locator. Double-click a worksheet cell to edit it and a saved plot to load it.
+- **Left-click** selects a worksheet, saved plot, cell, queued series, or locator. Double-click a worksheet cell to edit it, a saved plot to load it, or a rendered plot element to open its focused editor.
 - **Right-click** opens the actions relevant to the item under the pointer. Right-clicking an unselected worksheet cell, column, dataset, series, locator, or saved plot makes that item the context target first.
 
 The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**, export, Data Preparation and Analysis submenus, rename, and removal. **Create Plot from Dataset** starts a protected empty draft and prefills its dataset/column mappings; choose the subtype and click **Add Series** to render it. Worksheet cell and header menus include clipboard commands, Row and Column submenus, plotting, Data Preparation, and Analysis. Saved-plot, queued-series, and locator lists expose their corresponding create/save/load/update/revert/duplicate/remove actions. Disabled actions remain visible when the current selection or state does not support them.
@@ -142,7 +142,8 @@ The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**
 | `Ctrl+E` | Export selected dataset |
 | `Ctrl+Z` | Undo worksheet edit |
 | `Ctrl+Y` | Redo worksheet edit |
-| `Delete` | Delete selected rows |
+| `Delete`, then `R` | Delete selected rows after confirmation |
+| `Delete`, then `C` | Delete selected columns after confirmation |
 | `Ctrl+C` | Copy selected worksheet values |
 | `Ctrl+V` | Paste worksheet values at the active cell |
 | `Ctrl+Shift+F` | Apply Formula |
@@ -357,8 +358,9 @@ The current colour workflow supports continuous empirical colour bars and clicke
 - **Data > Insert Row** inserts before the active/selected row.
 - **Data > Add Column...** appends a uniquely named blank column.
 - **Data > Insert Column...** inserts before the active/selected column.
-- **Edit > Delete Selected Rows** or `Delete` removes every selected row.
-- **Edit > Delete Selected Columns** removes every selected column.
+- **Edit > Delete Selected Rows** or the `Delete`, then `R` key chord removes every selected row after confirmation.
+- **Edit > Delete Selected Columns** or the `Delete`, then `C` key chord removes every selected column after confirmation.
+- Pressing `Delete` by itself does not remove worksheet structure. This prevents an accidental full-table selection from deleting all rows.
 
 Row and column edits participate in Undo/Redo when the worksheet fits within the history budget.
 
@@ -550,6 +552,8 @@ The Help panel inside Apply Formula lists the allowed functions and examples for
 ## 9. Calculus, Smoothing, FFT, and Interpolation
 
 All workbenches in this section support multiple compatible worksheets. Derivative, Integral, and Smoothing write columns into target worksheets; FFT, Inverse FFT, and Interpolation create result datasets.
+
+Target signal/value lists start with **no columns selected**. Choose one or more columns explicitly in the dialog before applying the operation; each click toggles a column, so selecting two signals does not require accepting an automatically chosen first signal. JASC may still suggest the coordinate/X column from metadata because it defines spacing or alignment, but it never silently selects the Y, signal, spectrum, interpolation-value, statistics, or curve-fit response columns. Optional fit uncertainty/weight columns also start empty. Applying without the required selection shows a validation message and performs no operation.
 
 ### Derivative
 
@@ -814,6 +818,18 @@ The Plot tab holds one editable plot draft. A plot can contain multiple queued s
 
 Selecting a queued series switches the editor to **Update Series** mode. Mapping, subtype, and appearance edits are staged: they do not alter the queue or canvas, even when **Live preview** is enabled. The status line identifies unapplied edits. Click **Update Series** to commit them or **Revert Edits** to reload the queued values. Until you choose one, JASC keeps that series selected rather than silently losing the staged edits, and it will not save the plot. Use **Remove Selected** or **Clear All** to edit the queue. Right-click the queue for New, Update, Revert, Duplicate, Remove, and Clear actions.
 
+### Edit directly on the plot
+
+Rendered data, text, and axes can be edited without navigating to the lateral inspector. Double-click:
+
+- A **plotted line, marker, bar, filled region, distribution, composition cell, or 2D map** to edit that committed series. The focused dialog provides compatible graph subtypes, series name and legend inclusion, continuous/dashed/dotted/dash-dot line patterns, line width, symbol shape and size, automatic or custom colour, fill opacity, and bar width. For example, an XY line can be changed directly to scatter, line + markers, errorbar, bar, horizontal bar, or area.
+- The **plot title** to change its text.
+- An **X, left-Y, or right-Y axis label**, tick-label area, or axis line to edit its label, linear/log scale, optional minimum/maximum, and the shared grid state.
+- A **legend entry label** to rename that committed series or include/exclude it from the legend.
+- The **legend title, frame, handle area, or other empty legend space** to edit visibility, position, text/title sizes, title, columns, frame and opacity, marker scale, handle length, and locator/confidence-band inclusion.
+
+Accepted changes redraw immediately and update the corresponding lateral Plot Inspector controls; the inspector remains available for the same settings. Direct series and legend-entry edits respect staged-series protection: use **Update Series** or **Revert Edits** first if the selected series has unapplied changes. Hovering over the canvas also shows a reminder about the available double-click targets.
+
 ### Plot types and mappings
 
 | Family | Subtype | Data mapping and special controls |
@@ -860,13 +876,15 @@ The **Axes** tab controls:
 - Linear or log scale independently on X, left Y, and right Y.
 - Optional minimum/maximum for each axis.
 - Grid visibility.
-- Physical figure width (3-20 inches) and height (2-15 inches).
+- Export size basis plus width (3-20 inches) and height (2-15 inches). Choose **Full exported image** to size the complete output, or **Plotting area (axes box)** to size only the inner rectangle bounded by the X and Y axes.
 - Style preset: Matplotlib default, Science, IEEE, Nature, or Notebook.
 - Color cycle: Default, Bright, or High visibility.
 - LaTeX text on/off.
 - Custom comma-separated SciencePlots style tokens.
 
 Log ranges must be positive. Invalid or reversed ranges mark the preview out of date without interrupting typing with modal dialogs. SciencePlots styles require the dependency in `requirements.txt`; LaTeX rendering also depends on a working external LaTeX installation.
+
+The interactive plot always expands to the available canvas. Applying a style or changing export width, height, or size basis does not resize the on-screen canvas. Physical dimensions are applied only by the toolbar export action. In plotting-area mode, JASC calculates the larger complete figure required to keep the requested axes-box dimensions while retaining titles, tick labels, margins, color bars, and outside legends.
 
 ### Legend
 
@@ -885,7 +903,7 @@ Entries follow queued-series order across both Y axes, and duplicate labels are 
 
 ### Live preview and Refresh Plot
 
-**Live preview** is off by default. Axes, Legend, style, and figure-setting changes mark the canvas out of date; click **Refresh Plot** when ready. Enabling Live preview redraws those plot-wide changes automatically after a short debounce. Series edits always remain staged until **Add Series** or **Update Series** is clicked, which avoids accidental queue changes while experimenting with mappings or appearance. The preview indicator reports current, pending, out-of-date, invalid, or failed state.
+**Live preview** is off by default. Axes, Legend, and style changes mark the canvas out of date; click **Refresh Plot** when ready. Enabling Live preview redraws those plot-wide changes automatically after a short debounce. Export-size changes are stored without redrawing because they affect saved files only. Series edits always remain staged until **Add Series** or **Update Series** is clicked, which avoids accidental queue changes while experimenting with mappings or appearance. The preview indicator reports current, pending, out-of-date, invalid, or failed state.
 
 ### Data locators
 
@@ -899,7 +917,7 @@ Choose marker shape, size, and color, then click **Add Locator**. Located values
 
 ### Matplotlib canvas toolbar
 
-Use the embedded Matplotlib toolbar for home/reset, back/forward, pan, zoom, subplot configuration where offered, and saving the rendered figure. This exports an image; it does not save editable JASC plot state.
+Use the embedded Matplotlib toolbar for home/reset, back/forward, pan, zoom, subplot configuration where offered, and saving the rendered figure. The save action applies the configured full-image or plotting-area physical size only for export, then restores the responsive canvas. This exports an image; it does not save editable JASC plot state.
 
 ### Saved plots and unsaved drafts
 
@@ -1006,7 +1024,7 @@ An exported image is static. Save the plot definition and project when later edi
 - Delimited files of at least 100 MiB trigger a pre-import warning.
 - A worksheet is flagged as large at 2,000,000 cells or an estimated 250 MiB of DataFrame memory.
 - Column sizing uses at most 100 sampled rows normally and 25 rows above the 250,000-cell responsiveness threshold.
-- Clipboard parsing, worksheet growth, range fill, and rectangular assignment use block-oriented operations.
+- Clipboard parsing, worksheet growth, range fill, and rectangular assignment use block-oriented operations. Right-click menu availability checks inspect compact Qt selection ranges rather than materializing every selected cell, so selecting a large table does not make menu opening proportional to its cell count.
 - `.jasc` worksheet CSV entries stream from the ZIP archive during project load.
 - Undo/redo retains at most 20 snapshots and approximately 256 MiB per stack.
 
@@ -1126,10 +1144,10 @@ Consult `Roadmap.md` for planned work; roadmap entries are not instructions for 
 | Y | Dependent signal/value |
 | Z | Surface/map value |
 | Error | Generic uncertainty fallback |
-| X error / Y error | Errorbar and fit uncertainty defaults |
+| X error / Y error | Errorbar uncertainty and explicit fit-uncertainty choices |
 | Group | Statistics factor/group default |
 | Label | Categorical/composition labels |
-| Weight | Curve-fit weight default |
+| Weight | Semantic hint for an explicitly selected curve-fit weight |
 
 ### Safe practices
 

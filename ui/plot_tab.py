@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -38,6 +39,13 @@ from models.plot_settings import (
 )
 from models.plot_types import PLOT_TYPES, plot_type_label
 from ui.plot_canvas import SCIENCEPLOTS_AVAILABLE, LocatedPoint, PlotCanvas, PlotLocator, PlotSeries
+from ui.plot_element_dialogs import (
+    PlotAxisEditDialog,
+    PlotLegendEditDialog,
+    PlotLegendEntryEditDialog,
+    PlotSeriesAppearanceDialog,
+    PlotTextEditDialog,
+)
 
 _LINE_LABELS: dict[str, str] = {
     "-": "Solid", "--": "Dashed", ":": "Dotted", "-.": "Dash-dot", "": "None",
@@ -132,6 +140,7 @@ class PlotTab(QWidget):
         self._preview_timer.setInterval(200)
         self._preview_timer.timeout.connect(self._render_scheduled_preview)
         self._plot_canvas = PlotCanvas()
+        self._plot_canvas.element_double_clicked.connect(self._edit_rendered_plot_element)
         self._build_ui()
 
     # -- public API for MainWindow -----------------------------------------
@@ -518,7 +527,8 @@ class PlotTab(QWidget):
 
         self._marker_combo = QComboBox()
         for label, data in [("None",""), ("Circle","o"), ("Square","s"),
-                            ("Triangle","^"), ("Diamond","D"), ("Cross","x"), ("Dot",".")]:
+                            ("Triangle","^"), ("Diamond","D"), ("Cross","x"),
+                            ("Plus","+"), ("Star","*"), ("Dot",".")]:
             self._marker_combo.addItem(label, data)
 
         self._color_combo = QComboBox()
@@ -698,6 +708,14 @@ class PlotTab(QWidget):
         self._legend_include_bands_checkbox = QCheckBox("Include confidence bands")
         self._legend_include_bands_checkbox.setChecked(True)
 
+        self._export_size_mode_combo = QComboBox()
+        self._export_size_mode_combo.addItem("Full exported image", "figure")
+        self._export_size_mode_combo.addItem("Plotting area (axes box)", "plot_area")
+        self._export_size_mode_combo.setToolTip(
+            "Choose whether Width/Height describe the complete exported image or only "
+            "the inner box bounded by the X and Y axes."
+        )
+
         self._width_spin = QDoubleSpinBox()
         self._width_spin.setRange(3.0, 20.0)
         self._width_spin.setSingleStep(0.5)
@@ -709,6 +727,9 @@ class PlotTab(QWidget):
         self._height_spin.setSingleStep(0.5)
         self._height_spin.setValue(4.8)
         self._height_spin.setSuffix(" in")
+        self._export_size_help_label = QLabel()
+        self._export_size_help_label.setWordWrap(True)
+        self._export_size_help_label.setObjectName("MutedLabel")
 
         self._auto_preview_checkbox = QCheckBox("Live preview")
         self._auto_preview_checkbox.setChecked(False)
@@ -855,8 +876,10 @@ class PlotTab(QWidget):
         af.addRow("", self._style_latex_checkbox)
         af.addRow("Custom styles", self._style_custom_edit)
         af.addRow("", self._grid_checkbox)
-        af.addRow("Width", self._width_spin)
-        af.addRow("Height", self._height_spin)
+        af.addRow("Export size basis", self._export_size_mode_combo)
+        af.addRow("Export width", self._width_spin)
+        af.addRow("Export height", self._height_spin)
+        af.addRow("", self._export_size_help_label)
 
         legend_group = QGroupBox("Legend")
         legend_form = QFormLayout(legend_group)
@@ -992,7 +1015,11 @@ class PlotTab(QWidget):
         self._legend_checkbox.toggled.connect(self._update_legend_controls_enabled)
         self._legend_frame_checkbox.toggled.connect(self._update_legend_controls_enabled)
         self._auto_preview_checkbox.toggled.connect(self._handle_auto_preview_toggled)
+        self._export_size_mode_combo.currentIndexChanged.connect(self._sync_export_size)
+        self._width_spin.valueChanged.connect(self._sync_export_size)
+        self._height_spin.valueChanged.connect(self._sync_export_size)
         self._update_legend_controls_enabled()
+        self._sync_export_size()
         self._update_plot_type_option_visibility()
         self.refresh_controls()
 
@@ -1156,8 +1183,6 @@ class PlotTab(QWidget):
         ):
             checkbox.toggled.connect(self._schedule_preview)
         for spin in (
-            self._width_spin,
-            self._height_spin,
             self._legend_font_size_spin,
             self._legend_title_size_spin,
             self._legend_columns_spin,
@@ -1256,6 +1281,25 @@ class PlotTab(QWidget):
         self._legend_frame_alpha_spin.setEnabled(
             enabled and self._legend_frame_checkbox.isChecked()
         )
+
+    def _sync_export_size(self, _value: object = None) -> None:
+        """Update export-only geometry without marking or resizing the canvas preview."""
+        size_mode = str(self._export_size_mode_combo.currentData() or "figure")
+        self._plot_canvas.set_export_size(
+            self._width_spin.value(),
+            self._height_spin.value(),
+            size_mode,
+        )
+        if size_mode == "plot_area":
+            self._export_size_help_label.setText(
+                "Width and height describe the inner plotting box bounded by the X and Y "
+                "axes. JASC calculates the larger complete image needed for labels and margins."
+            )
+        else:
+            self._export_size_help_label.setText(
+                "Width and height describe the complete exported image. They do not resize "
+                "the interactive canvas."
+            )
 
     def _refresh_plot_type_combo(self, preferred: str | None = None) -> None:
         """Populate the subtype selector with plot types from the selected family."""
@@ -1544,6 +1588,7 @@ class PlotTab(QWidget):
             self._legend_include_bands_checkbox.setChecked(
                 settings.legend.include_confidence_bands
             )
+            self._set_combo_data(self._export_size_mode_combo, settings.figure.size_mode)
             self._width_spin.setValue(settings.figure.width)
             self._height_spin.setValue(settings.figure.height)
             self._set_combo_data(self._style_preset_combo, settings.style.preset)
@@ -1556,6 +1601,7 @@ class PlotTab(QWidget):
         finally:
             self._loading_plot_settings = False
         self._update_legend_controls_enabled()
+        self._sync_export_size()
 
     def _settings_from_controls(self) -> PlotSettings:
         """Return typed global settings from the current inspector controls."""
@@ -1597,6 +1643,7 @@ class PlotTab(QWidget):
             figure=FigureSettings(
                 width=self._width_spin.value(),
                 height=self._height_spin.value(),
+                size_mode=str(self._export_size_mode_combo.currentData() or "figure"),
             ),
             style=StyleSettings(
                 preset=str(self._style_preset_combo.currentData() or ""),
@@ -1925,8 +1972,8 @@ class PlotTab(QWidget):
         self._series_label_edit.setText(series.custom_label)
         self._series_legend_checkbox.setChecked(series.show_in_legend)
         self._set_combo_data(self._line_style_combo, series.line_style)
-        self._set_combo_data(self._marker_combo, series.marker)
-        self._set_combo_data(self._color_combo, series.color)
+        self._set_combo_data_or_add(self._marker_combo, series.marker, "Custom symbol")
+        self._set_combo_data_or_add(self._color_combo, series.color, "Custom colour")
         self._line_width_spin.setValue(series.line_width)
         self._marker_size_spin.setValue(series.marker_size)
         self._fill_alpha_spin.setValue(series.fill_alpha)
@@ -1964,6 +2011,16 @@ class PlotTab(QWidget):
     def _set_combo_data(combo: QComboBox, value: str) -> None:
         """Set combo selection by item data when present."""
         index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    @staticmethod
+    def _set_combo_data_or_add(combo: QComboBox, value: str, label: str) -> None:
+        """Select item data, adding a readable entry for a custom value when needed."""
+        index = combo.findData(value)
+        if index < 0 and value:
+            combo.addItem(f"{label} ({value})", value)
+            index = combo.count() - 1
         if index >= 0:
             combo.setCurrentIndex(index)
 
@@ -2360,6 +2417,194 @@ class PlotTab(QWidget):
             return self._right_y_label_edit
         raise KeyError(f"Unknown axis label key: {key}")
 
+    # -- direct canvas editing --------------------------------------------
+
+    def _edit_rendered_plot_element(self, element: str, payload: object = None) -> None:
+        """Open the focused editor associated with a double-clicked canvas element."""
+        if not self._plot_series:
+            return
+        if element == "series" and isinstance(payload, int):
+            self._edit_series_appearance_from_canvas(payload)
+            return
+        if element == "title":
+            self._edit_plot_title_from_canvas()
+            return
+        if element in {"x_axis", "left_y_axis", "right_y_axis"}:
+            self._edit_axis_from_canvas(element)
+            return
+        if element == "legend_entry" and isinstance(payload, str):
+            if self._edit_legend_entry_from_canvas(payload):
+                return
+        if element in {"legend", "legend_entry"}:
+            self._edit_legend_from_canvas()
+
+    def _edit_series_appearance_from_canvas(self, row: int) -> None:
+        """Edit one plotted series and synchronize the committed series inspector."""
+        if not 0 <= row < len(self._plot_series):
+            return
+        if self._series_editor_dirty:
+            QMessageBox.information(
+                self,
+                "Unapplied Series Edits",
+                "Update or revert the selected series before editing plotted data on the canvas.",
+            )
+            return
+        series = self._plot_series[row]
+        family_key = _PLOT_TYPE_TO_FAMILY.get(series.plot_type, "xy")
+        plot_types = [
+            (plot_type_label(plot_type), plot_type)
+            for plot_type in _PLOT_FAMILY_TYPES.get(family_key, _PLOT_FAMILY_TYPES["xy"])
+        ]
+        dialog = PlotSeriesAppearanceDialog(series, plot_types, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        updated = replace(series, **dialog.series_updates())
+        self._plot_series[row] = updated
+        item = self._series_list.item(row)
+        if item is not None:
+            item.setText(self._series_text(updated))
+        self._series_list.blockSignals(True)
+        self._series_list.setCurrentRow(row)
+        self._series_list.blockSignals(False)
+        self._editing_series_row = row
+        self._load_series_controls(updated)
+        self._update_series_editor_state()
+        self._refresh_locator_series_combo()
+        self._render_plot(silent_if_empty=True)
+        self.status_message.emit(f"Series '{updated.label}' updated from the canvas")
+
+    def _edit_plot_title_from_canvas(self) -> None:
+        """Edit the figure title and immediately synchronize the inspector."""
+        dialog = PlotTextEditDialog(
+            "Edit Plot Title",
+            "Title",
+            self._title_edit.text(),
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._loading_plot_settings = True
+        try:
+            self._title_edit.setText(dialog.text_value())
+        finally:
+            self._loading_plot_settings = False
+        self._render_plot(silent_if_empty=True)
+        self.status_message.emit("Plot title updated from the canvas")
+
+    def _edit_axis_from_canvas(self, element: str) -> None:
+        """Edit one rendered axis and write the result into inspector controls."""
+        settings = self._settings_from_controls()
+        axis_map: dict[str, tuple[str, AxisSettings, QLineEdit, QComboBox, QLineEdit, QLineEdit, str]] = {
+            "x_axis": (
+                "X",
+                settings.x_axis,
+                self._x_label_edit,
+                self._x_scale_combo,
+                self._x_min_edit,
+                self._x_max_edit,
+                "x",
+            ),
+            "left_y_axis": (
+                "Left Y",
+                settings.left_y_axis,
+                self._y_label_edit,
+                self._y_scale_combo,
+                self._y_min_edit,
+                self._y_max_edit,
+                "y",
+            ),
+            "right_y_axis": (
+                "Right Y",
+                settings.right_y_axis,
+                self._right_y_label_edit,
+                self._right_y_scale_combo,
+                self._right_y_min_edit,
+                self._right_y_max_edit,
+                "right_y",
+            ),
+        }
+        axis_name, current, label_edit, scale_combo, minimum_edit, maximum_edit, auto_key = axis_map[element]
+        dialog = PlotAxisEditDialog(axis_name, current, settings.grid_enabled, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        updated = dialog.axis_settings()
+        self._loading_plot_settings = True
+        try:
+            label_edit.setText(updated.label)
+            self._set_combo_text(scale_combo, updated.scale)
+            minimum_edit.setText(updated.minimum)
+            maximum_edit.setText(updated.maximum)
+            self._grid_checkbox.setChecked(dialog.grid_enabled())
+            self._auto_axis_labels[auto_key] = ""
+        finally:
+            self._loading_plot_settings = False
+        self._render_plot(silent_if_empty=True)
+        self.status_message.emit(f"{axis_name} axis updated from the canvas")
+
+    def _edit_legend_from_canvas(self) -> None:
+        """Edit global legend settings and synchronize all inspector controls."""
+        dialog = PlotLegendEditDialog(self._settings_from_controls().legend, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        settings = dialog.legend_settings()
+        self._loading_plot_settings = True
+        try:
+            self._legend_checkbox.setChecked(settings.enabled)
+            self._set_combo_data(self._legend_pos_combo, settings.location)
+            self._legend_font_size_spin.setValue(settings.font_size)
+            self._legend_title_edit.setText(settings.title)
+            self._legend_title_size_spin.setValue(settings.title_font_size)
+            self._legend_columns_spin.setValue(settings.columns)
+            self._legend_frame_checkbox.setChecked(settings.frame_enabled)
+            self._legend_frame_alpha_spin.setValue(settings.frame_alpha)
+            self._legend_marker_scale_spin.setValue(settings.marker_scale)
+            self._legend_handle_length_spin.setValue(settings.handle_length)
+            self._legend_include_locators_checkbox.setChecked(settings.include_locators)
+            self._legend_include_bands_checkbox.setChecked(settings.include_confidence_bands)
+        finally:
+            self._loading_plot_settings = False
+        self._update_legend_controls_enabled()
+        self._render_plot(silent_if_empty=True)
+        self.status_message.emit("Legend settings updated from the canvas")
+
+    def _edit_legend_entry_from_canvas(self, label: str) -> bool:
+        """Edit one committed series label; return whether the entry was handled."""
+        matching_rows = [
+            row
+            for row, series in enumerate(self._plot_series)
+            if series.label == label
+        ]
+        if not matching_rows:
+            return False
+        if self._series_editor_dirty:
+            QMessageBox.information(
+                self,
+                "Unapplied Series Edits",
+                "Update or revert the selected series before editing a legend entry on the canvas.",
+            )
+            return True
+        row = matching_rows[0]
+        series = self._plot_series[row]
+        dialog = PlotLegendEntryEditDialog(series.label, series.show_in_legend, self)
+        if dialog.exec() != QDialog.Accepted:
+            return True
+        updated = replace(
+            series,
+            custom_label=dialog.entry_label(),
+            show_in_legend=dialog.entry_shown(),
+        )
+        self._plot_series[row] = updated
+        item = self._series_list.item(row)
+        if item is not None:
+            item.setText(self._series_text(updated))
+        if self._selected_series_row() == row:
+            self._load_series_controls(updated)
+            self._update_series_editor_state()
+        self._refresh_locator_series_combo()
+        self._render_plot(silent_if_empty=True)
+        self.status_message.emit(f"Legend entry '{label}' updated from the canvas")
+        return True
+
     # -- rendering ----------------------------------------------------------
 
     def _render_plot_if_possible(self) -> None:
@@ -2432,8 +2677,6 @@ class PlotTab(QWidget):
             title=self._title_edit.text().strip(),
             x_label=x_label, y_label=y_label, right_y_label=ry_label,
             **inputs,
-            figure_width=self._width_spin.value(),
-            figure_height=self._height_spin.value(),
         )
         self._refresh_locator_list(result.located_points)
 

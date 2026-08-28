@@ -13,7 +13,7 @@ This review intentionally scopes the polish pass to the current single-canvas pl
 | Area | Current behavior | Persistence/rendering | Main limitation |
 | --- | --- | --- | --- |
 | Series | Family/subtype, dataset/column mapping, errors, left/right Y axis, label, line, marker, color, and some type-specific fields | Stored in a 30-field `PlotSeries` dataclass and rendered by `PlotCanvas` | One long dynamic form; staged edits now have explicit dirty feedback, Update, and Revert actions |
-| Axes | Title, three labels, linear/log scales, optional ranges, style preset/cycle, LaTeX, grid, legend visibility/location, figure width/height | 22 flat settings are saved in plot-state version 2 | Typography, ticks, spines, grid details, aspect, formatting, DPI, backgrounds, and layout are absent |
+| Axes | Title, three labels, linear/log scales, optional ranges, style preset/cycle, LaTeX, grid, legend visibility/location, export size basis and width/height | Typed settings are saved in plot-state version 4 | Typography, ticks, spines, grid details, aspect, formatting, DPI, backgrounds, and deeper layout controls remain absent |
 | Legend | Visible and one Matplotlib location string | Left/right handles are combined through one `Axes.legend()` call | No text size, title, columns, frame, opacity, item inclusion/order, outside placement, or spacing controls |
 | Locator | Forward/inverse/surface lookup, target series, marker, size, and color | Saved and rendered; target is a series list index | No edit action; reordering series would invalidate index-based references |
 | Styles | Matplotlib/SciencePlots preset, cycle, LaTeX flag, and raw custom style tokens | Applied through `matplotlib.style.context()` | Invalid tokens fail at render time; precedence between preset and explicit future controls is not defined in the model |
@@ -64,7 +64,7 @@ Recommended internal model in `models/plot_state.py`:
 
 Each type should provide validated defaults plus `from_state()` and `to_state()` methods. The project container can continue storing ordinary JSON dictionaries.
 
-Use plot-state version 3 with a migration from the current flat version-2 settings. A project-format version bump is not intrinsically required because project I/O already stores plot state opaquely, but legacy and malformed plot-state tests are required.
+Use typed, versioned plot state with migration from the former flat version-2 settings. The current implementation is version 4 because export sizing now records whether width/height describe the full image or the axes box. A project-format version bump is not intrinsically required because project I/O stores plot state opaquely, but legacy and malformed plot-state tests are required.
 
 Define style precedence explicitly:
 
@@ -254,7 +254,7 @@ Avoid a full renderer rewrite in one change. First make the state boundary and i
 
 ## Implementation Sequence
 
-Implementation status: the first vertical slice is now in place. Plot-state version 3 and legacy flat-state migration are implemented in `models/plot_settings.py`; the dedicated Legend section, ordered combined legends, per-series inclusion, outside placement, opt-in debounced Live preview, non-modal live validation, and explicit staged selected-series editing are implemented. The Heatmap/Contour/Filled Contour GUI path is regression-tested and failed surfaces display a canvas explanation. Stable series IDs, deeper typography, and the remaining slices below are still pending.
+Implementation status: the first vertical slice is now in place. Plot-state version 4 and legacy flat-state migration are implemented in `models/plot_settings.py`; the dedicated Legend section, ordered combined legends, per-series inclusion, outside placement, opt-in debounced Live preview, non-modal live validation, explicit staged selected-series editing, direct canvas editing of data representation/title/axes/legend, responsive canvas sizing, and export-only full-image/axes-box geometry are implemented. Double-clicking a rendered series opens compatible subtype, line-pattern, symbol, colour, size, fill, label, and legend controls while preserving staged-edit protection. The Heatmap/Contour/Filled Contour GUI path is regression-tested and failed surfaces display a canvas explanation. Stable series IDs, deeper typography, and the remaining slices below are still pending.
 
 ### Slice 1: State and interaction foundation
 
@@ -296,7 +296,7 @@ Implementation status: the first vertical slice is now in place. Plot-state vers
 
 Required automated coverage:
 
-- Version-2 to version-3 migration and malformed-state fallbacks
+- Legacy flat-state to current-version migration and malformed-state fallbacks
 - Exact save/load round trip for every new global and per-series option
 - New Empty Plot defaults and reset-section behavior
 - Every existing plot subtype exposes only supported controls

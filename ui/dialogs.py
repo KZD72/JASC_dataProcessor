@@ -5013,7 +5013,6 @@ class ColumnMathDialog(QDialog):
         default_target: str,
         include_initial_value: bool = False,
         default_x_column: str | None = None,
-        default_y_column: str | None = None,
         dataset_names: list[str] | None = None,
         current_dataset_name: str = "",
         parent: QWidget | None = None,
@@ -5033,10 +5032,9 @@ class ColumnMathDialog(QDialog):
         self._y_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self._y_column_list.setMaximumHeight(120)
         self._y_column_list.addItems(column_names)
-        if default_y_column:
-            select_list_items(self._y_column_list, [default_y_column])
-        elif len(column_names) > 1:
-            self._y_column_list.item(1).setSelected(True)
+        self._y_column_list.setToolTip(
+            "Select one or more Y columns explicitly; none are selected automatically."
+        )
 
         self._method_combo = QComboBox()
         for method_key, method_label in methods.items():
@@ -5164,7 +5162,6 @@ class SmoothingDialog(QDialog):
         frame: pd.DataFrame,
         column_names: list[str],
         default_x_column: str | None,
-        default_y_column: str | None,
         dataset_names: list[str],
         current_dataset_name: str,
         parent: QWidget | None = None,
@@ -5184,10 +5181,9 @@ class SmoothingDialog(QDialog):
         self._y_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self._y_column_list.setMaximumHeight(110)
         self._y_column_list.addItems(column_names)
-        if default_y_column:
-            select_list_items(self._y_column_list, [default_y_column])
-        elif len(column_names) > 1:
-            self._y_column_list.item(1).setSelected(True)
+        self._y_column_list.setToolTip(
+            "Select every signal to smooth; none are selected automatically."
+        )
 
         self._method_combo = QComboBox()
         for key, label in SMOOTHING_METHODS.items():
@@ -5457,7 +5453,6 @@ class FFTDialog(QDialog):
         self,
         column_names: list[str],
         default_dataset_name: str,
-        default_signal_column: str | None = None,
         default_x_column: str | None = None,
         dataset_names: list[str] | None = None,
         current_dataset_name: str = "",
@@ -5474,10 +5469,9 @@ class FFTDialog(QDialog):
         self._signal_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self._signal_column_list.setMaximumHeight(120)
         self._signal_column_list.addItems(column_names)
-        if default_signal_column:
-            select_list_items(self._signal_column_list, [default_signal_column])
-        elif len(column_names) > 1:
-            self._signal_column_list.item(1).setSelected(True)
+        self._signal_column_list.setToolTip(
+            "Select one or more signal columns explicitly; none are selected automatically."
+        )
 
         self._x_column_combo = QComboBox()
         self._x_column_combo.addItem("Sample index", None)
@@ -5609,13 +5603,12 @@ class IFFTDialog(QDialog):
         self._imaginary_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self._imaginary_column_list.setMaximumHeight(120)
         self._imaginary_column_list.addItems(column_names)
-        if "imaginary" in column_names:
-            select_list_items(self._imaginary_column_list, ["imaginary"])
-
-        if "real" in column_names:
-            select_list_items(self._real_column_list, ["real"])
-        elif column_names:
-            self._real_column_list.item(0).setSelected(True)
+        self._real_column_list.setToolTip(
+            "Select one or more real spectrum columns explicitly."
+        )
+        self._imaginary_column_list.setToolTip(
+            "Optionally select matching imaginary columns; none are selected automatically."
+        )
 
         self._column_binding_combo = batch_column_binding_combo()
         self._target_dataset_edit = QLineEdit(f"{default_dataset_name}_iFFT")
@@ -5721,8 +5714,6 @@ class InterpolationDialog(QDialog):
         column_ranges: dict[str, tuple[float, float]],
         default_x_column: str | None = None,
         default_y_column: str | None = None,
-        default_z_column: str | None = None,
-        default_value_column: str | None = None,
         dataset_names: list[str] | None = None,
         current_dataset_name: str = "",
         parent: QWidget | None = None,
@@ -5735,22 +5726,14 @@ class InterpolationDialog(QDialog):
         self._column_names = list(column_names)
         self._column_ranges = column_ranges
         self._current_dataset_name = current_dataset_name or default_dataset_name
-        self._default_value_by_mode = {
-            "1d": default_value_column or default_y_column or default_z_column,
-            "2d": default_z_column or default_value_column or default_y_column,
-            "nd": default_z_column or default_value_column or default_y_column,
-        }
-        self._last_mode = "1d"
-
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("1D: x -> value", "1d")
         self._mode_combo.addItem("2D: x, y -> value", "2d")
         self._mode_combo.addItem("N-D: coordinates -> value", "nd")
 
         self._value_column_list = self._column_list(maximum_height=120)
-        self._select_list_columns(
-            self._value_column_list,
-            [self._default_value_by_mode["1d"]] if self._default_value_by_mode["1d"] else [],
+        self._value_column_list.setToolTip(
+            "Select one or more values to interpolate; none are selected automatically."
         )
 
         self._x_column_combo = QComboBox()
@@ -6021,11 +6004,6 @@ class InterpolationDialog(QDialog):
     def _update_mode(self) -> None:
         """Refresh mode-specific controls."""
         mode = self.mode()
-        previous_default = self._default_value_by_mode.get(self._last_mode)
-        new_default = self._default_value_by_mode.get(mode)
-        if new_default and self.value_columns() in [[], [previous_default]]:
-            self._select_list_columns(self._value_column_list, [new_default])
-        self._last_mode = mode
         x_visible = mode in {"1d", "2d"}
         y_visible = mode == "2d"
         nd_visible = mode == "nd"
@@ -6169,7 +6147,7 @@ class InterpolationDialog(QDialog):
     def _column_list(self, maximum_height: int = 120) -> QListWidget:
         """Return a multi-select list populated with dataset columns."""
         widget = QListWidget()
-        widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        widget.setSelectionMode(QAbstractItemView.MultiSelection)
         widget.setMaximumHeight(maximum_height)
         widget.addItems(self._column_names)
         return widget
@@ -6371,21 +6349,18 @@ class StatisticsDialog(QDialog):
 
     def _refresh_primary_columns(self, dataset_name: str) -> None:
         """Refresh primary column choices for the selected dataset."""
-        self._refresh_column_list(self._primary_column_list, dataset_name, prefer_second=False)
+        self._refresh_column_list(self._primary_column_list, dataset_name)
         self._refresh_multi_columns(dataset_name)
 
     def _refresh_secondary_columns(self, dataset_name: str) -> None:
         """Refresh secondary column choices for the selected dataset."""
-        self._refresh_column_list(self._secondary_column_list, dataset_name, prefer_second=True)
+        self._refresh_column_list(self._secondary_column_list, dataset_name)
 
-    def _refresh_column_list(self, widget: QListWidget, dataset_name: str, prefer_second: bool) -> None:
+    def _refresh_column_list(self, widget: QListWidget, dataset_name: str) -> None:
         """Reload one selectable column list from the dataset-column map."""
         previous = set(selected_list_items(widget))
         columns = self._dataset_columns.get(dataset_name, [])
         selected = previous.intersection(columns)
-        if not selected and columns:
-            default_index = 1 if prefer_second and len(columns) > 1 else 0
-            selected = {columns[default_index]}
         widget.clear()
         for column in columns:
             widget.addItem(column)
@@ -6396,7 +6371,7 @@ class StatisticsDialog(QDialog):
         """Refresh multi-column operation choices for the selected dataset."""
         previous = set(self.multi_columns())
         columns = self._dataset_columns.get(dataset_name, [])
-        selected = previous.intersection(columns) or set(columns)
+        selected = previous.intersection(columns)
         self._multi_column_list.clear()
         for column in columns:
             self._multi_column_list.addItem(column)
@@ -6787,9 +6762,6 @@ class FitDialog(QDialog):
         default_dataset_name: str,
         custom_models: list[CustomFitModel] | None = None,
         default_x_column: str | None = None,
-        default_y_column: str | None = None,
-        default_x_weight_column: str | None = None,
-        default_y_weight_column: str | None = None,
         dataset_names: list[str] | None = None,
         current_dataset_name: str = "",
         parent: QWidget | None = None,
@@ -6811,10 +6783,9 @@ class FitDialog(QDialog):
         self._y_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self._y_column_list.setMaximumHeight(96)
         self._y_column_list.addItems(column_names)
-        if default_y_column:
-            select_list_items(self._y_column_list, [default_y_column])
-        elif len(column_names) > 1:
-            self._y_column_list.item(1).setSelected(True)
+        self._y_column_list.setToolTip(
+            "Select one or more response columns explicitly; none are selected automatically."
+        )
 
         self._model_combo = QComboBox()
         for model in available_fit_models(self._custom_models):
@@ -6840,14 +6811,14 @@ class FitDialog(QDialog):
         self._x_weight_column_combo.addItem("None", None)
         for column_name in column_names:
             self._x_weight_column_combo.addItem(column_name, column_name)
-        self._set_combo_text_if_present(self._x_weight_column_combo, default_x_weight_column)
 
         self._weight_column_list = QListWidget()
         self._weight_column_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self._weight_column_list.setMaximumHeight(82)
         self._weight_column_list.addItems(column_names)
-        if default_y_weight_column:
-            select_list_items(self._weight_column_list, [default_y_weight_column])
+        self._weight_column_list.setToolTip(
+            "Optional: select weight/sigma columns explicitly; none are selected automatically."
+        )
 
         self._weight_mode_combo = QComboBox()
         self._weight_mode_combo.addItem("Sigma / standard deviation", "sigma")

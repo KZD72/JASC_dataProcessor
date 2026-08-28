@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import struct
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -13,11 +15,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pandas as pd
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from core import project_io
 from core.workspace import Workspace
-from models.plot_settings import LegendSettings, PLOT_STATE_VERSION, PlotSettings
+from models.plot_settings import (
+    AxisSettings,
+    FigureSettings,
+    LegendSettings,
+    PLOT_STATE_VERSION,
+    PlotSettings,
+)
 from ui.plot_canvas import PlotCanvas, PlotLocator, PlotSeries
 from ui.plot_tab import PlotTab
 
@@ -42,6 +50,7 @@ class PlotSettingsTests(unittest.TestCase):
         self.assertFalse(settings.legend.enabled)
         self.assertEqual(settings.legend.location, "lower left")
         self.assertEqual(settings.figure.width, 8.5)
+        self.assertEqual(settings.figure.size_mode, "figure")
         self.assertEqual(settings.style.preset, "science")
         self.assertIn("axes", settings.to_state())
         self.assertIn("legend", settings.to_state())
@@ -59,7 +68,7 @@ class PlotSettingsTests(unittest.TestCase):
         self.assertEqual(settings.figure.width, 7.0)
         self.assertEqual(settings.figure.height, 15.0)
 
-    def test_version_three_plot_settings_survive_project_round_trip(self) -> None:
+    def test_current_plot_settings_survive_project_round_trip(self) -> None:
         workspace = Workspace()
         state = {
             "version": PLOT_STATE_VERSION,
@@ -73,6 +82,7 @@ class PlotSettingsTests(unittest.TestCase):
                     title="Legend",
                     columns=2,
                 ),
+                figure=FigureSettings(width=6.0, height=4.0, size_mode="plot_area"),
             ).to_state(),
         }
         workspace.add_plot("Figure 1", state)
@@ -138,6 +148,294 @@ class PlotAppearanceGuiTests(unittest.TestCase):
         self.assertEqual(legend._ncols, 2)
         self.assertAlmostEqual(canvas.figure.subplotpars.right, 0.75)
         canvas.deleteLater()
+
+    def test_export_controls_do_not_resize_interactive_canvas_when_style_changes(self) -> None:
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_single_series_plot(self.dataset, "x", "left", "Signal")
+        initial_size = tuple(tab._plot_canvas.figure.get_size_inches())
+
+        tab._width_spin.setValue(14.0)
+        tab._height_spin.setValue(9.0)
+        tab._set_combo_data(tab._style_preset_combo, "science")
+        tab._render_plot()
+
+        self.assertEqual(tuple(tab._plot_canvas.figure.get_size_inches()), initial_size)
+        self.assertEqual(tab._preview_status_label.text(), "Preview current")
+        self.assertEqual(tab._plot_canvas._export_width, 14.0)
+        self.assertEqual(tab._plot_canvas._export_height, 9.0)
+        tab.deleteLater()
+
+    def test_full_image_export_uses_requested_size_and_restores_canvas(self) -> None:
+        canvas = PlotCanvas()
+        canvas.plot_series(
+            self.workspace,
+            [PlotSeries("signals", "x", "signals", "left")],
+        )
+        original_size = tuple(canvas.figure.get_size_inches())
+        canvas.set_export_size(4.0, 3.0, "figure")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "full-image.png"
+            canvas.export_figure(str(path))
+            data = path.read_bytes()
+        pixel_width, pixel_height = struct.unpack(">II", data[16:24])
+
+        self.assertEqual(pixel_width, round(4.0 * canvas.figure.dpi))
+        self.assertEqual(pixel_height, round(3.0 * canvas.figure.dpi))
+        self.assertEqual(tuple(canvas.figure.get_size_inches()), original_size)
+        canvas.deleteLater()
+
+    def test_plot_area_export_calculates_larger_complete_image(self) -> None:
+        canvas = PlotCanvas()
+        canvas.plot_series(
+            self.workspace,
+            [PlotSeries("signals", "x", "signals", "left")],
+            x_label="Time",
+            y_label="Amplitude",
+        )
+        canvas.set_export_size(5.0, 3.0, "plot_area")
+        figure_width, figure_height = canvas._export_figure_dimensions()
+        axes_position = canvas.axes.get_position()
+
+        self.assertAlmostEqual(figure_width * axes_position.width, 5.0, places=8)
+        self.assertAlmostEqual(figure_height * axes_position.height, 3.0, places=8)
+        self.assertGreater(figure_width, 5.0)
+        self.assertGreater(figure_height, 3.0)
+        measured_axes_sizes: list[tuple[float, float]] = []
+
+        def record_export(*_args: object, **_kwargs: object) -> None:
+            saved_width, saved_height = canvas.figure.get_size_inches()
+            saved_position = canvas.axes.get_position()
+            measured_axes_sizes.append(
+                (saved_width * saved_position.width, saved_height * saved_position.height)
+            )
+
+        with patch.object(canvas.figure, "savefig", side_effect=record_export):
+            canvas.export_figure("unused.png")
+        self.assertAlmostEqual(measured_axes_sizes[0][0], 5.0, places=6)
+        self.assertAlmostEqual(measured_axes_sizes[0][1], 3.0, places=6)
+        canvas.deleteLater()
+
+    def test_canvas_hit_testing_finds_title_axes_and_legend_entry(self) -> None:
+        canvas = PlotCanvas()
+        canvas.plot_series(
+            self.workspace,
+            [PlotSeries("signals", "x", "signals", "left", custom_label="Signal")],
+            title="Measurements",
+            x_label="Time",
+            y_label="Amplitude",
+        )
+        canvas.canvas.draw()
+        renderer = canvas.canvas.get_renderer()
+
+        def center(artist: object) -> tuple[float, float]:
+            bounds = artist.get_window_extent(renderer)
+            return (bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0
+
+        title_center = center(canvas.axes.title)
+        self.assertEqual(canvas.editable_element_at(*title_center), ("title", None))
+        self.assertEqual(
+            canvas.editable_element_at(*center(canvas.axes.xaxis.label)),
+            ("x_axis", None),
+        )
+        self.assertEqual(
+            canvas.editable_element_at(*center(canvas.axes.yaxis.label)),
+            ("left_y_axis", None),
+        )
+        legend_text = canvas.axes.get_legend().get_texts()[0]
+        self.assertEqual(
+            canvas.editable_element_at(*center(legend_text)),
+            ("legend_entry", "Signal"),
+        )
+        emitted: list[tuple[str, object]] = []
+        canvas.element_double_clicked.connect(lambda kind, value: emitted.append((kind, value)))
+        canvas._handle_canvas_button_press(
+            SimpleNamespace(dblclick=True, button=1, x=title_center[0], y=title_center[1])
+        )
+        self.assertEqual(emitted, [("title", None)])
+        canvas.deleteLater()
+
+    def test_canvas_hit_testing_maps_line_and_scatter_artists_to_series(self) -> None:
+        for plot_type in ("line", "scatter"):
+            with self.subTest(plot_type=plot_type):
+                canvas = PlotCanvas()
+                canvas.plot_series(
+                    self.workspace,
+                    [PlotSeries(
+                        "signals", "x", "signals", "left", plot_type=plot_type,
+                    )],
+                    legend_settings=LegendSettings(enabled=False),
+                )
+                canvas.canvas.draw()
+                display_point = canvas.axes.transData.transform((2.0, 3.0))
+                self.assertEqual(
+                    canvas.editable_element_at(*display_point),
+                    ("series", 0),
+                )
+                canvas.deleteLater()
+
+    def test_direct_title_and_axis_edits_sync_inspector_and_canvas(self) -> None:
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_single_series_plot(self.dataset, "x", "left", "Signal")
+
+        class FakeTitleDialog:
+            def __init__(self, *_args: object) -> None:
+                pass
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def text_value() -> str:
+                return "Edited on canvas"
+
+        class FakeAxisDialog:
+            def __init__(self, *_args: object) -> None:
+                pass
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def axis_settings() -> AxisSettings:
+                return AxisSettings(label="Frequency", scale="log", minimum="1", maximum="100")
+
+            @staticmethod
+            def grid_enabled() -> bool:
+                return False
+
+        with patch("ui.plot_tab.PlotTextEditDialog", FakeTitleDialog):
+            tab._edit_rendered_plot_element("title")
+        with patch("ui.plot_tab.PlotAxisEditDialog", FakeAxisDialog):
+            tab._edit_rendered_plot_element("x_axis")
+
+        self.assertEqual(tab._title_edit.text(), "Edited on canvas")
+        self.assertEqual(tab._plot_canvas.axes.get_title(), "Edited on canvas")
+        self.assertEqual(tab._x_label_edit.text(), "Frequency")
+        self.assertEqual(tab._x_scale_combo.currentText(), "log")
+        self.assertEqual(tab._x_min_edit.text(), "1")
+        self.assertEqual(tab._x_max_edit.text(), "100")
+        self.assertEqual(tab._plot_canvas.axes.get_xlabel(), "Frequency")
+        self.assertEqual(tab._plot_canvas.axes.get_xscale(), "log")
+        self.assertFalse(tab._grid_checkbox.isChecked())
+        tab.deleteLater()
+
+    def test_direct_legend_and_entry_edits_sync_committed_state(self) -> None:
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_single_series_plot(self.dataset, "x", "left", "Signal")
+        original_label = tab._plot_series[0].label
+
+        class FakeLegendDialog:
+            def __init__(self, *_args: object) -> None:
+                pass
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def legend_settings() -> LegendSettings:
+                return LegendSettings(
+                    location="upper left",
+                    font_size=13.0,
+                    title="Channels",
+                    frame_enabled=False,
+                )
+
+        class FakeEntryDialog:
+            def __init__(self, *_args: object) -> None:
+                pass
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def entry_label() -> str:
+                return "Renamed signal"
+
+            @staticmethod
+            def entry_shown() -> bool:
+                return True
+
+        with patch("ui.plot_tab.PlotLegendEditDialog", FakeLegendDialog):
+            tab._edit_rendered_plot_element("legend")
+        with patch("ui.plot_tab.PlotLegendEntryEditDialog", FakeEntryDialog):
+            tab._edit_rendered_plot_element("legend_entry", original_label)
+
+        self.assertEqual(tab._legend_title_edit.text(), "Channels")
+        self.assertEqual(tab._legend_font_size_spin.value(), 13.0)
+        self.assertFalse(tab._legend_frame_checkbox.isChecked())
+        self.assertEqual(tab._plot_series[0].custom_label, "Renamed signal")
+        self.assertIn("Renamed signal", tab._series_list.item(0).text())
+        legend = tab._plot_canvas.axes.get_legend()
+        self.assertEqual(legend.get_title().get_text(), "Channels")
+        self.assertEqual(legend.get_texts()[0].get_text(), "Renamed signal")
+        tab.deleteLater()
+
+    def test_direct_series_edit_changes_graph_type_and_representation(self) -> None:
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_single_series_plot(self.dataset, "x", "left", "Signal")
+
+        class FakeSeriesDialog:
+            def __init__(self, *_args: object) -> None:
+                pass
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def series_updates() -> dict[str, object]:
+                return {
+                    "plot_type": "scatter",
+                    "custom_label": "Direct scatter",
+                    "show_in_legend": True,
+                    "line_style": "--",
+                    "line_width": 2.6,
+                    "marker": "*",
+                    "marker_size": 9.0,
+                    "color": "#ff00aa",
+                    "fill_alpha": 0.4,
+                    "bar_width": 0.7,
+                }
+
+        with patch("ui.plot_tab.PlotSeriesAppearanceDialog", FakeSeriesDialog):
+            tab._edit_rendered_plot_element("series", 0)
+
+        series = tab._plot_series[0]
+        self.assertEqual(series.plot_type, "scatter")
+        self.assertEqual(series.marker, "*")
+        self.assertEqual(series.color, "#ff00aa")
+        self.assertEqual(series.custom_label, "Direct scatter")
+        self.assertEqual(tab._plot_type_combo.currentData(), "scatter")
+        self.assertEqual(tab._marker_combo.currentData(), "*")
+        self.assertEqual(tab._color_combo.currentData(), "#ff00aa")
+        self.assertEqual(len(tab._plot_canvas.axes.collections), 1)
+        self.assertEqual(
+            tab._plot_canvas.axes.get_legend().get_texts()[0].get_text(),
+            "Direct scatter",
+        )
+        tab.deleteLater()
+
+    def test_direct_series_edit_does_not_overwrite_unapplied_inspector_edits(self) -> None:
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_single_series_plot(self.dataset, "x", "left", "Signal")
+        original = tab._plot_series[0]
+        tab._series_label_edit.setText("Still staged")
+
+        with (
+            patch.object(QMessageBox, "information") as information,
+            patch("ui.plot_tab.PlotSeriesAppearanceDialog") as dialog,
+        ):
+            tab._edit_rendered_plot_element("series", 0)
+
+        self.assertEqual(tab._plot_series[0], original)
+        self.assertTrue(tab.has_unapplied_series_edits())
+        information.assert_called_once()
+        dialog.assert_not_called()
+        tab.deleteLater()
 
     def test_locator_can_be_excluded_from_legend_without_disabling_lookup(self) -> None:
         canvas = PlotCanvas()

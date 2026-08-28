@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-PLOT_STATE_VERSION = 3
+PLOT_STATE_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,18 +82,21 @@ class LegendSettings:
 
 @dataclass(frozen=True, slots=True)
 class FigureSettings:
-    """Physical figure dimensions used by rendering and export."""
+    """Physical export dimensions, independent from the interactive canvas."""
 
     width: float = 7.0
     height: float = 4.8
+    size_mode: str = "figure"
 
     @classmethod
     def from_state(cls, state: object) -> FigureSettings:
         """Return bounded figure dimensions from saved state."""
         values = state if isinstance(state, dict) else {}
+        size_mode = str(values.get("size_mode", "figure"))
         return cls(
             width=_bounded_float(values.get("width"), 7.0, 3.0, 20.0),
             height=_bounded_float(values.get("height"), 4.8, 2.0, 15.0),
+            size_mode=size_mode if size_mode in {"figure", "plot_area"} else "figure",
         )
 
 
@@ -132,7 +135,7 @@ class PlotSettings:
     style: StyleSettings = field(default_factory=StyleSettings)
 
     def to_state(self) -> dict[str, object]:
-        """Return the canonical version-3 JSON representation."""
+        """Return the canonical version-4 JSON representation."""
         return {
             "title": self.title,
             "axes": {
@@ -148,7 +151,7 @@ class PlotSettings:
 
     @classmethod
     def from_state(cls, state: object) -> PlotSettings:
-        """Load version-3 settings or migrate the former flat settings dictionary."""
+        """Load current settings or migrate the former flat settings dictionary."""
         values = state if isinstance(state, dict) else {}
         axes = values.get("axes")
         if isinstance(axes, dict):
@@ -196,6 +199,7 @@ class PlotSettings:
             figure=FigureSettings(
                 width=_bounded_float(state.get("figure_width"), 7.0, 3.0, 20.0),
                 height=_bounded_float(state.get("figure_height"), 4.8, 2.0, 15.0),
+                size_mode="figure",
             ),
             style=StyleSettings(
                 preset=_text(state.get("plot_style_preset")),

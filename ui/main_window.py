@@ -310,8 +310,10 @@ class MainWindow(QMainWindow):
         self._editor_insert_column_button = QPushButton("Insert Column")
         self._editor_insert_column_button.clicked.connect(self._insert_empty_column)
         self._editor_delete_rows_button = QPushButton("Delete Rows")
+        self._editor_delete_rows_button.setToolTip("Shortcut: Delete, then R")
         self._editor_delete_rows_button.clicked.connect(self._delete_selected_rows)
         self._editor_delete_columns_button = QPushButton("Delete Columns")
+        self._editor_delete_columns_button.setToolTip("Shortcut: Delete, then C")
         self._editor_delete_columns_button.clicked.connect(self._delete_selected_columns)
         self._editor_rename_button = QPushButton("Rename")
         self._editor_rename_button.clicked.connect(self._rename_current_dataset)
@@ -951,12 +953,19 @@ class MainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
-        delete_rows_action = edit_menu.addAction("&Delete Selected Rows")
-        delete_rows_action.setShortcut("Del")
+        delete_rows_action = QAction("&Delete Selected Rows", self._dataset_table)
+        delete_rows_action.setShortcut(QKeySequence("Del, R"))
+        delete_rows_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         delete_rows_action.triggered.connect(self._delete_selected_rows)
+        self._dataset_table.addAction(delete_rows_action)
+        edit_menu.addAction(delete_rows_action)
 
-        delete_columns_action = edit_menu.addAction("Delete Selected &Columns")
+        delete_columns_action = QAction("Delete Selected &Columns", self._dataset_table)
+        delete_columns_action.setShortcut(QKeySequence("Del, C"))
+        delete_columns_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         delete_columns_action.triggered.connect(self._delete_selected_columns)
+        self._dataset_table.addAction(delete_columns_action)
+        edit_menu.addAction(delete_columns_action)
 
         view_menu = self.menuBar().addMenu("&View")
         show_sidebar_action = view_menu.addAction("Show &Workspace Navigator")
@@ -3008,7 +3017,6 @@ class MainWindow(QMainWindow):
             methods=DERIVATIVE_METHODS,
             default_target="Derivative",
             default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
-            default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
             dataset_names=[
                 candidate.name
                 for candidate in self._workspace.list_datasets()
@@ -3043,7 +3051,6 @@ class MainWindow(QMainWindow):
             default_target="Integral",
             include_initial_value=True,
             default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
-            default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
             dataset_names=[
                 candidate.name
                 for candidate in self._workspace.list_datasets()
@@ -3083,7 +3090,6 @@ class MainWindow(QMainWindow):
             frame=current_dataset.frame,
             column_names=[str(column) for column in current_dataset.frame.columns],
             default_x_column=self._preferred_dataset_column(current_dataset, ("x",), fallback_index=0),
-            default_y_column=self._preferred_dataset_column(current_dataset, ("y",), fallback_index=1),
             dataset_names=[
                 candidate.name
                 for candidate in self._workspace.list_datasets()
@@ -3996,15 +4002,12 @@ class MainWindow(QMainWindow):
 
         default_x = self._preferred_dataset_column(dataset, ("x",), fallback_index=0)
         default_y = self._preferred_dataset_column(dataset, ("y",), fallback_index=1)
-        default_z = self._preferred_dataset_column(dataset, ("z",), fallback_index=2)
         dialog = InterpolationDialog(
             column_names=[str(column) for column in dataset.frame.columns],
             default_dataset_name=dataset.name,
             column_ranges=self._numeric_column_ranges(dataset),
             default_x_column=default_x,
             default_y_column=default_y,
-            default_z_column=default_z,
-            default_value_column=default_y,
             dataset_names=[
                 candidate.name
                 for candidate in self._workspace.list_datasets()
@@ -4610,7 +4613,6 @@ class MainWindow(QMainWindow):
         dialog = FFTDialog(
             column_names=[str(column) for column in dataset.frame.columns],
             default_dataset_name=dataset.name,
-            default_signal_column=self._preferred_dataset_column(dataset, ("y", "z"), fallback_index=1),
             default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
             dataset_names=[
                 candidate.name
@@ -6983,9 +6985,6 @@ class MainWindow(QMainWindow):
             default_dataset_name=dataset.name,
             custom_models=self._workspace.list_custom_fit_models(),
             default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
-            default_y_column=self._preferred_dataset_column(dataset, ("y",), fallback_index=1),
-            default_x_weight_column=self._preferred_dataset_column(dataset, ("x_error",), fallback_index=None),
-            default_y_weight_column=self._preferred_dataset_column(dataset, ("y_error", "error"), fallback_index=None),
             dataset_names=[
                 candidate.name
                 for candidate in self._workspace.list_datasets()
@@ -7896,12 +7895,14 @@ class MainWindow(QMainWindow):
         """Show common editing, preparation, analysis, and plotting actions."""
         dataset = self._current_dataset()
         has_dataset = dataset is not None
-        has_selection = bool(self._selected_dataset_indexes())
-        has_columns = bool(self._selected_dataset_columns())
+        has_selection = self._dataset_has_selection()
+        has_columns = has_dataset and (
+            context_column is not None or has_selection
+        )
         clipboard_mime = QApplication.clipboard().mimeData()
         has_clipboard_text = bool(clipboard_mime is not None and clipboard_mime.hasText())
 
-        menu = QMenu(self)
+        menu = QMenu()
         undo_action = menu.addAction("Undo")
         undo_action.setEnabled(self._dataset_model.can_undo())
         redo_action = menu.addAction("Redo")
@@ -8051,8 +8052,7 @@ class MainWindow(QMainWindow):
 
     def _prepare_dataset_context_column(self, column_index: int) -> None:
         """Make an unselected right-clicked header column the active selection."""
-        selected_columns = self._selected_dataset_columns()
-        if column_index in selected_columns:
+        if self._dataset_selection_contains_column(column_index):
             return
 
         self._dataset_table.clearSelection()
@@ -8379,9 +8379,30 @@ class MainWindow(QMainWindow):
 
         return selection_model.selectedIndexes()
 
+    def _dataset_has_selection(self) -> bool:
+        """Return selection presence without materializing every selected cell index."""
+        selection_model = self._dataset_table.selectionModel()
+        return bool(selection_model is not None and selection_model.hasSelection())
+
+    def _dataset_selection_contains_column(self, column_index: int) -> bool:
+        """Return whether any compact Qt selection range touches a column."""
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None:
+            return False
+        return any(
+            selection_range.left() <= column_index <= selection_range.right()
+            for selection_range in selection_model.selection()
+        )
+
     def _selected_dataset_rows(self) -> list[int]:
         """Return sorted row indexes touched by the table selection."""
-        return sorted({index.row() for index in self._selected_dataset_indexes()})
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None:
+            return []
+        rows: set[int] = set()
+        for selection_range in selection_model.selection():
+            rows.update(range(selection_range.top(), selection_range.bottom() + 1))
+        return sorted(rows)
 
     def _update_dataset_summary(self) -> None:
         """Update dataset summary text and action enabled states."""
@@ -8689,7 +8710,13 @@ class MainWindow(QMainWindow):
 
     def _selected_dataset_columns(self) -> list[int]:
         """Return sorted column indexes touched by the table selection."""
-        return sorted({index.column() for index in self._selected_dataset_indexes()})
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None:
+            return []
+        columns: set[int] = set()
+        for selection_range in selection_model.selection():
+            columns.update(range(selection_range.left(), selection_range.right() + 1))
+        return sorted(columns)
 
     def _select_column(self, column_name: str) -> None:
         """Select a named column in the data editor if it exists."""
