@@ -37,6 +37,8 @@ FILTER_OPERATORS: dict[str, str] = {
     "not_blank": "is not blank",
 }
 
+POSITIONAL_SUBSET_MODES = {"all", "odd", "even", "every_n"}
+
 
 def apply_filter_condition(frame: pd.DataFrame, condition: FilterCondition) -> pd.DataFrame:
     """Return a filtered DataFrame using one condition."""
@@ -47,6 +49,57 @@ def apply_filter_condition(frame: pd.DataFrame, condition: FilterCondition) -> p
 
     mask = _condition_mask(frame[condition.column], condition)
     return _reset_copy(frame.loc[mask])
+
+
+def extract_positional_subset(
+    frame: pd.DataFrame,
+    *,
+    row_mode: str = "all",
+    row_step: int = 1,
+    row_start: int = 1,
+    column_mode: str = "all",
+    column_step: int = 1,
+    column_start: int = 1,
+) -> pd.DataFrame:
+    """Return rows and columns selected by their visible 1-based positions."""
+    if len(frame.columns) == 0:
+        raise DataPrepError("The source sheet has no columns to extract.")
+    row_positions = _positional_subset_indices(
+        len(frame), row_mode, row_step, row_start, "row"
+    )
+    column_positions = _positional_subset_indices(
+        len(frame.columns), column_mode, column_step, column_start, "column"
+    )
+    if not column_positions:
+        raise DataPrepError("The column selection does not contain any columns.")
+    return _reset_copy(frame.iloc[row_positions, column_positions])
+
+
+def _positional_subset_indices(
+    length: int,
+    mode: str,
+    step: int,
+    start: int,
+    label: str,
+) -> list[int]:
+    """Return zero-based indices for a visible 1-based positional rule."""
+    if mode not in POSITIONAL_SUBSET_MODES:
+        raise DataPrepError(f"Unknown {label} subset mode: {mode}")
+    if mode == "all":
+        return list(range(length))
+    if mode == "odd":
+        return list(range(0, length, 2))
+    if mode == "even":
+        return list(range(1, length, 2))
+    if step < 1:
+        raise DataPrepError(f"Every-N {label} interval must be at least 1.")
+    if start < 1:
+        raise DataPrepError(f"Every-N {label} starting position must be at least 1.")
+    if length and start > length:
+        raise DataPrepError(
+            f"Every-N {label} starting position {start} exceeds the available {length}."
+        )
+    return list(range(start - 1, length, step))
 
 
 def sort_dataframe(frame: pd.DataFrame, columns: list[str], ascending: bool = True) -> pd.DataFrame:

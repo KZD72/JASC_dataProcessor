@@ -7,7 +7,52 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from core.data_prep import DataPrepError, remove_duplicate_rows
+from core.data_prep import (
+    DataPrepError,
+    extract_positional_subset,
+    remove_duplicate_rows,
+)
+
+
+class PositionalSubsetTests(unittest.TestCase):
+    """Verify 1-based odd/even and Every-N row/column extraction."""
+
+    def setUp(self) -> None:
+        self.frame = pd.DataFrame(
+            np.arange(30).reshape(6, 5),
+            columns=["a", "b", "c", "d", "e"],
+        )
+
+    def test_odd_rows_use_visible_one_based_positions(self) -> None:
+        result = extract_positional_subset(self.frame, row_mode="odd")
+        self.assertEqual(result["a"].tolist(), [0, 10, 20])
+        self.assertEqual(result.index.tolist(), [0, 1, 2])
+
+    def test_even_columns_keep_second_fourth_and_so_on(self) -> None:
+        result = extract_positional_subset(self.frame, column_mode="even")
+        self.assertEqual(result.columns.tolist(), ["b", "d"])
+        self.assertEqual(result.iloc[0].tolist(), [1, 3])
+
+    def test_every_n_rows_and_columns_honor_independent_start_positions(self) -> None:
+        result = extract_positional_subset(
+            self.frame,
+            row_mode="every_n",
+            row_step=3,
+            row_start=2,
+            column_mode="every_n",
+            column_step=2,
+            column_start=1,
+        )
+        self.assertEqual(result.columns.tolist(), ["a", "c", "e"])
+        self.assertEqual(result.values.tolist(), [[5, 7, 9], [20, 22, 24]])
+
+    def test_invalid_every_n_rule_is_rejected(self) -> None:
+        with self.assertRaisesRegex(DataPrepError, "interval"):
+            extract_positional_subset(
+                self.frame,
+                row_mode="every_n",
+                row_step=0,
+            )
 
 
 class RemoveDuplicateRowsTests(unittest.TestCase):

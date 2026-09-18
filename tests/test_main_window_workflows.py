@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QDoubleSpinBox,
     QMenu,
     QMessageBox,
@@ -168,7 +169,68 @@ class MainWindowWorkflowTests(unittest.TestCase):
             "Duplicate Sheet",
             "Rename...",
             "Remove Dataset",
+            "Extract Subset...",
         }.issubset(set(dataset_texts)))
+
+    def test_extract_subset_creates_new_sheet_and_preserves_column_metadata(self) -> None:
+        dataset = self.window._workspace.add_dataset(
+            "source",
+            pd.DataFrame({
+                "x": [1, 2, 3, 4, 5],
+                "y": [10, 20, 30, 40, 50],
+                "z": [100, 200, 300, 400, 500],
+                "note": ["a", "b", "c", "d", "e"],
+            }),
+        )
+        dataset.metadata_for_column("x").role = "x"
+        self.window._refresh_dataset_list(dataset.name)
+
+        class FakeSubsetDialog:
+            Accepted = QDialog.Accepted
+
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def row_mode() -> str:
+                return "odd"
+
+            @staticmethod
+            def row_step() -> int:
+                return 2
+
+            @staticmethod
+            def row_start() -> int:
+                return 1
+
+            @staticmethod
+            def column_mode() -> str:
+                return "odd"
+
+            @staticmethod
+            def column_step() -> int:
+                return 2
+
+            @staticmethod
+            def column_start() -> int:
+                return 1
+
+            @staticmethod
+            def output_name() -> str:
+                return "sampled"
+
+        with patch("ui.main_window.PositionalSubsetDialog", FakeSubsetDialog):
+            self.window._run_extract_subset()
+
+        result = self.window._workspace.get_dataset("sampled")
+        self.assertEqual(result.frame.columns.tolist(), ["x", "z"])
+        self.assertEqual(result.frame["x"].tolist(), [1, 3, 5])
+        self.assertEqual(result.column_metadata["x"].role, "x")
+        self.assertIn("Extract positional subset", result.column_metadata["x"].comment)
 
         editor_menu = QMenu(self.window)
         self.window._add_dataset_edit_submenus(

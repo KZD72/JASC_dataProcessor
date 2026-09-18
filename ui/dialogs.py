@@ -99,6 +99,12 @@ FILTER_OPERATOR_OPTIONS: tuple[tuple[str, str], ...] = (
     ("blank", "Is blank"),
     ("not_blank", "Is not blank"),
 )
+POSITIONAL_SUBSET_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("All positions", "all"),
+    ("Odd positions (1, 3, 5, ...)", "odd"),
+    ("Even positions (2, 4, 6, ...)", "even"),
+    ("Every Nth position", "every_n"),
+)
 MISSING_VALUE_STRATEGIES: tuple[tuple[str, str], ...] = (
     ("drop_rows", "Drop rows with blanks"),
     ("fill_value", "Fill with value"),
@@ -269,6 +275,179 @@ class DataFilterDialog(QDialog):
             self._value_edit.clear()
         if self.operator_key() != "between":
             self._value2_edit.clear()
+
+
+class PositionalSubsetDialog(QDialog):
+    """Choose rows and columns by worksheet position for a new subset sheet."""
+
+    def __init__(
+        self,
+        row_count: int,
+        column_count: int,
+        default_output_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Create independent row and column sampling controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Extract Subset")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        self._row_count = max(0, int(row_count))
+        self._column_count = max(0, int(column_count))
+
+        self._row_mode_combo = self._mode_combo()
+        self._row_step_spin = self._position_spin(self._row_count, 2)
+        self._row_start_spin = self._position_spin(self._row_count, 1)
+        self._column_mode_combo = self._mode_combo()
+        self._column_step_spin = self._position_spin(self._column_count, 2)
+        self._column_start_spin = self._position_spin(self._column_count, 1)
+        self._output_edit = QLineEdit(default_output_name)
+        self._preview_label = QLabel()
+        self._preview_label.setWordWrap(True)
+
+        row_group = QGroupBox("Rows")
+        row_form = QFormLayout(row_group)
+        row_form.addRow("Selection", self._row_mode_combo)
+        row_form.addRow("N / interval", self._row_step_spin)
+        row_form.addRow("Start at row", self._row_start_spin)
+
+        column_group = QGroupBox("Columns")
+        column_form = QFormLayout(column_group)
+        column_form.addRow("Selection", self._column_mode_combo)
+        column_form.addRow("N / interval", self._column_step_spin)
+        column_form.addRow("Start at column", self._column_start_spin)
+
+        for combo in (self._row_mode_combo, self._column_mode_combo):
+            combo.currentIndexChanged.connect(self._sync_controls)
+        for spin in (
+            self._row_step_spin,
+            self._row_start_spin,
+            self._column_step_spin,
+            self._column_start_spin,
+        ):
+            spin.valueChanged.connect(self._update_preview)
+
+        help_label = QLabel(
+            "Positions use the visible worksheet numbering: odd means 1, 3, 5; "
+            "even means 2, 4, 6. Every Nth keeps the starting position and then "
+            "advances by N. Row and column rules are combined."
+        )
+        help_label.setWordWrap(True)
+
+        groups = QHBoxLayout()
+        groups.addWidget(row_group)
+        groups.addWidget(column_group)
+
+        output_form = QFormLayout()
+        output_form.addRow("Output sheet", self._output_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(help_label)
+        layout.addLayout(groups)
+        layout.addWidget(self._preview_label)
+        layout.addLayout(output_form)
+        layout.addWidget(buttons)
+        self._sync_controls()
+
+    @staticmethod
+    def _mode_combo() -> QComboBox:
+        """Return the shared positional selection choices."""
+        combo = QComboBox()
+        for label, mode in POSITIONAL_SUBSET_OPTIONS:
+            combo.addItem(label, mode)
+        return combo
+
+    @staticmethod
+    def _position_spin(count: int, value: int) -> QSpinBox:
+        """Return a bounded interval/starting-position spin box."""
+        spin = QSpinBox()
+        spin.setRange(1, max(1, count))
+        spin.setValue(min(max(1, value), max(1, count)))
+        return spin
+
+    def row_mode(self) -> str:
+        """Return the row positional rule."""
+        return str(self._row_mode_combo.currentData() or "all")
+
+    def row_step(self) -> int:
+        """Return the Every-N row interval."""
+        return self._row_step_spin.value()
+
+    def row_start(self) -> int:
+        """Return the 1-based Every-N row starting position."""
+        return self._row_start_spin.value()
+
+    def column_mode(self) -> str:
+        """Return the column positional rule."""
+        return str(self._column_mode_combo.currentData() or "all")
+
+    def column_step(self) -> int:
+        """Return the Every-N column interval."""
+        return self._column_step_spin.value()
+
+    def column_start(self) -> int:
+        """Return the 1-based Every-N column starting position."""
+        return self._column_start_spin.value()
+
+    def output_name(self) -> str:
+        """Return the requested result-sheet name."""
+        return self._output_edit.text().strip()
+
+    def accept(self) -> None:
+        """Reject a no-op rule or missing result name."""
+        if self.row_mode() == "all" and self.column_mode() == "all":
+            QMessageBox.information(
+                self,
+                "Extract Subset",
+                "Choose a row or column subset. Use Duplicate Sheet to copy everything.",
+            )
+            return
+        if not self.output_name():
+            QMessageBox.warning(self, "Extract Subset", "Enter an output sheet name.")
+            return
+        super().accept()
+
+    def _sync_controls(self) -> None:
+        """Enable interval fields only for Every-N rules and update the preview."""
+        row_every_n = self.row_mode() == "every_n"
+        self._row_step_spin.setEnabled(row_every_n)
+        self._row_start_spin.setEnabled(row_every_n)
+        column_every_n = self.column_mode() == "every_n"
+        self._column_step_spin.setEnabled(column_every_n)
+        self._column_start_spin.setEnabled(column_every_n)
+        self._update_preview()
+
+    def _update_preview(self) -> None:
+        """Show the output dimensions implied by the current positional rules."""
+        selected_rows = self._selected_count(
+            self._row_count, self.row_mode(), self.row_step(), self.row_start()
+        )
+        selected_columns = self._selected_count(
+            self._column_count,
+            self.column_mode(),
+            self.column_step(),
+            self.column_start(),
+        )
+        self._preview_label.setText(
+            f"Output preview: {selected_rows} of {self._row_count} rows, "
+            f"{selected_columns} of {self._column_count} columns."
+        )
+
+    @staticmethod
+    def _selected_count(length: int, mode: str, step: int, start: int) -> int:
+        """Return the count produced by one positional rule."""
+        if mode == "all":
+            return length
+        if mode == "odd":
+            return (length + 1) // 2
+        if mode == "even":
+            return length // 2
+        if start > length:
+            return 0
+        return 1 + (length - start) // step
 
 
 class DataSortDialog(QDialog):

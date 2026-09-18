@@ -455,6 +455,19 @@ Data Preparation commands create new result datasets. The source sheet remains u
 
 If an operation returns no rows, JASC asks whether to create the empty output sheet.
 
+### Extract Subset
+
+Use **Data > Extract Subset...**, the Data Prep inspector, or a worksheet's **Data Preparation** context submenu to create a positional sample of the active sheet. Row and column rules are independent and can be combined:
+
+- **All positions** keeps that dimension unchanged.
+- **Odd positions** keeps visible worksheet positions 1, 3, 5, and so on.
+- **Even positions** keeps visible worksheet positions 2, 4, 6, and so on.
+- **Every Nth position** keeps the selected starting position and advances by N. For example, interval 3 starting at row 2 keeps rows 2, 5, 8, and so on.
+
+The dialog previews the resulting row and column counts before creation. Positions are based on the displayed 1-based worksheet numbering, not the internal Pandas index. The source remains unchanged, output rows are renumbered from zero internally, retained columns keep their metadata, and the row/column rules are written to the result's operation provenance.
+
+Use **Filter / Query** instead when rows should be chosen by their values rather than their positions.
+
 ### Filter / Query
 
 Choose one dataset, one column, one condition, and an output sheet. Supported conditions are:

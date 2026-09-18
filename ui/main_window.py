@@ -68,6 +68,7 @@ from core.data_prep import FILTER_OPERATORS, DataPrepError, FilterCondition, app
 from core.data_prep import (
     bin_dataframe,
     clean_missing_values,
+    extract_positional_subset,
     group_aggregate_dataframe,
     merge_join_dataframes,
     reshape_dataframe,
@@ -147,6 +148,7 @@ from ui.dialogs import (
     InterpolationDialog,
     MergeJoinDialog,
     MissingValuesDialog,
+    PositionalSubsetDialog,
     ReshapeDialog,
     RemoveDuplicatesDialog,
     DataSortDialog,
@@ -361,6 +363,8 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         filter_button = QPushButton("Filter / Query")
         filter_button.clicked.connect(self._run_filter_query)
+        subset_button = QPushButton("Extract Subset")
+        subset_button.clicked.connect(self._run_extract_subset)
         sort_button = QPushButton("Sort")
         sort_button.clicked.connect(self._run_sort)
         missing_button = QPushButton("Missing Values")
@@ -378,6 +382,7 @@ class MainWindow(QMainWindow):
 
         self._data_prep_buttons = [
             filter_button,
+            subset_button,
             sort_button,
             missing_button,
             duplicates_button,
@@ -390,6 +395,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.addWidget(QLabel("Clean and Shape"))
         layout.addWidget(filter_button)
+        layout.addWidget(subset_button)
         layout.addLayout(self._button_row(sort_button, missing_button))
         layout.addWidget(duplicates_button)
         layout.addWidget(bin_button)
@@ -630,6 +636,65 @@ class MainWindow(QMainWindow):
                 f"Filtered {source_dataset.name}: {len(result_frame)} of {len(source_dataset.frame)} rows"
             ),
         )
+
+    def _run_extract_subset(self) -> None:
+        """Create a new sheet by sampling visible row and column positions."""
+        dataset = self._current_data_prep_source("Extract Subset")
+        if dataset is None:
+            return
+        dialog = PositionalSubsetDialog(
+            row_count=len(dataset.frame),
+            column_count=len(dataset.frame.columns),
+            default_output_name=f"{dataset.name}_subset",
+            parent=self,
+        )
+        if dialog.exec() != PositionalSubsetDialog.Accepted:
+            return
+        try:
+            result_frame = extract_positional_subset(
+                dataset.frame,
+                row_mode=dialog.row_mode(),
+                row_step=dialog.row_step(),
+                row_start=dialog.row_start(),
+                column_mode=dialog.column_mode(),
+                column_step=dialog.column_step(),
+                column_start=dialog.column_start(),
+            )
+        except DataPrepError as exc:
+            QMessageBox.warning(self, "Extract Subset Failed", str(exc))
+            return
+
+        row_rule = self._positional_subset_rule_text(
+            dialog.row_mode(), dialog.row_step(), dialog.row_start()
+        )
+        column_rule = self._positional_subset_rule_text(
+            dialog.column_mode(), dialog.column_step(), dialog.column_start()
+        )
+        self._create_data_prep_result(
+            title="Extract Subset",
+            output_name=dialog.output_name(),
+            result_frame=result_frame,
+            source_datasets=[dataset],
+            operation=(
+                f"Extract positional subset from {dataset.name}; "
+                f"rows={row_rule}; columns={column_rule}"
+            ),
+            status_message=(
+                f"Extracted {len(result_frame)} row(s) and "
+                f"{len(result_frame.columns)} column(s) from {dataset.name}"
+            ),
+        )
+
+    @staticmethod
+    def _positional_subset_rule_text(mode: str, step: int, start: int) -> str:
+        """Return a concise provenance description for a positional subset rule."""
+        if mode == "odd":
+            return "odd positions"
+        if mode == "even":
+            return "even positions"
+        if mode == "every_n":
+            return f"every {step}, starting at {start}"
+        return "all"
 
     def _run_sort(self) -> None:
         """Create a sorted copy of the current dataset."""
@@ -1074,6 +1139,9 @@ class MainWindow(QMainWindow):
 
         filter_query_action = data_menu.addAction("Filter / &Query...")
         filter_query_action.triggered.connect(self._run_filter_query)
+
+        extract_subset_action = data_menu.addAction("Extract &Subset...")
+        extract_subset_action.triggered.connect(self._run_extract_subset)
 
         sort_action = data_menu.addAction("&Sort...")
         sort_action.triggered.connect(self._run_sort)
@@ -8336,6 +8404,7 @@ class MainWindow(QMainWindow):
         data_prep_menu = menu.addMenu("Data Preparation")
         data_prep_actions = (
             ("Filter / Query...", self._run_filter_query),
+            ("Extract Subset...", self._run_extract_subset),
             ("Sort...", self._run_sort),
             ("Missing Values...", self._run_missing_values),
             ("Remove Duplicates...", self._run_remove_duplicates),
