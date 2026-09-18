@@ -1353,7 +1353,7 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
                 padding: 8px 2px 3px 2px;
             }}
-            QListWidget, QTableView, QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
+            QListWidget, QTableView, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
                 background: {base};
                 border: 1px solid {border};
                 border-radius: 4px;
@@ -1361,11 +1361,24 @@ class MainWindow(QMainWindow):
                 selection-background-color: {highlight};
                 selection-color: {highlighted_text};
             }}
+            QSpinBox, QDoubleSpinBox {{
+                padding-right: 24px;
+            }}
+            QSpinBox::up-button, QDoubleSpinBox::up-button {{
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 20px;
+            }}
+            QSpinBox::down-button, QDoubleSpinBox::down-button {{
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 20px;
+            }}
             QTableView {{
                 alternate-background-color: {table_alternate};
                 gridline-color: {soft_border};
             }}
-            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableView:focus {{
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableView:focus {{
                 border: 1px solid {highlight};
             }}
             QListWidget::item {{
@@ -1487,18 +1500,31 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
                 padding: 8px 2px 3px 2px;
             }
-            QListWidget, QTableView, QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {
+            QListWidget, QTableView, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {
                 background: #ffffff;
                 border: 1px solid #b7c1cc;
                 border-radius: 4px;
                 selection-background-color: #2f77bc;
                 selection-color: #ffffff;
             }
+            QSpinBox, QDoubleSpinBox {
+                padding-right: 24px;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 20px;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 20px;
+            }
             QTableView {
                 alternate-background-color: #f7fbff;
                 gridline-color: #dbe3ec;
             }
-            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableView:focus {
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableView:focus {
                 border: 1px solid #2f77bc;
             }
             QListWidget::item {

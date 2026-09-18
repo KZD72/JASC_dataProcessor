@@ -1839,9 +1839,17 @@ class FigureDigitizerDialog(QDialog):
         self._symbol_min_separation_spin.setValue(8)
         self._symbol_min_separation_spin.setSuffix(" px")
         symbol_spin_style = """
-            QSpinBox, QDoubleSpinBox { padding-right: 22px; }
-            QSpinBox::up-button, QSpinBox::down-button,
-            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 18px; }
+            QSpinBox, QDoubleSpinBox { padding-right: 24px; }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 20px;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 20px;
+            }
         """
         for spin_box in (
             self._symbol_min_area_spin,

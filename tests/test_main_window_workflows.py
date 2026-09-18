@@ -9,7 +9,18 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pandas as pd
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import (
+    QApplication,
+    QDoubleSpinBox,
+    QMenu,
+    QMessageBox,
+    QSpinBox,
+    QStyle,
+    QStyleFactory,
+    QStyleOptionSpinBox,
+)
 
 from ui.main_window import MainWindow
 
@@ -41,6 +52,47 @@ class MainWindowWorkflowTests(unittest.TestCase):
             y_column="y",
             title="Working plot",
         )
+
+    def test_spin_box_increment_and_decrement_buttons_are_separate_and_clickable(self) -> None:
+        """Keep both spinner directions reliable under Qt's Windows 11 style."""
+        if "windows11" not in {name.lower() for name in QStyleFactory.keys()}:
+            self.skipTest("Qt Windows 11 style is not available")
+
+        plot_tab = self.window._plot_tab_widget
+        spin_boxes: tuple[QSpinBox | QDoubleSpinBox, ...] = (
+            plot_tab._histogram_bins_spin,
+            plot_tab._line_width_spin,
+        )
+        self._spin_test_styles = []
+        for spin in spin_boxes:
+            with self.subTest(spin_type=type(spin).__name__):
+                windows_style = QStyleFactory.create("windows11")
+                self._spin_test_styles.append(windows_style)
+                spin.setStyle(windows_style)
+                spin.ensurePolished()
+                self.app.processEvents()
+                option = QStyleOptionSpinBox()
+                spin.initStyleOption(option)
+                up_rect = spin.style().subControlRect(
+                    QStyle.CC_SpinBox,
+                    option,
+                    QStyle.SC_SpinBoxUp,
+                    spin,
+                )
+                down_rect = spin.style().subControlRect(
+                    QStyle.CC_SpinBox,
+                    option,
+                    QStyle.SC_SpinBoxDown,
+                    spin,
+                )
+
+                self.assertEqual(up_rect.center().x(), down_rect.center().x())
+                self.assertLess(up_rect.center().y(), down_rect.center().y())
+                starting_value = spin.value()
+                QTest.mouseClick(spin, Qt.LeftButton, pos=up_rect.center())
+                self.assertGreater(spin.value(), starting_value)
+                QTest.mouseClick(spin, Qt.LeftButton, pos=down_rect.center())
+                self.assertAlmostEqual(float(spin.value()), float(starting_value))
 
     @staticmethod
     def _menu_texts(menu: QMenu) -> list[str]:
