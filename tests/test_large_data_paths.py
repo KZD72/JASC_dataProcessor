@@ -102,6 +102,54 @@ class ClipboardBlockTests(unittest.TestCase):
         self.assertTrue(model.undo())
         self.assertEqual(dataset.frame.shape, (2, 1))
 
+    def test_clear_cells_preserves_shape_and_is_one_undoable_edit(self) -> None:
+        dataset = Workspace().add_dataset(
+            "sheet",
+            pd.DataFrame({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]}),
+        )
+        dataset.formulas = {"x": "col1 * 2", "y": "col2 + 1"}
+        model = DataFrameTableModel()
+        model.set_dataset(dataset)
+
+        cleared = model.clear_cells([(0, 0, 1, 0), (2, 1, 2, 1)])
+
+        self.assertEqual(cleared, 3)
+        self.assertEqual(dataset.frame.shape, (3, 2))
+        self.assertTrue(dataset.frame.iloc[:2, 0].isna().all())
+        self.assertTrue(pd.isna(dataset.frame.iloc[2, 1]))
+        self.assertEqual(dataset.frame.iloc[2, 0], 3.0)
+        self.assertNotIn("x", dataset.formulas)
+        self.assertNotIn("y", dataset.formulas)
+        self.assertTrue(model.undo())
+        pd.testing.assert_frame_equal(
+            dataset.frame,
+            pd.DataFrame({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]}),
+        )
+
+    def test_resize_sheet_changes_both_dimensions_and_restores_metadata_on_undo(self) -> None:
+        dataset = Workspace().add_dataset(
+            "sheet",
+            pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]}),
+        )
+        dataset.formulas["y"] = "col1 * 2"
+        dataset.metadata_for_column("y").unit = "V"
+        model = DataFrameTableModel()
+        model.set_dataset(dataset)
+
+        self.assertEqual(model.resize_sheet(2, 1), (2, 1))
+        self.assertEqual(dataset.frame.shape, (2, 1))
+        self.assertNotIn("y", dataset.formulas)
+        self.assertNotIn("y", dataset.column_metadata)
+        self.assertTrue(model.undo())
+        self.assertEqual(dataset.frame.shape, (3, 2))
+        self.assertEqual(dataset.formulas["y"], "col1 * 2")
+        self.assertEqual(dataset.column_metadata["y"].unit, "V")
+
+        self.assertEqual(model.resize_sheet(5, 4), (5, 4))
+        self.assertEqual(dataset.frame.shape, (5, 4))
+        self.assertEqual(list(dataset.frame.columns[:2]), ["x", "y"])
+        self.assertTrue(dataset.frame.iloc[3:, :].isna().all().all())
+
     def test_large_fill_range_uses_bulk_growth_and_assignment(self) -> None:
         dataset = Workspace().add_dataset("sheet", pd.DataFrame({"x": [float("nan")]}))
         model = DataFrameTableModel()
@@ -230,7 +278,17 @@ class EditorRefreshTests(unittest.TestCase):
             menu_class.return_value.exec.return_value = None
             self.window._show_dataset_editor_context_menu(QPoint(0, 0), context_column=0)
 
-    def test_delete_requires_explicit_row_or_column_chord(self) -> None:
+        action_labels = [
+            call.args[0]
+            for call in menu_class.return_value.addAction.call_args_list
+            if call.args
+        ]
+        self.assertIn("Copy Row(s)", action_labels)
+        self.assertIn("Paste Values Transposed", action_labels)
+        self.assertIn("Clear Selected Cell Values", action_labels)
+        self.assertIn("Resize Sheet...", action_labels)
+
+    def test_delete_clears_cells_and_modified_delete_removes_structure(self) -> None:
         dataset = self.window._workspace.add_dataset(
             "sheet",
             pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]}),
@@ -242,25 +300,82 @@ class EditorRefreshTests(unittest.TestCase):
         self.app.processEvents()
 
         QTest.keyClick(self.window._dataset_table, Qt.Key_Delete)
-        QTest.keyClick(self.window._dataset_table, Qt.Key_Escape)
         self.app.processEvents()
         self.assertEqual(len(dataset.frame), 3)
         self.assertEqual(list(dataset.frame.columns), ["x", "y"])
+        self.assertTrue(dataset.frame.iloc[1].isna().all())
 
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
-            QTest.keyClick(self.window._dataset_table, Qt.Key_Delete)
-            QTest.keyClick(self.window._dataset_table, Qt.Key_R)
+        with (
+            patch.object(QMessageBox, "question", return_value=QMessageBox.Yes) as question,
+            patch.object(QMessageBox, "information") as information,
+        ):
+            QTest.keyClick(
+                self.window._dataset_table,
+                Qt.Key_Delete,
+                Qt.ShiftModifier,
+            )
             self.app.processEvents()
+        self.assertTrue(question.called)
+        information.assert_not_called()
         self.assertEqual(len(dataset.frame), 2)
 
-        self.window._dataset_table.selectColumn(0)
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
-            QTest.keyClick(self.window._dataset_table, Qt.Key_Delete)
-            QTest.keyClick(self.window._dataset_table, Qt.Key_C)
+        self.window._select_dataset_column_range(0, 1)
+        with (
+            patch.object(QMessageBox, "question", return_value=QMessageBox.Yes) as question,
+            patch.object(QMessageBox, "information") as information,
+        ):
+            QTest.keyClick(
+                self.window._dataset_table,
+                Qt.Key_Delete,
+                Qt.ControlModifier,
+            )
             self.app.processEvents()
+        self.assertTrue(question.called)
+        information.assert_not_called()
         self.assertEqual(list(dataset.frame.columns), ["y"])
-        self.assertEqual(self.window._delete_rows_action.shortcut().toString(), "Del, R")
-        self.assertEqual(self.window._delete_columns_action.shortcut().toString(), "Del, C")
+        self.assertEqual(self.window._delete_cells_action.shortcut().toString(), "Del")
+        self.assertEqual(self.window._delete_rows_action.shortcut().toString(), "Shift+Del")
+        self.assertEqual(self.window._delete_columns_action.shortcut().toString(), "Ctrl+Del")
+
+    def test_transposed_paste_rotates_the_complete_clipboard_matrix(self) -> None:
+        dataset = self.window._workspace.add_dataset(
+            "sheet",
+            pd.DataFrame({"a": [0.0, 0.0, 0.0], "b": [0.0, 0.0, 0.0]}),
+        )
+        self.window._refresh_dataset_list(dataset.name)
+        self.window._dataset_table.setCurrentIndex(self.window._dataset_model.index(0, 0))
+        QApplication.clipboard().setText("1\t2\t3\n4\t5\t6")
+
+        self.window._paste_dataset_clipboard(transpose=True)
+
+        self.assertEqual(dataset.frame.iloc[:3, :2].values.tolist(), [[1, 4], [2, 5], [3, 6]])
+        self.assertEqual(
+            self.window._dataset_table.selectionModel().selection()[0].bottom(),
+            2,
+        )
+
+    def test_row_header_context_selects_rows_and_body_menu_remains_available(self) -> None:
+        dataset = self.window._workspace.add_dataset(
+            "sheet",
+            pd.DataFrame({"a": [1, 2], "b": [3, 4]}),
+        )
+        self.window._refresh_dataset_list(dataset.name)
+        header = self.window._dataset_table.verticalHeader()
+        row_position = QPoint(2, header.sectionViewportPosition(1) + 2)
+
+        with patch.object(self.window, "_show_dataset_editor_context_menu") as show_menu:
+            self.window._show_dataset_row_header_context_menu(row_position)
+
+        self.assertEqual(self.window._selected_dataset_rows(), [1])
+        self.assertEqual(self.window._selected_dataset_columns(), [0, 1])
+        self.assertEqual(show_menu.call_args.kwargs["context_row"], 1)
+        self.window._copy_dataset_rows()
+        self.assertEqual(QApplication.clipboard().text(), "2\t4")
+        self.assertEqual(
+            self.window._dataset_table.viewport().contextMenuPolicy(),
+            Qt.CustomContextMenu,
+        )
+        self.assertEqual(header.contextMenuPolicy(), Qt.CustomContextMenu)
 
 
 class ProjectStreamingTests(unittest.TestCase):

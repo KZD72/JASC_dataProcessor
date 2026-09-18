@@ -74,7 +74,13 @@ from core.data_prep import (
     remove_duplicate_rows,
     sort_dataframe,
 )
-from core.file_io import export_tabular_file, read_tabular_file
+from core.file_io import (
+    SUPPORTED_EXCEL_EXTENSIONS,
+    export_tabular_file,
+    inspect_excel_workbook,
+    read_excel_sheets,
+    read_tabular_file,
+)
 from core.operations import ExpressionError, ExpressionResult, apply_column_expression
 from core.workspace import (
     COLUMN_NUMERIC_TYPES,
@@ -115,7 +121,7 @@ from math_engine.smoothing import (
     smooth_column,
     smoothing_operation_text,
 )
-from ui.data_table import RangeFillDialog
+from ui.data_table import RangeFillDialog, TableSizeDialog
 from ui.dataframe_model import DataFrameTableModel
 from ui.dialogs import (
     BATCH_COLUMN_BINDING_NAME,
@@ -130,11 +136,13 @@ from ui.dialogs import (
     DataFilterDialog,
     FFTDialog,
     FigureDigitizerDialog,
+    FigureExtractionResult,
     FigureExtractionModeDialog,
     FitDialog,
     FitReportDialog,
     GroupAggregateDialog,
     IFFTDialog,
+    ExcelImportDialog,
     ImportOptionsDialog,
     InterpolationDialog,
     MergeJoinDialog,
@@ -253,11 +261,14 @@ class MainWindow(QMainWindow):
         dataset_buttons.setContentsMargins(0, 0, 0, 0)
         self._new_dataset_button = QPushButton("New Sheet")
         self._new_dataset_button.clicked.connect(self._create_blank_sheet)
+        self._duplicate_dataset_button = QPushButton("Duplicate Sheet")
+        self._duplicate_dataset_button.clicked.connect(self._duplicate_current_dataset)
         self._rename_dataset_button = QPushButton("Rename")
         self._rename_dataset_button.clicked.connect(self._rename_current_dataset)
         self._remove_dataset_button = QPushButton("Remove")
         self._remove_dataset_button.clicked.connect(self._delete_current_dataset)
         dataset_buttons.addWidget(self._new_dataset_button)
+        dataset_buttons.addWidget(self._duplicate_dataset_button)
         dataset_buttons.addLayout(self._button_row(self._rename_dataset_button, self._remove_dataset_button))
         dataset_layout.addWidget(self._dataset_buttons_panel)
 
@@ -265,6 +276,9 @@ class MainWindow(QMainWindow):
         self._plot_nav_page = plot_page
         plot_layout = QVBoxLayout(plot_page)
         plot_layout.addWidget(self._plot_list)
+        self._duplicate_plot_button = QPushButton("Duplicate Saved Plot")
+        self._duplicate_plot_button.clicked.connect(self._duplicate_selected_plot)
+        plot_layout.addWidget(self._duplicate_plot_button)
 
         self._workspace_nav_tabs.addTab(dataset_page, "Datasets")
         self._workspace_nav_tabs.addTab(plot_page, "Plots")
@@ -310,11 +324,16 @@ class MainWindow(QMainWindow):
         self._editor_insert_column_button = QPushButton("Insert Column")
         self._editor_insert_column_button.clicked.connect(self._insert_empty_column)
         self._editor_delete_rows_button = QPushButton("Delete Rows")
-        self._editor_delete_rows_button.setToolTip("Shortcut: Delete, then R")
+        self._editor_delete_rows_button.setToolTip("Shortcut: Shift+Delete")
         self._editor_delete_rows_button.clicked.connect(self._delete_selected_rows)
         self._editor_delete_columns_button = QPushButton("Delete Columns")
-        self._editor_delete_columns_button.setToolTip("Shortcut: Delete, then C")
+        self._editor_delete_columns_button.setToolTip("Shortcut: Ctrl+Delete")
         self._editor_delete_columns_button.clicked.connect(self._delete_selected_columns)
+        self._editor_resize_sheet_button = QPushButton("Resize Sheet")
+        self._editor_resize_sheet_button.setToolTip(
+            "Set the worksheet row and column counts together"
+        )
+        self._editor_resize_sheet_button.clicked.connect(self._resize_current_sheet)
         self._editor_rename_button = QPushButton("Rename")
         self._editor_rename_button.clicked.connect(self._rename_current_dataset)
         self._editor_remove_button = QPushButton("Remove")
@@ -330,6 +349,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(self._button_row(self._editor_add_row_button, self._editor_insert_row_button))
         layout.addLayout(self._button_row(self._editor_delete_rows_button, self._editor_delete_columns_button))
         layout.addLayout(self._button_row(self._editor_add_column_button, self._editor_insert_column_button))
+        layout.addWidget(self._editor_resize_sheet_button)
         layout.addLayout(self._button_row(self._editor_rename_button, self._editor_remove_button))
         layout.addLayout(self._button_row(self._editor_fill_range_button, self._editor_metadata_button))
         layout.addWidget(self._editor_export_button)
@@ -448,14 +468,22 @@ class MainWindow(QMainWindow):
         self._dataset_paste_shortcut.activated.connect(self._paste_dataset_clipboard)
 
     def _install_dataset_context_menu(self) -> None:
-        """Bind right-click menus for dataset value and column editing."""
+        """Bind right-click menus across cells, headers, and table chrome."""
         self._dataset_table.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
         self._dataset_table.viewport().customContextMenuRequested.connect(
             self._show_dataset_table_context_menu
         )
+        self._dataset_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._dataset_table.customContextMenuRequested.connect(
+            self._show_dataset_table_frame_context_menu
+        )
         self._dataset_table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self._dataset_table.horizontalHeader().customContextMenuRequested.connect(
             self._show_dataset_header_context_menu
+        )
+        self._dataset_table.verticalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self._dataset_table.verticalHeader().customContextMenuRequested.connect(
+            self._show_dataset_row_header_context_menu
         )
         self._dataset_table.horizontalHeader().sectionDoubleClicked.connect(
             self._edit_column_metadata_for_column
@@ -953,19 +981,36 @@ class MainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
+        delete_cells_action = QAction("&Clear Selected Cell Values", self._dataset_table)
+        delete_cells_action.setShortcut(QKeySequence.Delete)
+        delete_cells_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        delete_cells_action.triggered.connect(self._clear_selected_dataset_cells)
+        self._dataset_table.addAction(delete_cells_action)
+        edit_menu.addAction(delete_cells_action)
+
         delete_rows_action = QAction("&Delete Selected Rows", self._dataset_table)
-        delete_rows_action.setShortcut(QKeySequence("Del, R"))
+        delete_rows_action.setShortcut(QKeySequence("Shift+Del"))
         delete_rows_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         delete_rows_action.triggered.connect(self._delete_selected_rows)
         self._dataset_table.addAction(delete_rows_action)
         edit_menu.addAction(delete_rows_action)
 
         delete_columns_action = QAction("Delete Selected &Columns", self._dataset_table)
-        delete_columns_action.setShortcut(QKeySequence("Del, C"))
+        delete_columns_action.setShortcut(QKeySequence("Ctrl+Del"))
         delete_columns_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         delete_columns_action.triggered.connect(self._delete_selected_columns)
         self._dataset_table.addAction(delete_columns_action)
         edit_menu.addAction(delete_columns_action)
+
+        edit_menu.addSeparator()
+        paste_transposed_action = QAction("Paste Values &Transposed", self._dataset_table)
+        paste_transposed_action.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        paste_transposed_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        paste_transposed_action.triggered.connect(
+            lambda: self._paste_dataset_clipboard(transpose=True)
+        )
+        self._dataset_table.addAction(paste_transposed_action)
+        edit_menu.addAction(paste_transposed_action)
 
         view_menu = self.menuBar().addMenu("&View")
         show_sidebar_action = view_menu.addAction("Show &Workspace Navigator")
@@ -997,6 +1042,9 @@ class MainWindow(QMainWindow):
         rename_dataset_action = data_menu.addAction("&Rename Dataset...")
         rename_dataset_action.triggered.connect(self._rename_current_dataset)
 
+        duplicate_dataset_action = data_menu.addAction("D&uplicate Dataset")
+        duplicate_dataset_action.triggered.connect(self._duplicate_current_dataset)
+
         delete_dataset_action = data_menu.addAction("Remo&ve Dataset...")
         delete_dataset_action.triggered.connect(self._delete_current_dataset)
 
@@ -1013,6 +1061,9 @@ class MainWindow(QMainWindow):
 
         insert_row_action = data_menu.addAction("&Insert Row")
         insert_row_action.triggered.connect(self._insert_empty_row)
+
+        resize_sheet_action = data_menu.addAction("Resize &Sheet...")
+        resize_sheet_action.triggered.connect(self._resize_current_sheet)
 
         data_menu.addSeparator()
 
@@ -1092,8 +1143,17 @@ class MainWindow(QMainWindow):
         save_plot_action.setShortcut("Ctrl+Alt+S")
         save_plot_action.triggered.connect(self._save_current_plot)
 
+        copy_plot_action = plot_menu.addAction("&Copy Current Plot to Clipboard")
+        copy_plot_action.setShortcut("Ctrl+Alt+C")
+        copy_plot_action.triggered.connect(
+            self._plot_tab_widget.copy_plot_to_clipboard
+        )
+
         load_plot_action = plot_menu.addAction("&Load Selected Plot")
         load_plot_action.triggered.connect(self._load_selected_plot)
+
+        duplicate_plot_action = plot_menu.addAction("&Duplicate Selected Plot")
+        duplicate_plot_action.triggered.connect(self._duplicate_selected_plot)
 
         delete_plot_action = plot_menu.addAction("&Remove Selected Plot")
         delete_plot_action.triggered.connect(self._delete_selected_plot)
@@ -1121,9 +1181,12 @@ class MainWindow(QMainWindow):
         self._new_sheet_action = new_sheet_action
         self._undo_action = undo_action
         self._redo_action = redo_action
+        self._delete_cells_action = delete_cells_action
         self._delete_rows_action = delete_rows_action
         self._delete_columns_action = delete_columns_action
+        self._paste_transposed_action = paste_transposed_action
         self._rename_dataset_action = rename_dataset_action
+        self._duplicate_dataset_action = duplicate_dataset_action
         self._delete_dataset_action = delete_dataset_action
         self._add_column_action = add_column_action
         self._insert_column_action = insert_column_action
@@ -1142,10 +1205,13 @@ class MainWindow(QMainWindow):
         self._fit_action = fit_action
         self._close_project_action = close_project_action
         self._save_plot_action = save_plot_action
+        self._copy_plot_action = copy_plot_action
         self._load_plot_action = load_plot_action
+        self._duplicate_plot_action = duplicate_plot_action
         self._delete_plot_action = delete_plot_action
         self._add_row_action = add_row_action
         self._insert_row_action = insert_row_action
+        self._resize_sheet_action = resize_sheet_action
         self._show_sidebar_action = show_sidebar_action
         self._show_workspace_action = show_workspace_action
         self._show_plots_action = show_plots_action
@@ -1545,7 +1611,7 @@ class MainWindow(QMainWindow):
         return cls._mix_colors(fallback_base, text, text_weight)
 
     def _confirm_large_file_import(self, path: Path) -> bool:
-        """Ask before reading a very large delimited text file into memory."""
+        """Ask before reading a very large source file into memory."""
         file_size = file_size_bytes(path)
         if not should_warn_for_large_file(path):
             return True
@@ -1555,9 +1621,9 @@ class MainWindow(QMainWindow):
             "Large File",
             (
                 f"'{path.name}' is {format_bytes(file_size)} on disk.\n\n"
-                "Delimited files can require several times their file size in memory once "
-                "loaded into pandas, and large sheets may make editing, undo, plotting, and "
-                "analysis slower.\n\n"
+                "Source files can require several times their on-disk size in memory once "
+                "expanded into pandas, and large sheets may make editing, undo, plotting, "
+                "and analysis slower.\n\n"
                 "Continue importing this file?"
             ),
             QMessageBox.Yes | QMessageBox.No,
@@ -1640,21 +1706,35 @@ class MainWindow(QMainWindow):
         )
 
     def _import_data_file(self) -> None:
-        """Open a delimited file and add it to the workspace."""
+        """Open a delimited file or modern Excel workbook."""
         file_name, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "Import Data File",
             "",
-            "Data Files (*.csv *.txt);;CSV Files (*.csv);;Text Files (*.txt);;All Files (*)",
+            "Data Files (*.csv *.txt *.xlsx *.xlsm);;Excel Workbooks (*.xlsx *.xlsm);;"
+            "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)",
         )
         if not file_name:
+            return
+
+        path = Path(file_name)
+        if path.suffix.lower() in SUPPORTED_EXCEL_EXTENSIONS:
+            self._import_excel_workbook(path)
+            return
+        if path.suffix.lower() in {".xls", ".xlsb"}:
+            QMessageBox.warning(
+                self,
+                "Unsupported Excel Format",
+                "JASC currently imports modern .xlsx and .xlsm workbooks only. "
+                "Open this file in Excel or another compatible application and save it as .xlsx.",
+            )
+            self.statusBar().showMessage("Unsupported Excel format")
             return
 
         dialog = ImportOptionsDialog(self)
         if dialog.exec() != ImportOptionsDialog.Accepted:
             return
 
-        path = Path(file_name)
         if not self._confirm_large_file_import(path):
             self.statusBar().showMessage("Import cancelled")
             return
@@ -1684,8 +1764,84 @@ class MainWindow(QMainWindow):
             f"Imported {dataset.name}: {len(dataset.frame)} rows, {len(dataset.frame.columns)} columns"
         )
 
+    def _import_excel_workbook(self, path: Path) -> None:
+        """Import selected worksheet tabs as independent value-only datasets."""
+        if not self._confirm_large_file_import(path):
+            self.statusBar().showMessage("Excel import cancelled")
+            return
+
+        try:
+            inspection = inspect_excel_workbook(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Excel Import Failed", str(exc))
+            self.statusBar().showMessage("Excel import failed")
+            return
+
+        dialog = ExcelImportDialog(inspection, self)
+        if dialog.exec() != QDialog.Accepted:
+            self.statusBar().showMessage("Excel import cancelled")
+            return
+
+        try:
+            result = read_excel_sheets(
+                path,
+                dialog.selected_sheet_names(),
+                has_header=dialog.has_header(),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Excel Import Failed", str(exc))
+            self.statusBar().showMessage("Excel import failed")
+            return
+
+        imported: list[Dataset] = []
+        skipped: list[str] = []
+        for sheet_name in dialog.selected_sheet_names():
+            frame = result.frames.get(sheet_name)
+            if frame is None:
+                continue
+            if frame.empty and len(frame.columns) == 0:
+                skipped.append(f"{sheet_name}: worksheet contains no data cells")
+                continue
+            if not self._confirm_large_dataset(
+                frame,
+                title="Large Excel Worksheet",
+                source_label=f"{path.name} / {sheet_name}",
+            ):
+                skipped.append(f"{sheet_name}: skipped after large-dataset warning")
+                continue
+            imported.append(
+                self._workspace.add_dataset(
+                    f"{path.stem} - {sheet_name}",
+                    frame,
+                    source_path=path,
+                    copy_frame=False,
+                )
+            )
+
+        skipped.extend(f"{name}: {message}" for name, message in result.errors.items())
+        if not imported:
+            detail = "\n".join(skipped[:12]) or "No worksheet data was imported."
+            QMessageBox.warning(self, "Excel Import", detail)
+            self.statusBar().showMessage("Excel import produced no datasets")
+            return
+
+        self._refresh_dataset_list(imported[-1].name)
+        total_rows = sum(len(dataset.frame) for dataset in imported)
+        self.statusBar().showMessage(
+            f"Imported {len(imported)} Excel worksheet(s), {total_rows} total row(s)"
+        )
+        if skipped:
+            detail = "\n".join(f"• {message}" for message in skipped[:12])
+            if len(skipped) > 12:
+                detail += f"\n• ... and {len(skipped) - 12} more"
+            QMessageBox.warning(
+                self,
+                "Excel Import Completed with Skipped Sheets",
+                f"Imported {len(imported)} worksheet(s).\n\n{detail}",
+            )
+
     def _import_from_figure(self) -> None:
-        """Open a raster figure digitizer and add extracted data as a dataset."""
+        """Open a raster digitizer and add every saved curve as a dataset."""
         mode_dialog = FigureExtractionModeDialog(self)
         if mode_dialog.exec() != QDialog.Accepted:
             self.statusBar().showMessage("Figure import cancelled")
@@ -1707,11 +1863,68 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Figure import cancelled")
             return
 
-        rows = dialog.extracted_rows()
-        if not rows:
+        if hasattr(dialog, "extraction_results"):
+            results = dialog.extraction_results()
+        else:
+            rows = dialog.extracted_rows()
+            results = [
+                FigureExtractionResult(
+                    dataset_name=dialog.dataset_name(),
+                    rows=tuple(dict(row) for row in rows),
+                    source_path=dialog.source_path(),
+                    extraction_kind=getattr(dialog, "extraction_kind", lambda: extraction_mode)(),
+                    calibration_summary=dialog.calibration_summary(),
+                    extraction_summary=dialog.extraction_summary(),
+                )
+            ] if rows else []
+        if not results:
             QMessageBox.information(self, "Import From Figure", "No extracted points were created.")
             return
 
+        imported: list[Dataset] = []
+        skipped: list[str] = []
+        for result in results:
+            frame = self._figure_extraction_frame(result.rows)
+            if not self._confirm_large_dataset(
+                frame,
+                title="Large Figure Extraction",
+                source_label=result.dataset_name,
+            ):
+                skipped.append(f"{result.dataset_name}: skipped after large-dataset warning")
+                continue
+            try:
+                dataset = self._workspace.add_dataset(
+                    result.dataset_name,
+                    frame,
+                    source_path=result.source_path or None,
+                    copy_frame=False,
+                )
+                self._apply_figure_extraction_metadata(dataset, result)
+                imported.append(dataset)
+            except Exception as exc:
+                skipped.append(f"{result.dataset_name}: {exc}")
+
+        if not imported:
+            detail = "\n".join(skipped) or "No extracted curves were imported."
+            QMessageBox.warning(self, "Import From Figure Failed", detail)
+            self.statusBar().showMessage("Figure import failed")
+            return
+
+        self._refresh_dataset_list(imported[-1].name)
+        total_points = sum(len(dataset.frame) for dataset in imported)
+        self.statusBar().showMessage(
+            f"Imported {len(imported)} figure curve(s), {total_points} total point(s)"
+        )
+        if skipped:
+            QMessageBox.warning(
+                self,
+                "Figure Import Completed with Skipped Curves",
+                f"Imported {len(imported)} curve(s).\n\n" + "\n".join(skipped),
+            )
+
+    @staticmethod
+    def _figure_extraction_frame(rows: tuple[dict[str, object], ...]) -> pd.DataFrame:
+        """Create a consistently ordered DataFrame for one digitized curve."""
         columns = [
             "x",
             "y",
@@ -1745,28 +1958,14 @@ class MainWindow(QMainWindow):
             "source_image",
         ]
         frame = pd.DataFrame(rows)
-        frame = frame[[column for column in columns if column in frame.columns]]
+        return frame[[column for column in columns if column in frame.columns]]
 
-        if not self._confirm_large_dataset(
-            frame,
-            title="Large Figure Extraction",
-            source_label=dialog.dataset_name(),
-        ):
-            self.statusBar().showMessage("Figure import cancelled")
-            return
-
-        try:
-            dataset = self._workspace.add_dataset(
-                dialog.dataset_name(),
-                frame,
-                source_path=dialog.source_path() or None,
-                copy_frame=False,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Import From Figure Failed", str(exc))
-            self.statusBar().showMessage("Figure import failed")
-            return
-
+    @staticmethod
+    def _apply_figure_extraction_metadata(
+        dataset: Dataset,
+        result: FigureExtractionResult,
+    ) -> None:
+        """Assign column roles and captured provenance to one digitized result."""
         if "x" in dataset.frame.columns:
             x_metadata = dataset.metadata_for_column("x")
             x_metadata.role = "x"
@@ -1839,16 +2038,11 @@ class MainWindow(QMainWindow):
                 elif column_name in {"pixel_x_uncertainty", "pixel_y_uncertainty"}:
                     metadata.comment = "Estimated manual or symbol-center uncertainty in source-image pixels."
         operation = (
-            f"Figure digitization from {Path(dialog.source_path()).name}; "
-            f"{dialog.calibration_summary()}; {dialog.extraction_summary()}"
+            f"Figure digitization from {Path(result.source_path).name}; "
+            f"{result.calibration_summary}; {result.extraction_summary}"
         )
         set_dataset_operation_comments(dataset, operation)
         dataset.sync_column_metadata_attrs()
-
-        self._refresh_dataset_list(dataset.name)
-        self.statusBar().showMessage(
-            f"Imported {dataset.name} from figure: {len(dataset.frame)} extracted point(s)"
-        )
 
     def _parse_optional_float(self, text: str, label: str) -> tuple[float | None, list[str]]:
         """Parse optional numeric dialog text and return validation errors."""
@@ -7763,6 +7957,79 @@ class MainWindow(QMainWindow):
         self._update_dataset_summary()
         self._select_column(selected_column)
 
+    def _clear_selected_dataset_cells(self) -> None:
+        """Clear selected worksheet values without deleting rows or columns."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            return
+
+        selection_ranges = self._selected_dataset_ranges()
+        if not selection_ranges:
+            return
+
+        cleared_count = self._dataset_model.clear_cells(selection_ranges)
+        if not cleared_count:
+            self.statusBar().showMessage("Selected cells are already empty")
+            return
+
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self._update_dataset_summary()
+        self.statusBar().showMessage(
+            f"Cleared {cleared_count} selected cell value(s) in {dataset.name}"
+        )
+
+    def _resize_current_sheet(self) -> None:
+        """Set worksheet row and column counts together in one undoable edit."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(
+                self,
+                "Resize Sheet",
+                "Select a dataset before resizing the worksheet.",
+            )
+            return
+
+        old_rows, old_columns = dataset.frame.shape
+        dialog = TableSizeDialog(old_rows, old_columns, self)
+        dialog.setWindowTitle("Resize Worksheet")
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        new_rows = dialog.row_count()
+        new_columns = dialog.column_count()
+        if (new_rows, new_columns) == (old_rows, old_columns):
+            self.statusBar().showMessage("Worksheet size is unchanged")
+            return
+
+        if new_rows < old_rows or new_columns < old_columns:
+            reply = QMessageBox.question(
+                self,
+                "Shrink Worksheet?",
+                (
+                    f"Resize '{dataset.name}' from {old_rows} row(s) x {old_columns} column(s) "
+                    f"to {new_rows} row(s) x {new_columns} column(s)?\n\n"
+                    "Values, formulas, and column metadata outside the new limits will be removed. "
+                    "The change can be undone."
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        try:
+            self._dataset_model.resize_sheet(new_rows, new_columns)
+        except Exception as exc:
+            QMessageBox.critical(self, "Resize Sheet Failed", str(exc))
+            return
+
+        self._resize_dataset_columns_to_contents(dataset)
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self._update_dataset_summary()
+        self.statusBar().showMessage(
+            f"Resized {dataset.name} to {new_rows} row(s) x {new_columns} column(s)"
+        )
+
     def _delete_selected_rows(self) -> None:
         """Delete rows represented by the current table selection."""
         dataset = self._current_dataset()
@@ -7878,6 +8145,10 @@ class MainWindow(QMainWindow):
             context_column,
         )
 
+    def _show_dataset_table_frame_context_menu(self, pos) -> None:
+        """Show the worksheet menu on table chrome not owned by the viewport."""
+        self._show_dataset_editor_context_menu(self._dataset_table.mapToGlobal(pos))
+
     def _show_dataset_header_context_menu(self, pos) -> None:
         """Show edit actions for the dataset table header."""
         header = self._dataset_table.horizontalHeader()
@@ -7887,10 +8158,23 @@ class MainWindow(QMainWindow):
         context_column = column_index if column_index >= 0 else None
         self._show_dataset_editor_context_menu(header.mapToGlobal(pos), context_column)
 
+    def _show_dataset_row_header_context_menu(self, pos) -> None:
+        """Select a right-clicked row header and show the worksheet menu."""
+        header = self._dataset_table.verticalHeader()
+        row_index = header.logicalIndexAt(pos)
+        if row_index >= 0:
+            self._prepare_dataset_context_row(row_index)
+        context_row = row_index if row_index >= 0 else None
+        self._show_dataset_editor_context_menu(
+            header.mapToGlobal(pos),
+            context_row=context_row,
+        )
+
     def _show_dataset_editor_context_menu(
         self,
         global_pos,
         context_column: int | None = None,
+        context_row: int | None = None,
     ) -> None:
         """Show common editing, preparation, analysis, and plotting actions."""
         dataset = self._current_dataset()
@@ -7899,6 +8183,7 @@ class MainWindow(QMainWindow):
         has_columns = has_dataset and (
             context_column is not None or has_selection
         )
+        has_rows = has_dataset and (context_row is not None or has_selection)
         clipboard_mime = QApplication.clipboard().mimeData()
         has_clipboard_text = bool(clipboard_mime is not None and clipboard_mime.hasText())
 
@@ -7910,15 +8195,20 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         copy_values_action = menu.addAction("Copy Values")
         copy_values_action.setEnabled(has_dataset and has_selection)
+        copy_rows_action = menu.addAction("Copy Row(s)")
+        copy_rows_action.setEnabled(has_rows)
+        copy_columns_action = menu.addAction("Copy Column(s)")
+        copy_columns_action.setEnabled(has_columns)
         paste_values_action = menu.addAction("Paste Values")
         paste_values_action.setEnabled(has_dataset and has_clipboard_text)
-        menu.addSeparator()
-        copy_columns_action = menu.addAction("Copy Column(s)")
-        copy_columns_action.setEnabled(has_dataset and has_columns)
+        paste_transposed_action = menu.addAction("Paste Values Transposed")
+        paste_transposed_action.setEnabled(has_dataset and has_clipboard_text)
         paste_columns_action = menu.addAction("Paste Column(s)")
         paste_columns_action.setEnabled(
             has_dataset and self._clipboard_has_dataset_columns()
         )
+        clear_cells_action = menu.addAction("Clear Selected Cell Values")
+        clear_cells_action.setEnabled(has_dataset and has_selection)
         menu.addSeparator()
         edit_actions = self._add_dataset_edit_submenus(
             menu,
@@ -7939,12 +8229,18 @@ class MainWindow(QMainWindow):
             self._redo_dataset_edit()
         elif action == copy_values_action:
             self._copy_dataset_selection()
+        elif action == copy_rows_action:
+            self._copy_dataset_rows()
         elif action == paste_values_action:
             self._paste_dataset_clipboard()
+        elif action == paste_transposed_action:
+            self._paste_dataset_clipboard(transpose=True)
         elif action == copy_columns_action:
             self._copy_dataset_columns()
         elif action == paste_columns_action:
             self._paste_dataset_columns(context_column)
+        elif action == clear_cells_action:
+            self._clear_selected_dataset_cells()
         elif action == edit_actions["add_row"]:
             self._add_empty_row()
         elif action == edit_actions["insert_row"]:
@@ -7957,6 +8253,8 @@ class MainWindow(QMainWindow):
             self._insert_empty_column()
         elif action == edit_actions["delete_columns"]:
             self._delete_selected_columns()
+        elif action == edit_actions["resize_sheet"]:
+            self._resize_current_sheet()
         elif action == edit_actions["fill_range"]:
             self._fill_dataset_range()
         elif action == edit_actions["metadata"]:
@@ -7992,6 +8290,9 @@ class MainWindow(QMainWindow):
         fill_range_action.setEnabled(has_dataset)
         metadata_action = columns_menu.addAction("Column Metadata...")
         metadata_action.setEnabled(has_dataset)
+        menu.addSeparator()
+        resize_sheet_action = menu.addAction("Resize Sheet...")
+        resize_sheet_action.setEnabled(has_dataset)
         return {
             "add_row": add_row_action,
             "insert_row": insert_row_action,
@@ -8001,6 +8302,7 @@ class MainWindow(QMainWindow):
             "delete_columns": delete_columns_action,
             "fill_range": fill_range_action,
             "metadata": metadata_action,
+            "resize_sheet": resize_sheet_action,
         }
 
     def _add_dataset_workflow_submenus(self, menu: QMenu, enabled: bool = True) -> None:
@@ -8056,11 +8358,29 @@ class MainWindow(QMainWindow):
             return
 
         self._dataset_table.clearSelection()
-        self._dataset_table.selectColumn(column_index)
         if self._dataset_model.rowCount() > 0:
             self._dataset_table.setCurrentIndex(
                 self._dataset_model.index(0, column_index)
             )
+        self._dataset_table.selectColumn(column_index)
+
+    def _prepare_dataset_context_row(self, row_index: int) -> None:
+        """Make an unselected right-clicked row header the active row selection."""
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None:
+            return
+        if any(
+            selection_range.top() <= row_index <= selection_range.bottom()
+            and selection_range.left() == 0
+            and selection_range.right() == self._dataset_model.columnCount() - 1
+            for selection_range in selection_model.selection()
+        ):
+            return
+
+        self._dataset_table.clearSelection()
+        if self._dataset_model.columnCount() > 0:
+            self._dataset_table.setCurrentIndex(self._dataset_model.index(row_index, 0))
+        self._dataset_table.selectRow(row_index)
 
     def _copy_dataset_selection(self) -> None:
         """Copy selected dataset cells as tab-delimited clipboard text."""
@@ -8099,8 +8419,30 @@ class MainWindow(QMainWindow):
             f"Copied {len(selected_cells)} cell(s) from {dataset.name}"
         )
 
-    def _paste_dataset_clipboard(self) -> None:
-        """Paste tab-delimited clipboard text into the selected dataset editor cell."""
+    def _copy_dataset_rows(self) -> None:
+        """Copy every cell from worksheet rows touched by the selection."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            return
+
+        selected_rows = self._selected_dataset_rows()
+        if not selected_rows:
+            return
+
+        output = StringIO()
+        writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+        for row_index in selected_rows:
+            writer.writerow(
+                "" if pd.isna(value) else str(value)
+                for value in dataset.frame.iloc[row_index, :]
+            )
+        QApplication.clipboard().setText(output.getvalue().rstrip("\n"))
+        self.statusBar().showMessage(
+            f"Copied {len(selected_rows)} complete row(s) from {dataset.name}"
+        )
+
+    def _paste_dataset_clipboard(self, transpose: bool = False) -> None:
+        """Paste clipboard values, optionally transposing the complete matrix."""
         dataset = self._current_dataset()
         if dataset is None:
             return
@@ -8108,11 +8450,18 @@ class MainWindow(QMainWindow):
         current_index = self._dataset_table.currentIndex()
         start_row = current_index.row() if current_index.isValid() else 0
         start_column = current_index.column() if current_index.isValid() else 0
-        text_columns = self._clipboard_text_column_offsets(dataset, start_column)
-        rows = self._parse_clipboard_text(
-            QApplication.clipboard().text(),
-            text_columns=text_columns,
-        )
+        if transpose:
+            rows = parse_tabular_clipboard(
+                QApplication.clipboard().text(),
+                preserve_all_text=True,
+            ).transpose().copy().reset_index(drop=True)
+            rows.columns = range(len(rows.columns))
+        else:
+            text_columns = self._clipboard_text_column_offsets(dataset, start_column)
+            rows = self._parse_clipboard_text(
+                QApplication.clipboard().text(),
+                text_columns=text_columns,
+            )
         if rows.empty and len(rows.columns) == 0:
             return
 
@@ -8136,8 +8485,10 @@ class MainWindow(QMainWindow):
                 row_count=pasted_rows,
                 column_count=pasted_columns,
             )
+            paste_label = "Pasted transposed" if transpose else "Pasted"
             self.statusBar().showMessage(
-                f"Pasted {pasted_rows} row(s) x {pasted_columns} column(s) into {dataset.name}"
+                f"{paste_label} {pasted_rows} row(s) x {pasted_columns} column(s) "
+                f"into {dataset.name}"
             )
 
     def _copy_dataset_columns(self) -> None:
@@ -8384,6 +8735,21 @@ class MainWindow(QMainWindow):
         selection_model = self._dataset_table.selectionModel()
         return bool(selection_model is not None and selection_model.hasSelection())
 
+    def _selected_dataset_ranges(self) -> list[tuple[int, int, int, int]]:
+        """Return compact selected cell rectangles without expanding every index."""
+        selection_model = self._dataset_table.selectionModel()
+        if selection_model is None:
+            return []
+        return [
+            (
+                selection_range.top(),
+                selection_range.left(),
+                selection_range.bottom(),
+                selection_range.right(),
+            )
+            for selection_range in selection_model.selection()
+        ]
+
     def _dataset_selection_contains_column(self, column_index: int) -> bool:
         """Return whether any compact Qt selection range touches a column."""
         selection_model = self._dataset_table.selectionModel()
@@ -8431,9 +8797,12 @@ class MainWindow(QMainWindow):
             )
 
         self._export_action.setEnabled(has_dataset)
+        self._delete_cells_action.setEnabled(has_dataset)
         self._delete_rows_action.setEnabled(has_dataset)
         self._delete_columns_action.setEnabled(has_dataset)
+        self._paste_transposed_action.setEnabled(has_dataset)
         self._rename_dataset_action.setEnabled(has_dataset)
+        self._duplicate_dataset_action.setEnabled(has_dataset)
         self._delete_dataset_action.setEnabled(has_dataset)
         self._add_column_action.setEnabled(has_dataset)
         self._add_row_action.setEnabled(has_dataset)
@@ -8441,6 +8810,7 @@ class MainWindow(QMainWindow):
         self._fill_range_action.setEnabled(has_dataset)
         self._column_metadata_action.setEnabled(has_dataset)
         self._insert_row_action.setEnabled(has_dataset)
+        self._resize_sheet_action.setEnabled(has_dataset)
         self._apply_formula_action.setEnabled(has_dataset)
         self._remove_duplicates_action.setEnabled(has_dataset)
         self._derivative_action.setEnabled(has_dataset)
@@ -8451,6 +8821,7 @@ class MainWindow(QMainWindow):
         self._statistics_action.setEnabled(has_dataset)
         self._fit_action.setEnabled(has_dataset)
         self._rename_dataset_button.setEnabled(has_dataset)
+        self._duplicate_dataset_button.setEnabled(has_dataset)
         self._remove_dataset_button.setEnabled(has_dataset)
         self._editor_add_row_button.setEnabled(has_dataset)
         self._editor_insert_row_button.setEnabled(has_dataset)
@@ -8458,6 +8829,7 @@ class MainWindow(QMainWindow):
         self._editor_insert_column_button.setEnabled(has_dataset)
         self._editor_delete_rows_button.setEnabled(has_dataset)
         self._editor_delete_columns_button.setEnabled(has_dataset)
+        self._editor_resize_sheet_button.setEnabled(has_dataset)
         self._editor_rename_button.setEnabled(has_dataset)
         self._editor_remove_button.setEnabled(has_dataset)
         self._editor_export_button.setEnabled(has_dataset)
@@ -8861,6 +9233,8 @@ class MainWindow(QMainWindow):
             self._start_plot_for_current_dataset()
         elif action == actions["export"]:
             self._export_current_dataset()
+        elif action == actions["duplicate"]:
+            self._duplicate_dataset(dataset_name)
         elif action == actions["rename"]:
             self._rename_dataset(dataset_name)
         elif action == actions["remove"]:
@@ -8874,12 +9248,14 @@ class MainWindow(QMainWindow):
         export_action = menu.addAction("Export Dataset...")
         self._add_dataset_workflow_submenus(menu)
         menu.addSeparator()
+        duplicate_action = menu.addAction("Duplicate Sheet")
         rename_action = menu.addAction("Rename...")
         delete_action = menu.addAction("Remove Dataset")
         return menu, {
             "open": open_action,
             "plot": plot_action,
             "export": export_action,
+            "duplicate": duplicate_action,
             "rename": rename_action,
             "remove": delete_action,
         }
@@ -9114,6 +9490,28 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Selected saved plot '{plot_name}' for editing")
 
+    def _duplicate_selected_plot(self) -> None:
+        """Duplicate the selected saved plot and load the independent copy."""
+        plot_name = self._selected_plot_name()
+        if plot_name is None:
+            QMessageBox.information(
+                self, "Duplicate Plot", "Select a saved plot before duplicating it."
+            )
+            return
+        if not self._confirm_plot_replacement():
+            self._restore_active_plot_selection()
+            return
+        try:
+            duplicate = self._workspace.duplicate_plot(plot_name)
+        except Exception as exc:
+            QMessageBox.critical(self, "Duplicate Plot Failed", str(exc))
+            return
+        self._refresh_plot_list(duplicate.name)
+        self._load_plot_by_name(duplicate.name, show_message=False)
+        self.statusBar().showMessage(
+            f"Duplicated plot '{plot_name}' as '{duplicate.name}'"
+        )
+
     def _delete_selected_plot(self) -> None:
         """Remove the currently selected saved plot from the workspace."""
         plot_name = self._selected_plot_name()
@@ -9163,6 +9561,8 @@ class MainWindow(QMainWindow):
             self._save_current_plot()
         elif action == actions["load"]:
             self._load_selected_plot()
+        elif action == actions["duplicate"]:
+            self._duplicate_selected_plot()
         elif action == actions["remove"]:
             self._delete_selected_plot()
 
@@ -9175,12 +9575,15 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         load_action = menu.addAction("Load Plot")
         load_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
+        duplicate_action = menu.addAction("Duplicate Saved Plot")
+        duplicate_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
         delete_action = menu.addAction("Remove Saved Plot")
         delete_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
         return menu, {
             "new": new_action,
             "save": save_action,
             "load": load_action,
+            "duplicate": duplicate_action,
             "remove": delete_action,
         }
 
@@ -9192,8 +9595,12 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "_save_plot_action"):
             self._save_plot_action.setEnabled(has_current_plot)
+            self._copy_plot_action.setEnabled(has_current_plot)
             self._load_plot_action.setEnabled(has_saved_plot)
+            self._duplicate_plot_action.setEnabled(has_saved_plot)
             self._delete_plot_action.setEnabled(has_saved_plot)
+
+        self._duplicate_plot_button.setEnabled(has_saved_plot)
 
         self._plot_tab_widget.set_plot_actions_enabled(
             can_save=has_current_plot,
@@ -9216,6 +9623,28 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Renamed '{old_name}' to '{final_name}'")
             except Exception as exc:
                 QMessageBox.critical(self, "Rename Failed", str(exc))
+
+    def _duplicate_dataset(self, name: str) -> None:
+        """Duplicate a named worksheet and open the independent copy."""
+        try:
+            duplicate = self._workspace.duplicate_dataset(name)
+        except Exception as exc:
+            QMessageBox.critical(self, "Duplicate Sheet Failed", str(exc))
+            return
+        self._refresh_dataset_list(duplicate.name)
+        self.statusBar().showMessage(
+            f"Duplicated sheet '{name}' as '{duplicate.name}'"
+        )
+
+    def _duplicate_current_dataset(self) -> None:
+        """Duplicate the worksheet currently selected in the workspace."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(
+                self, "Duplicate Sheet", "Select a dataset before duplicating it."
+            )
+            return
+        self._duplicate_dataset(dataset.name)
 
     def _rename_current_dataset(self) -> None:
         """Rename the currently selected dataset."""

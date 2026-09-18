@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-PLOT_STATE_VERSION = 4
+PLOT_STATE_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +17,8 @@ class AxisSettings:
     scale: str = "linear"
     minimum: str = ""
     maximum: str = ""
+    label_font_size: float = 0.0
+    tick_font_size: float = 0.0
 
     @classmethod
     def from_state(cls, state: object) -> AxisSettings:
@@ -28,6 +30,12 @@ class AxisSettings:
             scale=scale if scale in {"linear", "log"} else "linear",
             minimum=_text(values.get("minimum")),
             maximum=_text(values.get("maximum")),
+            label_font_size=_bounded_float(
+                values.get("label_font_size"), 0.0, 0.0, 72.0
+            ),
+            tick_font_size=_bounded_float(
+                values.get("tick_font_size"), 0.0, 0.0, 72.0
+            ),
         )
 
 
@@ -135,7 +143,7 @@ class PlotSettings:
     style: StyleSettings = field(default_factory=StyleSettings)
 
     def to_state(self) -> dict[str, object]:
-        """Return the canonical version-4 JSON representation."""
+        """Return the canonical version-5 JSON representation."""
         return {
             "title": self.title,
             "axes": {

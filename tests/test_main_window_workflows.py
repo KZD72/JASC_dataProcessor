@@ -113,6 +113,7 @@ class MainWindowWorkflowTests(unittest.TestCase):
             "Export Dataset...",
             "Data Preparation",
             "Analysis",
+            "Duplicate Sheet",
             "Rename...",
             "Remove Dataset",
         }.issubset(set(dataset_texts)))
@@ -143,9 +144,39 @@ class MainWindowWorkflowTests(unittest.TestCase):
                 "New Empty Plot",
                 "Save Current Plot...",
                 "Load Plot",
+                "Duplicate Saved Plot",
                 "Remove Saved Plot",
             ],
         )
+
+    def test_workspace_actions_duplicate_sheet_and_saved_plot(self) -> None:
+        dataset = self.window._workspace.add_dataset(
+            "signal",
+            pd.DataFrame({"x": [0.0, 1.0], "y": [1.0, 2.0]}),
+        )
+        dataset.formulas["y"] = 'col("x") + 1'
+        dataset.metadata_for_column("y").unit = "V"
+        dataset.sync_column_metadata_attrs()
+        self.window._refresh_dataset_list(dataset.name)
+
+        self.window._duplicate_current_dataset()
+
+        duplicate = self.window._workspace.get_dataset("signal Copy")
+        self.assertEqual(self.window._current_dataset().name, duplicate.name)
+        pd.testing.assert_frame_equal(duplicate.frame, dataset.frame)
+        self.assertEqual(duplicate.formulas, dataset.formulas)
+        self.assertEqual(duplicate.column_metadata["y"].unit, "V")
+
+        saved = self.window._workspace.add_plot(
+            "Saved",
+            self.window._plot_tab_widget.current_plot_state(),
+        )
+        self.window._refresh_plot_list(saved.name)
+        self.window._duplicate_selected_plot()
+
+        self.assertIn("Saved Copy", self.window._workspace.plot_names())
+        self.assertEqual(self.window._active_plot_name, "Saved Copy")
+        self.assertEqual(self.window._selected_plot_name(), "Saved Copy")
 
     def test_create_plot_from_dataset_prefills_new_series_editor(self) -> None:
         dataset = self.window._workspace.add_dataset(

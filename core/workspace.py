@@ -194,6 +194,23 @@ class Workspace:
             raise KeyError(f"Dataset '{name}' does not exist in the workspace.")
         del self._datasets[name]
 
+    def duplicate_dataset(self, name: str) -> Dataset:
+        """Create an independent copy of a dataset, including formulas and metadata."""
+        if name not in self._datasets:
+            raise KeyError(f"Dataset '{name}' does not exist in the workspace.")
+        source = self._datasets[name]
+        duplicate = self.add_dataset(
+            self._copy_base_name(source.name),
+            source.frame.copy(deep=True),
+            source_path=source.source_path,
+            backend=source.backend,
+            copy_frame=False,
+        )
+        duplicate.formulas = deepcopy(source.formulas)
+        duplicate.column_metadata = copy_column_metadata(source.column_metadata)
+        duplicate.sync_column_metadata_attrs()
+        return duplicate
+
     def rename_dataset(self, old_name: str, new_name: str) -> str:
         """Rename a dataset and return its final unique name."""
         if old_name not in self._datasets:
@@ -240,6 +257,13 @@ class Workspace:
         if name not in self._plots:
             raise KeyError(f"Saved plot '{name}' does not exist in the workspace.")
         del self._plots[name]
+
+    def duplicate_plot(self, name: str) -> SavedPlot:
+        """Create an independently editable copy of a saved plot definition."""
+        if name not in self._plots:
+            raise KeyError(f"Saved plot '{name}' does not exist in the workspace.")
+        source = self._plots[name]
+        return self.add_plot(self._copy_base_name(source.name), source.state)
 
     def get_plot(self, name: str) -> SavedPlot:
         """Return the saved plot for a workspace name."""
@@ -292,6 +316,16 @@ class Workspace:
         while f"{base_name} ({counter})" in self._datasets:
             counter += 1
         return f"{base_name} ({counter})"
+
+    @staticmethod
+    def _copy_base_name(name: str) -> str:
+        """Return a stable Copy base so duplicating a copy increments its suffix."""
+        if name.endswith(" Copy"):
+            return name
+        root, marker, suffix = name.rpartition(" Copy (")
+        if marker and suffix.endswith(")") and suffix[:-1].isdigit():
+            return f"{root} Copy"
+        return f"{name} Copy"
 
     def _make_unique_plot_name(self, base_name: str) -> str:
         """Return a saved-plot name that does not collide with existing plots."""

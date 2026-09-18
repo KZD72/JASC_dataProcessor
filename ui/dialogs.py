@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from dataclasses import dataclass
 from html import escape
 
 import numpy as np
@@ -53,7 +54,7 @@ from PySide6.QtWidgets import (
 from scipy import ndimage, signal
 
 from core.color_scale import ColorScaleCalibration
-from core.file_io import ImportOptions
+from core.file_io import ExcelWorkbookInspection, ImportOptions
 from core.workspace import (
     COLUMN_ROLE_OPTIONS,
     COLUMN_TYPE_OPTIONS,
@@ -840,6 +841,150 @@ class ImportOptionsDialog(QDialog):
         )
 
 
+class ExcelImportDialog(QDialog):
+    """Select worksheet tabs and acknowledge value-only Excel import limits."""
+
+    def __init__(
+        self,
+        inspection: ExcelWorkbookInspection,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build a tab selector from a lightweight OOXML workbook preflight."""
+        super().__init__(parent)
+        self.setWindowTitle("Import Excel Workbook")
+        self.setModal(True)
+        self.resize(760, 540)
+        self._inspection = inspection
+
+        boundary = QLabel(
+            "JASC imports worksheet cell values into normal datasets. Excel charts, pivot "
+            "layouts, macros, queries, formatting, controls, and other workbook objects are "
+            "not reproduced. Each selected worksheet tab becomes a separate dataset."
+        )
+        boundary.setWordWrap(True)
+
+        self._selected_sheets_radio = QRadioButton("Choose specific worksheet tabs")
+        self._all_sheets_radio = QRadioButton(
+            "Import all worksheet tabs (including hidden worksheets)"
+        )
+        self._selected_sheets_radio.setChecked(True)
+        import_scope = QHBoxLayout()
+        import_scope.addWidget(self._selected_sheets_radio)
+        import_scope.addWidget(self._all_sheets_radio)
+        import_scope.addStretch(1)
+
+        self._sheet_table = QTableWidget(len(inspection.sheets), 5)
+        self._sheet_table.setHorizontalHeaderLabels(
+            ["Import", "Worksheet tab", "Visibility", "Tab type", "Used range"]
+        )
+        self._sheet_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._sheet_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._sheet_table.verticalHeader().setVisible(False)
+        self._sheet_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._sheet_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        for column in (2, 3, 4):
+            self._sheet_table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeToContents
+            )
+
+        for row, sheet in enumerate(inspection.sheets):
+            import_item = QTableWidgetItem()
+            if sheet.is_importable:
+                import_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                import_item.setCheckState(Qt.Checked if sheet.state == "visible" else Qt.Unchecked)
+            else:
+                import_item.setFlags(Qt.NoItemFlags)
+            import_item.setData(Qt.UserRole, sheet.name)
+            self._sheet_table.setItem(row, 0, import_item)
+            self._sheet_table.setItem(row, 1, QTableWidgetItem(sheet.name))
+            self._sheet_table.setItem(row, 2, QTableWidgetItem(sheet.state))
+            self._sheet_table.setItem(row, 3, QTableWidgetItem(sheet.sheet_type))
+            self._sheet_table.setItem(row, 4, QTableWidgetItem(sheet.used_range))
+        self._sheet_table.itemChanged.connect(self._sheet_selection_changed)
+
+        select_all_button = QPushButton("Select All Worksheets")
+        select_all_button.clicked.connect(lambda: self._set_all_importable_checked(True))
+        select_none_button = QPushButton("Select None")
+        select_none_button.clicked.connect(lambda: self._set_all_importable_checked(False))
+        selection_buttons = QHBoxLayout()
+        selection_buttons.addWidget(select_all_button)
+        selection_buttons.addWidget(select_none_button)
+        selection_buttons.addStretch(1)
+
+        self._header_checkbox = QCheckBox(
+            "First row of each selected worksheet contains column names"
+        )
+        self._header_checkbox.setChecked(True)
+
+        warning_label = QLabel("Workbook compatibility warnings")
+        self._warning_text = QPlainTextEdit()
+        self._warning_text.setReadOnly(True)
+        self._warning_text.setPlainText(
+            "\n\n".join(f"• {warning}" for warning in inspection.warnings)
+        )
+        self._warning_text.setMinimumHeight(150)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(boundary)
+        layout.addLayout(import_scope)
+        layout.addWidget(self._sheet_table, 1)
+        layout.addLayout(selection_buttons)
+        layout.addWidget(self._header_checkbox)
+        layout.addWidget(warning_label)
+        layout.addWidget(self._warning_text)
+        layout.addWidget(buttons)
+
+    def selected_sheet_names(self) -> list[str]:
+        """Return selected importable worksheet names in workbook order."""
+        if self._all_sheets_radio.isChecked():
+            return [sheet.name for sheet in self._inspection.sheets if sheet.is_importable]
+        selected: list[str] = []
+        for row, sheet in enumerate(self._inspection.sheets):
+            item = self._sheet_table.item(row, 0)
+            if sheet.is_importable and item is not None and item.checkState() == Qt.Checked:
+                selected.append(sheet.name)
+        return selected
+
+    def import_all_sheets(self) -> bool:
+        """Return whether every worksheet tab should be imported."""
+        return self._all_sheets_radio.isChecked()
+
+    def has_header(self) -> bool:
+        """Return whether the first row should be parsed as column names."""
+        return self._header_checkbox.isChecked()
+
+    def _set_all_importable_checked(self, checked: bool) -> None:
+        """Check or clear every worksheet row, leaving chart tabs disabled."""
+        self._selected_sheets_radio.setChecked(True)
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row, sheet in enumerate(self._inspection.sheets):
+            if not sheet.is_importable:
+                continue
+            item = self._sheet_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _sheet_selection_changed(self, item: QTableWidgetItem) -> None:
+        """Switch to selective mode when a worksheet checkbox is edited."""
+        if item.column() == 0 and bool(item.flags() & Qt.ItemIsUserCheckable):
+            self._selected_sheets_radio.setChecked(True)
+
+    def accept(self) -> None:
+        """Require at least one worksheet before starting the value import."""
+        if not self.selected_sheet_names():
+            QMessageBox.warning(
+                self,
+                "Excel Import",
+                "Choose at least one worksheet tab containing data.",
+            )
+            return
+        super().accept()
+
+
 class BatchPreviewDialog(QDialog):
     """Preview batch jobs before running them."""
 
@@ -1053,6 +1198,18 @@ class FigureExtractionModeDialog(QDialog):
         return "colorplot" if self._colorplot_radio.isChecked() else "xy"
 
 
+@dataclass(frozen=True, slots=True)
+class FigureExtractionResult:
+    """One saved curve/probe set from a multi-extraction figure session."""
+
+    dataset_name: str
+    rows: tuple[dict[str, object], ...]
+    source_path: str
+    extraction_kind: str
+    calibration_summary: str
+    extraction_summary: str
+
+
 class FigureDigitizerDialog(QDialog):
     """Import a raster figure and extract calibrated XY data from it."""
 
@@ -1109,6 +1266,8 @@ class FigureDigitizerDialog(QDialog):
         self._symbol_template_weights: np.ndarray | None = None
         self._symbol_template_mask: np.ndarray | None = None
         self._symbol_template_color: tuple[float, float, float] | None = None
+        self._saved_extractions: list[FigureExtractionResult] = []
+        self._multi_curve_name_root = ""
 
         self._view = FigureDigitizerView()
         self._view.setScene(self._scene)
@@ -1183,7 +1342,7 @@ class FigureDigitizerDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         ok_button = buttons.button(QDialogButtonBox.Ok)
         if ok_button is not None:
-            ok_button.setText("Create Dataset")
+            ok_button.setText("Create Dataset(s)")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
@@ -1210,6 +1369,35 @@ class FigureDigitizerDialog(QDialog):
     def extraction_kind(self) -> str:
         """Return the workflow identifier used by the dataset importer."""
         return "xy"
+
+    def extraction_results(self) -> list[FigureExtractionResult]:
+        """Return saved curves plus any valid current extraction in session order."""
+        results = list(self._saved_extractions)
+        if self.extracted_rows():
+            results.append(self._capture_current_extraction())
+        return results
+
+    def _capture_current_extraction(self) -> FigureExtractionResult:
+        """Freeze the current extracted rows and provenance as one result."""
+        return FigureExtractionResult(
+            dataset_name=self._unique_extraction_name(self.dataset_name()),
+            rows=tuple(dict(row) for row in self.extracted_rows()),
+            source_path=self.source_path(),
+            extraction_kind=self.extraction_kind(),
+            calibration_summary=self.calibration_summary(),
+            extraction_summary=self.extraction_summary(),
+        )
+
+    def _unique_extraction_name(self, requested_name: str) -> str:
+        """Keep names unique inside the dialog before workspace naming is applied."""
+        clean_name = requested_name.strip() or "Digitized Figure"
+        used_names = {result.dataset_name for result in self._saved_extractions}
+        if clean_name not in used_names:
+            return clean_name
+        suffix = 2
+        while f"{clean_name} ({suffix})" in used_names:
+            suffix += 1
+        return f"{clean_name} ({suffix})"
 
     def extracted_rows(self) -> list[dict[str, object]]:
         """Return calibrated extracted rows from manual and automatic points."""
@@ -1329,32 +1517,36 @@ class FigureDigitizerDialog(QDialog):
         return f"{trace_text}, {roi_text}, x_step={self._x_step_spin.value()}, {symbol_text}"
 
     def accept(self) -> None:  # type: ignore[override]
-        """Validate extraction state before creating a workspace dataset."""
+        """Validate the current curve when present, then finish the session."""
+        if self.extracted_rows() or not self._saved_extractions:
+            error = self._current_extraction_error()
+            if error is not None:
+                title, message = error
+                QMessageBox.warning(self, title, message)
+                return
+        QDialog.accept(self)
+
+    def _current_extraction_error(self) -> tuple[str, str] | None:
+        """Return a user-facing validation error for the current XY curve."""
         if self._image.isNull():
-            QMessageBox.warning(self, "Import From Figure", "Load an image before creating a dataset.")
-            return
+            return "Import From Figure", "Load an image before creating a dataset."
 
         values, errors = self._calibration_values()
         if values is None or errors:
-            QMessageBox.warning(
-                self,
+            return (
                 "Calibration Required",
                 "\n".join(errors or ["Pick all four calibration points and enter axis values."]),
             )
-            return
 
         if not self._manual_points and not self._auto_points and not self._symbol_points:
-            QMessageBox.warning(
-                self,
+            return (
                 "No Extracted Points",
                 "Add manual points, run Auto Trace, or detect symbol centers before creating a dataset.",
             )
-            return
 
         if not self.dataset_name():
-            QMessageBox.warning(self, "Dataset Name", "Enter a dataset name.")
-            return
-        super().accept()
+            return "Dataset Name", "Enter a dataset name."
+        return None
 
     def _build_calibration_tab(self) -> QWidget:
         """Build axis calibration controls."""
@@ -1755,9 +1947,91 @@ class FigureDigitizerDialog(QDialog):
         layout = QVBoxLayout(tab)
         layout.addWidget(QLabel("Dataset name"))
         layout.addWidget(self._dataset_name_edit)
+        layout.addWidget(self._build_multi_curve_controls())
         layout.addWidget(self._preview_table, 1)
         layout.addWidget(self._preview_status_label)
         return tab
+
+    def _build_multi_curve_controls(self) -> QWidget:
+        """Build session controls for saving several curves with one calibration."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        save_button = QPushButton("Save Current Curve && Start New")
+        save_button.setToolTip(
+            "Store the current extracted data, clear curve-specific points/ROI/template, "
+            "and keep the same image correction and X/Y calibration."
+        )
+        save_button.clicked.connect(self._save_current_extraction_and_start_new)
+        self._saved_extractions_label = QLabel(
+            "No curves saved in this session. The final Create Dataset(s) action also includes the current curve."
+        )
+        self._saved_extractions_label.setWordWrap(True)
+        layout.addWidget(save_button)
+        layout.addWidget(self._saved_extractions_label)
+        return widget
+
+    def _save_current_extraction_and_start_new(self) -> None:
+        """Store the current curve and reset extraction state without recalibrating."""
+        error = self._current_extraction_error()
+        if error is not None:
+            title, message = error
+            QMessageBox.warning(self, title, message)
+            return
+
+        result = self._capture_current_extraction()
+        self._saved_extractions.append(result)
+        if not self._multi_curve_name_root:
+            self._multi_curve_name_root = result.dataset_name
+        self._clear_current_extraction()
+        next_number = len(self._saved_extractions) + 1
+        self._dataset_name_edit.setText(f"{self._multi_curve_name_root} Curve {next_number}")
+        self._refresh_saved_extractions_status()
+
+    def _clear_current_extraction(self) -> None:
+        """Clear only curve-specific XY state, preserving image and calibration."""
+        self._manual_points.clear()
+        self._manual_error_samples.clear()
+        self._manual_error_target_index = None
+        self._refresh_manual_target_selector()
+        self._auto_points.clear()
+        self._symbol_points.clear()
+        self._roi_points.clear()
+        self._symbol_sample_start = None
+        self._symbol_sample_preview_rect = None
+        self._symbol_template_rect = None
+        self._symbol_template_weights = None
+        self._symbol_template_mask = None
+        self._symbol_template_color = None
+        if hasattr(self, "_manual_status_label"):
+            self._manual_status_label.setText("No manual points for the new curve.")
+        if hasattr(self, "_auto_status_label"):
+            self._auto_status_label.setText("No automatic trace yet for the new curve.")
+        if hasattr(self, "_symbol_status_label"):
+            self._symbol_status_label.setText("No symbol centers detected for the new curve.")
+        if hasattr(self, "_symbol_template_status_label"):
+            self._symbol_template_status_label.setText("No sampled symbol template.")
+        self._set_click_target("none")
+        self._refresh_all()
+
+    def _refresh_saved_extractions_status(self) -> None:
+        """Show saved curve names and point counts in the Output tab."""
+        label = getattr(self, "_saved_extractions_label", None)
+        if label is None:
+            return
+        if not self._saved_extractions:
+            label.setText(
+                "No curves saved in this session. The final Create Dataset(s) action also includes the current curve."
+            )
+            return
+        summaries = ", ".join(
+            f"{result.dataset_name} ({len(result.rows)} points)"
+            for result in self._saved_extractions
+        )
+        label.setText(
+            f"Saved {len(self._saved_extractions)} curve(s): {summaries}. "
+            "Image correction and calibration are unchanged."
+        )
 
     def _choose_image(self) -> None:
         """Ask for an image path and load it into the canvas."""
@@ -1779,6 +2053,8 @@ class FigureDigitizerDialog(QDialog):
                 "Import Figure Image",
                 f"Could not load image:\n{image_path}",
             )
+            return
+        if not self._confirm_extraction_reset("Loading another image"):
             return
 
         self._image_path = image_path
@@ -1819,8 +2095,10 @@ class FigureDigitizerDialog(QDialog):
         )
 
     def _clear_digitized_points(self) -> None:
-        """Clear calibration and extraction state tied to working-image pixels."""
+        """Clear calibration, extraction state, and saved curves tied to image pixels."""
         self._calibration_pixels.clear()
+        self._saved_extractions.clear()
+        self._multi_curve_name_root = ""
         self._manual_points.clear()
         self._manual_error_samples.clear()
         self._manual_error_target_index = None
@@ -1843,6 +2121,7 @@ class FigureDigitizerDialog(QDialog):
             self._manual_status_label.setText(
                 "Manual errors apply to the selected manual point. Use Radius Error or 4-Point Error after placing it."
             )
+        self._refresh_saved_extractions_status()
 
     def _set_default_warp_size_from_image(self) -> None:
         """Initialize correction output size from the current working image."""
@@ -1880,6 +2159,8 @@ class FigureDigitizerDialog(QDialog):
         """Restore the originally loaded image and clear derived digitizer state."""
         if self._original_image.isNull():
             return
+        if not self._confirm_extraction_reset("Resetting image correction"):
+            return
         self._warp_applied = False
         self._warp_pixels.clear()
         self._set_working_image(self._original_image.copy())
@@ -1906,6 +2187,8 @@ class FigureDigitizerDialog(QDialog):
                 "Pick correction points: " + ", ".join(missing),
             )
             return
+        if not self._confirm_extraction_reset("Applying image correction"):
+            return
 
         width = int(self._warp_width_spin.value())
         height = int(self._warp_height_spin.value())
@@ -1922,6 +2205,25 @@ class FigureDigitizerDialog(QDialog):
         self._set_click_target("x1")
         self._update_source_label()
         self._refresh_all()
+
+    def _confirm_extraction_reset(self, action: str) -> bool:
+        """Protect current and saved curves before changing image pixel geometry."""
+        current_count = len(self.extracted_rows())
+        saved_count = len(self._saved_extractions)
+        if current_count == 0 and saved_count == 0:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Clear Digitized Curves?",
+            (
+                f"{action} clears the current extraction, calibration, and all curves saved "
+                f"inside this dialog session ({saved_count} saved curve(s), "
+                f"{current_count} current point(s)).\n\nContinue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
 
     def _refresh_warp_status(self) -> None:
         """Update perspective correction status text."""
@@ -4162,6 +4464,7 @@ class ColorPlotDigitizerDialog(FigureDigitizerDialog):
         layout = QVBoxLayout(tab)
         layout.addWidget(QLabel("Dataset name"))
         layout.addWidget(self._dataset_name_edit)
+        layout.addWidget(self._build_multi_curve_controls())
         layout.addWidget(self._preview_table, 1)
         layout.addWidget(self._preview_status_label)
         return tab
@@ -4463,6 +4766,13 @@ class ColorPlotDigitizerDialog(FigureDigitizerDialog):
         self._color_probe_status_label.setText("No colour-value probes.")
         self._refresh_all()
 
+    def _clear_current_extraction(self) -> None:
+        """Clear current colour probes while preserving X/Y and palette calibration."""
+        self._color_probes.clear()
+        self._color_probe_status_label.setText("No colour-value probes for the new data set.")
+        self._set_click_target("color_probe")
+        self._refresh_all()
+
     def calibration_summary(self) -> str:
         """Return X/Y and empirical colour-scale calibration provenance."""
         xy_summary = super().calibration_summary()
@@ -4484,23 +4794,26 @@ class ColorPlotDigitizerDialog(FigureDigitizerDialog):
         )
 
     def accept(self) -> None:  # type: ignore[override]
-        """Validate X/Y, colour scale, and probes before dataset creation."""
+        """Finish the colourplot multi-extraction session."""
+        super().accept()
+
+    def _current_extraction_error(self) -> tuple[str, str] | None:
+        """Return a user-facing validation error for the current colour probe set."""
         if self._image.isNull():
-            QMessageBox.warning(self, "Import From Figure", "Load an image before creating a dataset.")
-            return
+            return "Import From Figure", "Load an image before creating a dataset."
         values, errors = self._calibration_values()
         if values is None or errors:
-            QMessageBox.warning(self, "Calibration Required", "\n".join(errors))
-            return
+            return "Calibration Required", "\n".join(errors)
         try:
             self._get_color_scale()
         except ValueError as exc:
-            QMessageBox.warning(self, "Colour Scale Calibration", str(exc))
-            return
+            return "Colour Scale Calibration", str(exc)
         if not self._color_probes:
-            QMessageBox.warning(self, "No Extracted Points", "Start probing and click at least one colour-plot location.")
-            return
-        QDialog.accept(self)
+            return (
+                "No Extracted Points",
+                "Start probing and click at least one colour-plot location.",
+            )
+        return None
 
 
 class ColumnMetadataDialog(QDialog):

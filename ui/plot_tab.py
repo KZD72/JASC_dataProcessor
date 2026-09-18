@@ -213,6 +213,22 @@ class PlotTab(QWidget):
         """Return whether selected-series controls differ from the queued series."""
         return self._series_editor_dirty
 
+    def copy_plot_to_clipboard(self) -> bool:
+        """Copy the current live plot visualization to the system clipboard."""
+        if not self._plot_series:
+            QMessageBox.information(
+                self,
+                "Copy Plot",
+                "Create or load a plot before copying it.",
+            )
+            return False
+        copied = self._plot_canvas.copy_to_clipboard()
+        if copied:
+            self.status_message.emit("Copied current plot visualization to the clipboard")
+        else:
+            QMessageBox.warning(self, "Copy Plot", "The plot image could not be copied.")
+        return copied
+
     def set_active_plot_name(self, name: str | None) -> None:
         """Update the plot header with the active saved plot name."""
         self._active_plot_label.setText(name or "Unsaved plot")
@@ -269,6 +285,7 @@ class PlotTab(QWidget):
     def set_plot_actions_enabled(self, can_save: bool, can_load: bool, can_remove: bool) -> None:
         """Set enabled state for plot-level header actions."""
         self._save_plot_button.setEnabled(can_save)
+        self._copy_plot_button.setEnabled(can_save)
         self._load_plot_button.setEnabled(can_load)
         self._remove_plot_button.setEnabled(can_remove)
 
@@ -598,6 +615,13 @@ class PlotTab(QWidget):
         self._y_label_edit = QLineEdit()
         self._right_y_label_edit = QLineEdit()
 
+        self._x_label_size_spin = self._axis_font_size_spin()
+        self._x_tick_size_spin = self._axis_font_size_spin()
+        self._y_label_size_spin = self._axis_font_size_spin()
+        self._y_tick_size_spin = self._axis_font_size_spin()
+        self._right_y_label_size_spin = self._axis_font_size_spin()
+        self._right_y_tick_size_spin = self._axis_font_size_spin()
+
         self._x_scale_combo = QComboBox()
         self._x_scale_combo.addItems(["linear", "log"])
         self._y_scale_combo = QComboBox()
@@ -865,6 +889,21 @@ class PlotTab(QWidget):
         af.addRow("X label", self._x_label_edit)
         af.addRow("Left Y label", self._y_label_edit)
         af.addRow("Right Y label", self._right_y_label_edit)
+        af.addRow(
+            "X text sizes",
+            self._axis_font_size_row(self._x_label_size_spin, self._x_tick_size_spin),
+        )
+        af.addRow(
+            "Left Y text sizes",
+            self._axis_font_size_row(self._y_label_size_spin, self._y_tick_size_spin),
+        )
+        af.addRow(
+            "Right Y text sizes",
+            self._axis_font_size_row(
+                self._right_y_label_size_spin,
+                self._right_y_tick_size_spin,
+            ),
+        )
         af.addRow("X scale", self._x_scale_combo)
         af.addRow("Left Y scale", self._y_scale_combo)
         af.addRow("Right Y scale", self._right_y_scale_combo)
@@ -956,6 +995,11 @@ class PlotTab(QWidget):
 
         self._save_plot_button = QPushButton("Save Plot")
         self._save_plot_button.clicked.connect(self.save_plot_requested.emit)
+        self._copy_plot_button = QPushButton("Copy Plot")
+        self._copy_plot_button.setToolTip(
+            "Copy the current on-screen plot visualization to the clipboard"
+        )
+        self._copy_plot_button.clicked.connect(self.copy_plot_to_clipboard)
         self._new_plot_button = QPushButton("New Plot")
         self._new_plot_button.clicked.connect(self.new_plot_requested.emit)
         self._load_plot_button = QPushButton("Load Selected")
@@ -970,6 +1014,7 @@ class PlotTab(QWidget):
         top_row.addStretch(1)
         top_row.addWidget(self._new_plot_button)
         top_row.addWidget(self._save_plot_button)
+        top_row.addWidget(self._copy_plot_button)
         top_row.addWidget(self._load_plot_button)
         top_row.addWidget(self._remove_plot_button)
         top_row.addWidget(self._toggle_options_button)
@@ -1038,6 +1083,31 @@ class PlotTab(QWidget):
         h.addWidget(min_edit)
         h.addWidget(max_edit)
         h.addStretch(1)
+        return row
+
+    @staticmethod
+    def _axis_font_size_spin() -> QDoubleSpinBox:
+        """Return an axis-font control where zero follows the active style."""
+        spin = QDoubleSpinBox()
+        spin.setRange(0.0, 72.0)
+        spin.setSingleStep(0.5)
+        spin.setSuffix(" pt")
+        spin.setSpecialValueText("Style default")
+        return spin
+
+    @staticmethod
+    def _axis_font_size_row(
+        label_spin: QDoubleSpinBox,
+        tick_spin: QDoubleSpinBox,
+    ) -> QWidget:
+        """Return compact label/tick typography controls for one axis."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Label"))
+        layout.addWidget(label_spin)
+        layout.addWidget(QLabel("Numbers"))
+        layout.addWidget(tick_spin)
         return row
 
     def _build_bar_options_panel(self) -> QWidget:
@@ -1183,6 +1253,12 @@ class PlotTab(QWidget):
         ):
             checkbox.toggled.connect(self._schedule_preview)
         for spin in (
+            self._x_label_size_spin,
+            self._x_tick_size_spin,
+            self._y_label_size_spin,
+            self._y_tick_size_spin,
+            self._right_y_label_size_spin,
+            self._right_y_tick_size_spin,
             self._legend_font_size_spin,
             self._legend_title_size_spin,
             self._legend_columns_spin,
@@ -1571,6 +1647,16 @@ class PlotTab(QWidget):
             self._y_max_edit.setText(settings.left_y_axis.maximum)
             self._right_y_min_edit.setText(settings.right_y_axis.minimum)
             self._right_y_max_edit.setText(settings.right_y_axis.maximum)
+            self._x_label_size_spin.setValue(settings.x_axis.label_font_size)
+            self._x_tick_size_spin.setValue(settings.x_axis.tick_font_size)
+            self._y_label_size_spin.setValue(settings.left_y_axis.label_font_size)
+            self._y_tick_size_spin.setValue(settings.left_y_axis.tick_font_size)
+            self._right_y_label_size_spin.setValue(
+                settings.right_y_axis.label_font_size
+            )
+            self._right_y_tick_size_spin.setValue(
+                settings.right_y_axis.tick_font_size
+            )
             self._grid_checkbox.setChecked(settings.grid_enabled)
             self._legend_checkbox.setChecked(settings.legend.enabled)
             self._set_combo_data(self._legend_pos_combo, settings.legend.location)
@@ -1612,18 +1698,24 @@ class PlotTab(QWidget):
                 scale=self._x_scale_combo.currentText(),
                 minimum=self._x_min_edit.text(),
                 maximum=self._x_max_edit.text(),
+                label_font_size=self._x_label_size_spin.value(),
+                tick_font_size=self._x_tick_size_spin.value(),
             ),
             left_y_axis=AxisSettings(
                 label=self._y_label_edit.text(),
                 scale=self._y_scale_combo.currentText(),
                 minimum=self._y_min_edit.text(),
                 maximum=self._y_max_edit.text(),
+                label_font_size=self._y_label_size_spin.value(),
+                tick_font_size=self._y_tick_size_spin.value(),
             ),
             right_y_axis=AxisSettings(
                 label=self._right_y_label_edit.text(),
                 scale=self._right_y_scale_combo.currentText(),
                 minimum=self._right_y_min_edit.text(),
                 maximum=self._right_y_max_edit.text(),
+                label_font_size=self._right_y_label_size_spin.value(),
+                tick_font_size=self._right_y_tick_size_spin.value(),
             ),
             grid_enabled=self._grid_checkbox.isChecked(),
             legend=LegendSettings(
@@ -2494,7 +2586,7 @@ class PlotTab(QWidget):
     def _edit_axis_from_canvas(self, element: str) -> None:
         """Edit one rendered axis and write the result into inspector controls."""
         settings = self._settings_from_controls()
-        axis_map: dict[str, tuple[str, AxisSettings, QLineEdit, QComboBox, QLineEdit, QLineEdit, str]] = {
+        axis_map = {
             "x_axis": (
                 "X",
                 settings.x_axis,
@@ -2502,6 +2594,8 @@ class PlotTab(QWidget):
                 self._x_scale_combo,
                 self._x_min_edit,
                 self._x_max_edit,
+                self._x_label_size_spin,
+                self._x_tick_size_spin,
                 "x",
             ),
             "left_y_axis": (
@@ -2511,6 +2605,8 @@ class PlotTab(QWidget):
                 self._y_scale_combo,
                 self._y_min_edit,
                 self._y_max_edit,
+                self._y_label_size_spin,
+                self._y_tick_size_spin,
                 "y",
             ),
             "right_y_axis": (
@@ -2520,10 +2616,22 @@ class PlotTab(QWidget):
                 self._right_y_scale_combo,
                 self._right_y_min_edit,
                 self._right_y_max_edit,
+                self._right_y_label_size_spin,
+                self._right_y_tick_size_spin,
                 "right_y",
             ),
         }
-        axis_name, current, label_edit, scale_combo, minimum_edit, maximum_edit, auto_key = axis_map[element]
+        (
+            axis_name,
+            current,
+            label_edit,
+            scale_combo,
+            minimum_edit,
+            maximum_edit,
+            label_size_spin,
+            tick_size_spin,
+            auto_key,
+        ) = axis_map[element]
         dialog = PlotAxisEditDialog(axis_name, current, settings.grid_enabled, self)
         if dialog.exec() != QDialog.Accepted:
             return
@@ -2534,6 +2642,8 @@ class PlotTab(QWidget):
             self._set_combo_text(scale_combo, updated.scale)
             minimum_edit.setText(updated.minimum)
             maximum_edit.setText(updated.maximum)
+            label_size_spin.setValue(updated.label_font_size)
+            tick_size_spin.setValue(updated.tick_font_size)
             self._grid_checkbox.setChecked(dialog.grid_enabled())
             self._auto_axis_labels[auto_key] = ""
         finally:
@@ -2799,6 +2909,12 @@ class PlotTab(QWidget):
                 "x_scale": self._x_scale_combo.currentText(),
                 "y_scale": self._y_scale_combo.currentText(),
                 "right_y_scale": self._right_y_scale_combo.currentText(),
+                "x_label_font_size": self._x_label_size_spin.value(),
+                "x_tick_font_size": self._x_tick_size_spin.value(),
+                "y_label_font_size": self._y_label_size_spin.value(),
+                "y_tick_font_size": self._y_tick_size_spin.value(),
+                "right_y_label_font_size": self._right_y_label_size_spin.value(),
+                "right_y_tick_font_size": self._right_y_tick_size_spin.value(),
                 "x_limits": xl, "y_limits": yl, "right_y_limits": rl,
                 "grid_enabled": self._grid_checkbox.isChecked(),
                 "legend_settings": self._settings_from_controls().legend,

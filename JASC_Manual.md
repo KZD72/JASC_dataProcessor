@@ -61,7 +61,7 @@ At first launch, JASC opens an empty workspace. Create a sheet, import data, or 
 
 | Purpose | Supported format |
 | --- | --- |
-| Tabular import | `.csv`, `.txt` |
+| Tabular import | `.csv`, `.txt`, `.xlsx`, `.xlsm` (Excel worksheet values only) |
 | Tabular export | `.csv`, `.txt` / tab-delimited text |
 | Project save/open | `.jasc` |
 | Figure digitizer | PNG, JPEG, BMP, TIFF, GIF, and other image formats readable by Qt |
@@ -114,20 +114,20 @@ Use **View > Reset View to Default** to restore the normal dock arrangement and 
 JASC follows the desktop convention used by spreadsheet and scientific-analysis software:
 
 - **Left-click** selects a worksheet, saved plot, cell, queued series, or locator. Double-click a worksheet cell to edit it, a saved plot to load it, or a rendered plot element to open its focused editor.
-- **Right-click** opens the actions relevant to the item under the pointer. Right-clicking an unselected worksheet cell, column, dataset, series, locator, or saved plot makes that item the context target first.
+- **Right-click** opens the actions relevant to the item under the pointer. Worksheet menus are available from cells, empty table space, row headers, and column headers. Right-clicking an unselected worksheet cell, row, column, dataset, series, locator, or saved plot makes that item the context target first.
 
-The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**, export, Data Preparation and Analysis submenus, rename, and removal. **Create Plot from Dataset** starts a protected empty draft and prefills its dataset/column mappings; choose the subtype and click **Add Series** to render it. Worksheet cell and header menus include clipboard commands, Row and Column submenus, plotting, Data Preparation, and Analysis. Saved-plot, queued-series, and locator lists expose their corresponding create/save/load/update/revert/duplicate/remove actions. Disabled actions remain visible when the current selection or state does not support them.
+The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**, export, Data Preparation and Analysis submenus, duplication, rename, and removal. **Create Plot from Dataset** starts a protected empty draft and prefills its dataset/column mappings; choose the subtype and click **Add Series** to render it. Worksheet menus include value, row, and column copying; normal and transposed paste; cell clearing; worksheet resizing; Row and Column submenus; plotting; Data Preparation; and Analysis. Saved-plot, queued-series, and locator lists expose their corresponding create/save/load/update/revert/duplicate/remove actions. Disabled actions remain visible when the current selection or state does not support them.
 
 ### Menu reference
 
 | Menu | Commands |
 | --- | --- |
 | File | Open Project, Save Project, Save Project As, New Blank Sheet, Close Project, Import Data, Import From Figure, Export Dataset, Exit |
-| Edit | Undo, Redo, Delete Selected Rows, Delete Selected Columns |
+| Edit | Undo, Redo, Clear Selected Cell Values, Delete Selected Rows, Delete Selected Columns, Paste Values Transposed |
 | View | Navigator/section/inspector visibility and Reset View to Default |
-| Data | Rename/Remove Dataset; Add/Insert Row or Column; Fill Range; all Data Preparation tools; Column Metadata; Apply Formula |
+| Data | Duplicate/Rename/Remove Dataset; Add/Insert Row or Column; Resize Sheet; Fill Range; all Data Preparation tools; Column Metadata; Apply Formula |
 | Analysis | Derivative, Integral, Smoothing, Interpolation, FFT, Inverse FFT, Statistics, Custom Fit Models, Curve Fit |
-| Plot | New Empty Plot, Save Current Plot, Load Selected Plot, Remove Selected Plot |
+| Plot | New Empty Plot, Save Current Plot, Copy Current Plot to Clipboard, Load/Duplicate/Remove Selected Plot |
 
 ### Keyboard shortcuts
 
@@ -142,15 +142,18 @@ The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**
 | `Ctrl+E` | Export selected dataset |
 | `Ctrl+Z` | Undo worksheet edit |
 | `Ctrl+Y` | Redo worksheet edit |
-| `Delete`, then `R` | Delete selected rows after confirmation |
-| `Delete`, then `C` | Delete selected columns after confirmation |
+| `Delete` | Clear values in selected worksheet cells; rows and columns remain |
+| `Shift+Delete` | Delete selected rows after confirmation |
+| `Ctrl+Delete` | Delete selected columns after confirmation |
 | `Ctrl+C` | Copy selected worksheet values |
 | `Ctrl+V` | Paste worksheet values at the active cell |
+| `Ctrl+Shift+V` | Paste the clipboard matrix transposed at the active cell |
 | `Ctrl+Shift+F` | Apply Formula |
 | `Ctrl+Shift+C` | Curve Fit |
 | `Ctrl+Shift+R` | Reset view layout |
 | `Ctrl+Alt+N` | New empty plot |
 | `Ctrl+Alt+S` | Save current plot |
+| `Ctrl+Alt+C` | Copy the current live plot visualization to the clipboard |
 
 ---
 
@@ -190,8 +193,9 @@ Because worksheet payloads are CSV, specialized pandas dtypes are reconstructed 
 ### Dataset navigation and management
 
 - Select a dataset in the navigator to display it.
-- Right-click a dataset for its common Open, Plot, Export, Data Preparation, Analysis, Rename, and Remove operations.
-- The same actions are available as **Data > Rename Dataset...** and **Data > Remove Dataset...**.
+- Click **Duplicate Sheet**, right-click a dataset and choose **Duplicate Sheet**, or use **Data > Duplicate Dataset** to create and open a fully independent copy. Values, column order and dtypes, formulas, metadata, source provenance, and backend label are retained. Copies are named `Sheet Copy`, `Sheet Copy (2)`, and so on; later edits do not affect the source.
+- Right-click a dataset for its common Open, Plot, Export, Data Preparation, Analysis, Duplicate, Rename, and Remove operations.
+- The same management actions are available from the **Data** menu.
 - Renaming a dataset updates references inside saved plots. The active plot draft is cleared so it cannot retain stale controls.
 - Deleting a dataset asks for confirmation. Dataset deletion is not part of worksheet Undo/Redo.
 
@@ -214,6 +218,26 @@ Because worksheet payloads are CSV, specialized pandas dtypes are reconstructed 
 The current import dialog does not auto-detect a delimiter or header row, does not select an arbitrary starting row, and always reads text as UTF-8. If decoding fails, convert the source file to UTF-8 before importing.
 
 The imported dataset uses the source filename as its base name and remembers the source path. Files of at least 100 MiB trigger a warning before parsing. Large parsed worksheets trigger a second size/memory warning before they enter the workspace.
+
+### Import an Excel workbook
+
+1. Choose **File > Import Data...** (`Ctrl+I`) or use the toolbar action.
+2. Select a modern `.xlsx` or `.xlsm` workbook. Legacy `.xls` files must first be saved as `.xlsx` in Excel or another compatible application.
+3. Review the workbook compatibility warnings. JASC inspects the workbook package for charts, pivot tables, Excel tables, images/media, chart-only tabs, macros, external links, query tables, data connections, comments, slicers, named ranges, and hidden tabs.
+4. Choose **Import all worksheet tabs** or **Choose specific worksheet tabs**. Selective import is the safer default: visible worksheets start checked and hidden worksheets start unchecked. Import All includes hidden worksheets. Chart-only tabs are listed for transparency but are always excluded because they contain no worksheet grid.
+5. Choose whether the first row of every selected worksheet contains column names and confirm the import.
+
+Each selected worksheet becomes an independent dataset named `Workbook - Worksheet`. If that name already exists, JASC adds its normal numeric suffix. Every imported dataset retains the workbook as its source path.
+
+Excel import is intentionally value-only:
+
+- Cached worksheet cell values are imported. JASC does not execute Excel formulas; formulas without a saved cached result may appear blank.
+- VBA macros, queries, external connections, and external links are never executed or refreshed.
+- Charts, pivot layouts/caches, images, shapes, controls, comments, named ranges, filters, totals rows, formatting, conditional formatting, validation, protection, merged-cell layout, print settings, and display settings are not reproduced.
+- Cells backing a chart, pivot result, or Excel table can still be imported when they are present in a selected worksheet grid.
+- One malformed or missing selected tab is reported without discarding other successfully parsed tabs. Empty tabs and worksheets declined at the large-data warning are skipped.
+
+Excel workbooks are compressed containers, so their in-memory DataFrames can be substantially larger than the file on disk. The normal file-size and per-worksheet memory warnings apply.
 
 ### Create a blank worksheet
 
@@ -311,7 +335,7 @@ Shape priors are **Auto from sample**, **Dot / circle**, **X cross**, **Plus cro
 
 Symbol outputs include area, width, height, match score when applicable, template dimensions, and uncertainty estimated from marker size.
 
-### XY graph: Step 4, review and create the dataset
+### XY graph: Step 4, review and create one or more datasets
 
 Open **Output** to set the dataset name and inspect the read-only preview. Each row can include:
 
@@ -320,7 +344,16 @@ Open **Output** to set the dataset name and inspect the read-only preview. Each 
 - Extraction method, trace rule/color, ROI count, and source image.
 - Symbol ID, area, score, size, and template diagnostics.
 
-Click **Create Dataset**. JASC requires a loaded image, complete four-point calibration, and at least one manual, traced, or symbol point. The created dataset receives numeric coordinate metadata, X/Y/error roles where appropriate, source/provenance comments, and the image source path.
+To extract another curve from the same figure without repeating calibration:
+
+1. Enter a distinct dataset name for the completed curve.
+2. Click **Save Current Curve & Start New**. JASC stores a snapshot of its rows and provenance, then clears only curve-specific manual points, uncertainty marks, automatic trace, symbol results/template, and ROI marks.
+3. Extract the next curve using the same working image, perspective correction, and X/Y calibration. Repeat the save/start action for any additional curves.
+4. Leave the last curve in the preview and click **Create Dataset(s)**. Every saved curve and the current curve are imported as separate workspace datasets. If the last curve was already saved and the current extraction is empty, the saved curves are still imported.
+
+The saved-curve status in **Output** lists how many curves are waiting to be imported. Loading another image, applying a new perspective correction, or resetting to the original image changes pixel geometry, so JASC asks for confirmation before clearing saved curves and calibration.
+
+For a single curve, skip **Save Current Curve & Start New** and click **Create Dataset(s)** directly. JASC requires a loaded image, complete four-point calibration, at least one manual, traced, or symbol point, and a dataset name. Each created dataset receives numeric coordinate metadata, X/Y/error roles where appropriate, source/provenance comments, and the image source path.
 
 ### 2D colour plot / heatmap workflow
 
@@ -333,7 +366,7 @@ Choose **2D colour plot / heatmap** in the initial figure-type dialog. This work
 5. Adjust **Bar sample width** if necessary. JASC samples a median stripe across that width along the complete endpoint-to-endpoint segment. **Palette samples** controls its resolution. Click **Rebuild Scale** and inspect the displayed sampled palette.
 6. Set the probe **Median patch radius**. A small median patch reduces isolated compression noise, but a large radius can mix neighbouring colours near sharp boundaries.
 7. Click **Start Probing**, then click locations in the colour plot. The shared magnifier shows live X, Y, estimated Z, RGB, confidence, and validity. Click **Stop** when finished.
-8. In **Output**, inspect the rows. Use **Undo Last**, **Remove Selected**, or **Clear Probes** to clean the result, then click **Create Dataset**.
+8. In **Output**, inspect the rows. Use **Undo Last**, **Remove Selected**, or **Clear Probes** to clean the result. To preserve this probe set and begin another one with the same image, X/Y calibration, and colour-scale calibration, enter its dataset name and click **Save Current Curve & Start New**. Only the probes are cleared. Repeat as needed, then click **Create Dataset(s)** to import every saved and current probe set as a separate dataset.
 
 Each output row contains calibrated `x`, `y`, and estimated `z`; source pixel coordinates; median red/green/blue values; normalized palette position; CIE Lab colour distance; confidence; ambiguity and validity flags; patch radius; extraction method; and source image. X, Y, and Z metadata roles are assigned automatically. Rows that fail the distance threshold or are ambiguous are deliberately retained so they can be inspected and filtered instead of silently discarded. **Maximum Lab distance** controls the validity cutoff.
 
@@ -358,9 +391,10 @@ The current colour workflow supports continuous empirical colour bars and clicke
 - **Data > Insert Row** inserts before the active/selected row.
 - **Data > Add Column...** appends a uniquely named blank column.
 - **Data > Insert Column...** inserts before the active/selected column.
-- **Edit > Delete Selected Rows** or the `Delete`, then `R` key chord removes every selected row after confirmation.
-- **Edit > Delete Selected Columns** or the `Delete`, then `C` key chord removes every selected column after confirmation.
-- Pressing `Delete` by itself does not remove worksheet structure. This prevents an accidental full-table selection from deleting all rows.
+- **Data > Resize Sheet...**, the **Resize Sheet** inspector button, or the worksheet context menu sets the total row and column counts together. Growing adds empty cells and uniquely named columns. Shrinking asks for confirmation because values, formulas, and metadata outside the new limits are removed.
+- **Edit > Delete Selected Rows** or `Shift+Delete` removes every selected row after confirmation.
+- **Edit > Delete Selected Columns** or `Ctrl+Delete` removes every selected column after confirmation.
+- `Delete` clears values in the selected cells without removing worksheet structure. The clear is undoable and invalidates stored formula metadata for affected columns because their generated result is no longer intact.
 
 Row and column edits participate in Undo/Redo when the worksheet fits within the history budget.
 
@@ -372,6 +406,8 @@ Row and column edits participate in Undo/Redo when the worksheet fits within the
 2. Activate the destination cell and press `Ctrl+V`, or choose **Paste Values**.
 
 Values use tab-delimited clipboard text. JASC expands the worksheet to fit the pasted rectangle, infers numeric blocks where safe, preserves explicit Text destinations, and clears formulas on overwritten columns.
+
+Right-click and choose **Copy Row(s)** to copy every column from all rows touched by the selection. To exchange rows and columns, choose **Paste Values Transposed** or press `Ctrl+Shift+V`. The complete rectangular clipboard matrix is transposed: an M-row by N-column copy becomes N rows by M columns, so this works for single rows, single columns, and multi-row/multi-column selections.
 
 #### Copy and paste whole columns
 
@@ -385,7 +421,7 @@ Pasted columns are inserted before the destination and renamed automatically if 
 
 ### Undo and redo
 
-Use **Edit > Undo** (`Ctrl+Z`) and **Edit > Redo** (`Ctrl+Y`). History covers cell edits, row/column changes, clipboard pastes, Fill Range, formula writes, metadata/column renames, and current-sheet calculus/smoothing changes where the operation captures editor state.
+Use **Edit > Undo** (`Ctrl+Z`) and **Edit > Redo** (`Ctrl+Y`). History covers cell edits and clearing, worksheet resizing, row/column changes, clipboard pastes, Fill Range, formula writes, metadata/column renames, and current-sheet calculus/smoothing changes where the operation captures editor state.
 
 History is dataset-specific and resets when the displayed dataset changes. Each undo and redo stack retains at most 20 snapshots and approximately 256 MiB. If one worksheet snapshot exceeds the budget, JASC performs the edit but warns that it cannot be undone. Creating/removing datasets or batch changes to non-visible sheets are not guaranteed to be undoable from the current table history.
 
@@ -824,7 +860,7 @@ Rendered data, text, and axes can be edited without navigating to the lateral in
 
 - A **plotted line, marker, bar, filled region, distribution, composition cell, or 2D map** to edit that committed series. The focused dialog provides compatible graph subtypes, series name and legend inclusion, continuous/dashed/dotted/dash-dot line patterns, line width, symbol shape and size, automatic or custom colour, fill opacity, and bar width. For example, an XY line can be changed directly to scatter, line + markers, errorbar, bar, horizontal bar, or area.
 - The **plot title** to change its text.
-- An **X, left-Y, or right-Y axis label**, tick-label area, or axis line to edit its label, linear/log scale, optional minimum/maximum, and the shared grid state.
+- An **X, left-Y, or right-Y axis label**, tick-label area, or axis line to edit its label, label size, tick-number size, linear/log scale, optional minimum/maximum, and the shared grid state.
 - A **legend entry label** to rename that committed series or include/exclude it from the legend.
 - The **legend title, frame, handle area, or other empty legend space** to edit visibility, position, text/title sizes, title, columns, frame and opacity, marker scale, handle length, and locator/confidence-band inclusion.
 
@@ -873,6 +909,7 @@ Column roles preselect likely mappings. Axis-label fields prefill from Long Name
 The **Axes** tab controls:
 
 - Title; X, left-Y, and right-Y labels.
+- Per-axis label and tick-number sizes for X, left Y, and right Y. **Style default** leaves typography under the selected Matplotlib/SciencePlots style; any positive point size overrides it on the live canvas and exported output.
 - Linear or log scale independently on X, left Y, and right Y.
 - Optional minimum/maximum for each axis.
 - Grid visibility.
@@ -917,17 +954,18 @@ Choose marker shape, size, and color, then click **Add Locator**. Located values
 
 ### Matplotlib canvas toolbar
 
-Use the embedded Matplotlib toolbar for home/reset, back/forward, pan, zoom, subplot configuration where offered, and saving the rendered figure. The save action applies the configured full-image or plotting-area physical size only for export, then restores the responsive canvas. This exports an image; it does not save editable JASC plot state.
+Use the embedded Matplotlib toolbar for home/reset, back/forward, pan, zoom, subplot configuration where offered, copying, and saving the rendered figure. **Copy** places the current on-screen canvas image on the system clipboard without applying export dimensions. The same command is available as the top-row **Copy Plot** button and as **Plot > Copy Current Plot to Clipboard** (`Ctrl+Alt+C`). The save action applies the configured full-image or plotting-area physical size only for export, then restores the responsive canvas. Both operations produce static images; neither saves editable JASC plot state.
 
 ### Saved plots and unsaved drafts
 
 - **New / Empty Plot** is the default unsaved workspace entry.
-- Use the Plot menu, top-row buttons, or saved-plot right-click menu to create, save, load, and remove plot definitions.
+- Use the Plot menu, top-row buttons, or saved-plot right-click menu to create, save, load, duplicate, and remove plot definitions.
+- **Duplicate Saved Plot** creates a deep copy named `Plot Copy`, `Plot Copy (2)`, and so on, then loads that copy for editing. Series, mappings, locators, axes, legend, style, export geometry, and type-specific settings are retained. Editing or saving the copy does not alter the source definition. If the current draft has unsaved changes, the normal Save/Discard/Cancel protection appears first.
 - Saving under an existing name asks before replacement.
 - Starting or loading another plot while the current draft has unsaved changes offers **Save**, **Discard**, and **Cancel**. Resolve any staged series edits with **Update Series** or **Revert Edits** before saving.
 - Analysis-generated plots detach from a previously loaded saved plot so they cannot silently overwrite it.
 
-Saved definitions preserve queued series, locators, mappings, axes, legend, styles, figure dimensions, and type-specific settings. Save the overall `.jasc` project to persist them between application sessions.
+Saved definitions preserve queued series, locators, mappings, axis labels/scales/ranges/typography, legend, styles, figure dimensions, and type-specific settings. Save the overall `.jasc` project to persist them between application sessions.
 
 ---
 
@@ -1015,20 +1053,20 @@ Dataset export does not include formulas, column metadata, saved plots, or custo
 
 ### Export a plot
 
-Use the save button in the Matplotlib toolbar. The available raster/vector formats depend on Matplotlib. Outside legends reserve figure space in the exported output.
+Use the save button in the Matplotlib toolbar. The available raster/vector formats depend on Matplotlib. Outside legends reserve figure space in the exported output. To reuse the current screen rendering quickly, use **Copy Plot**, the toolbar **Copy** action, or `Ctrl+Alt+C`; clipboard copy uses the live canvas size, while file export uses the configured physical dimensions.
 
 An exported image is static. Save the plot definition and project when later editing is required.
 
 ### Large-data thresholds and behavior
 
-- Delimited files of at least 100 MiB trigger a pre-import warning.
+- Source files of at least 100 MiB trigger a pre-import warning.
 - A worksheet is flagged as large at 2,000,000 cells or an estimated 250 MiB of DataFrame memory.
 - Column sizing uses at most 100 sampled rows normally and 25 rows above the 250,000-cell responsiveness threshold.
 - Clipboard parsing, worksheet growth, range fill, and rectangular assignment use block-oriented operations. Right-click menu availability checks inspect compact Qt selection ranges rather than materializing every selected cell, so selecting a large table does not make menu opening proportional to its cell count.
 - `.jasc` worksheet CSV entries stream from the ZIP archive during project load.
 - Undo/redo retains at most 20 snapshots and approximately 256 MiB per stack.
 
-All datasets are currently held in memory by pandas. CSV/TXT import and much project parsing still run synchronously, so very large files can pause the interface even after confirmation. Background import, paged/out-of-core datasets, autosave, and recovery are not implemented.
+All datasets are currently held in memory by pandas. CSV/TXT/Excel import and much project parsing still run synchronously, so very large files can pause the interface even after confirmation. Background import, paged/out-of-core datasets, autosave, and recovery are not implemented.
 
 ---
 
@@ -1092,7 +1130,7 @@ If `python` is not found, activate the environment where the dependencies were i
 
 The current version does not provide:
 
-- Excel, database, JSON/XML, HDF5, NetCDF, MATLAB, or instrument-format connectors.
+- Excel export, legacy `.xls` import, named/range-only Excel import, database, JSON/XML, HDF5, NetCDF, MATLAB, or instrument-format connectors.
 - Import preview, arbitrary header/start rows, encoding selection, or batch file import.
 - A workbook/folder hierarchy, matrix sheets, rich cell formatting, notes, or dependency/recalculation graphs.
 - Multi-condition filters, pivot tables, resampling, date/time tooling, or reusable preparation recipes.

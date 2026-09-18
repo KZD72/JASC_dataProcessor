@@ -266,6 +266,8 @@ class PlotAxisEditDialog(QDialog):
         self._maximum_edit = QLineEdit(settings.maximum)
         self._minimum_edit.setPlaceholderText("Automatic")
         self._maximum_edit.setPlaceholderText("Automatic")
+        self._label_size_spin = self._font_size_spin(settings.label_font_size)
+        self._tick_size_spin = self._font_size_spin(settings.tick_font_size)
         self._grid_checkbox = QCheckBox("Show grid")
         self._grid_checkbox.setChecked(grid_enabled)
 
@@ -279,6 +281,8 @@ class PlotAxisEditDialog(QDialog):
 
         layout = QFormLayout(self)
         layout.addRow("Label", self._label_edit)
+        layout.addRow("Label size", self._label_size_spin)
+        layout.addRow("Number size", self._tick_size_spin)
         layout.addRow("Scale", self._scale_combo)
         layout.addRow("Range", range_row)
         layout.addRow("", self._grid_checkbox)
@@ -291,7 +295,20 @@ class PlotAxisEditDialog(QDialog):
             scale=str(self._scale_combo.currentData() or "linear"),
             minimum=self._minimum_edit.text().strip(),
             maximum=self._maximum_edit.text().strip(),
+            label_font_size=self._label_size_spin.value(),
+            tick_font_size=self._tick_size_spin.value(),
         )
+
+    @staticmethod
+    def _font_size_spin(value: float) -> QDoubleSpinBox:
+        """Return a point-size control where zero follows the active plot style."""
+        spin = QDoubleSpinBox()
+        spin.setRange(0.0, 72.0)
+        spin.setSingleStep(0.5)
+        spin.setValue(value)
+        spin.setSuffix(" pt")
+        spin.setSpecialValueText("Style default")
+        return spin
 
     def grid_enabled(self) -> bool:
         """Return the edited shared grid state."""

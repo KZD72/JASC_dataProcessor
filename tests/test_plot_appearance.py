@@ -57,11 +57,19 @@ class PlotSettingsTests(unittest.TestCase):
 
     def test_malformed_new_settings_fall_back_and_clamp(self) -> None:
         settings = PlotSettings.from_state({
-            "axes": {"x": {"scale": "invalid"}},
+            "axes": {
+                "x": {
+                    "scale": "invalid",
+                    "label_font_size": -1,
+                    "tick_font_size": 1000,
+                }
+            },
             "legend": {"font_size": -2, "columns": 500, "location": "invalid"},
             "figure": {"width": "bad", "height": 1000},
         })
         self.assertEqual(settings.x_axis.scale, "linear")
+        self.assertEqual(settings.x_axis.label_font_size, 0.0)
+        self.assertEqual(settings.x_axis.tick_font_size, 72.0)
         self.assertEqual(settings.legend.font_size, 5.0)
         self.assertEqual(settings.legend.columns, 20)
         self.assertEqual(settings.legend.location, "best")
@@ -76,6 +84,7 @@ class PlotSettingsTests(unittest.TestCase):
             "locators": [],
             "settings": PlotSettings(
                 title="Publication plot",
+                x_axis=AxisSettings(label="Time", label_font_size=13.0, tick_font_size=9.5),
                 legend=LegendSettings(
                     location="outside right",
                     font_size=13.0,
@@ -147,6 +156,51 @@ class PlotAppearanceGuiTests(unittest.TestCase):
         self.assertFalse(legend.get_frame_on())
         self.assertEqual(legend._ncols, 2)
         self.assertAlmostEqual(canvas.figure.subplotpars.right, 0.75)
+        canvas.deleteLater()
+
+    def test_axis_label_and_tick_sizes_render_on_live_canvas(self) -> None:
+        canvas = PlotCanvas()
+        result = canvas.plot_series(
+            self.workspace,
+            [
+                PlotSeries("signals", "x", "signals", "left"),
+                PlotSeries(
+                    "signals", "x", "signals", "right", y_axis="right"
+                ),
+            ],
+            x_label="Time",
+            y_label="Left signal",
+            right_y_label="Right signal",
+            x_label_font_size=15.0,
+            x_tick_font_size=9.0,
+            y_label_font_size=14.0,
+            y_tick_font_size=8.0,
+            right_y_label_font_size=13.0,
+            right_y_tick_font_size=7.0,
+        )
+        self.assertEqual(result.plotted_count, 2)
+        self.assertEqual(canvas.axes.xaxis.label.get_fontsize(), 15.0)
+        self.assertEqual(canvas.axes.yaxis.label.get_fontsize(), 14.0)
+        self.assertEqual(canvas.axes.get_xticklabels()[0].get_fontsize(), 9.0)
+        self.assertEqual(canvas.axes.get_yticklabels()[0].get_fontsize(), 8.0)
+        self.assertIsNotNone(canvas.right_axes)
+        self.assertEqual(canvas.right_axes.yaxis.label.get_fontsize(), 13.0)
+        self.assertEqual(canvas.right_axes.get_yticklabels()[0].get_fontsize(), 7.0)
+        canvas.deleteLater()
+
+    def test_copy_to_clipboard_uses_live_canvas_size(self) -> None:
+        canvas = PlotCanvas()
+        canvas.canvas.resize(640, 360)
+        canvas.plot_series(
+            self.workspace,
+            [PlotSeries("signals", "x", "signals", "left")],
+        )
+        canvas.set_export_size(12.0, 9.0, "figure")
+
+        self.assertTrue(canvas.copy_to_clipboard())
+        copied = QApplication.clipboard().pixmap()
+        self.assertFalse(copied.isNull())
+        self.assertEqual(copied.size(), canvas.canvas.size())
         canvas.deleteLater()
 
     def test_export_controls_do_not_resize_interactive_canvas_when_style_changes(self) -> None:
@@ -299,7 +353,14 @@ class PlotAppearanceGuiTests(unittest.TestCase):
 
             @staticmethod
             def axis_settings() -> AxisSettings:
-                return AxisSettings(label="Frequency", scale="log", minimum="1", maximum="100")
+                return AxisSettings(
+                    label="Frequency",
+                    scale="log",
+                    minimum="1",
+                    maximum="100",
+                    label_font_size=16.0,
+                    tick_font_size=11.0,
+                )
 
             @staticmethod
             def grid_enabled() -> bool:
@@ -316,7 +377,11 @@ class PlotAppearanceGuiTests(unittest.TestCase):
         self.assertEqual(tab._x_scale_combo.currentText(), "log")
         self.assertEqual(tab._x_min_edit.text(), "1")
         self.assertEqual(tab._x_max_edit.text(), "100")
+        self.assertEqual(tab._x_label_size_spin.value(), 16.0)
+        self.assertEqual(tab._x_tick_size_spin.value(), 11.0)
         self.assertEqual(tab._plot_canvas.axes.get_xlabel(), "Frequency")
+        self.assertEqual(tab._plot_canvas.axes.xaxis.label.get_fontsize(), 16.0)
+        self.assertEqual(tab._plot_canvas.axes.get_xticklabels()[0].get_fontsize(), 11.0)
         self.assertEqual(tab._plot_canvas.axes.get_xscale(), "log")
         self.assertFalse(tab._grid_checkbox.isChecked())
         tab.deleteLater()

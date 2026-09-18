@@ -14,7 +14,12 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QDialog
 
 from core.color_scale import ColorScaleCalibration
-from ui.dialogs import ColorPlotDigitizerDialog, FigureDigitizerDialog, FigureExtractionModeDialog
+from ui.dialogs import (
+    ColorPlotDigitizerDialog,
+    FigureDigitizerDialog,
+    FigureExtractionModeDialog,
+    FigureExtractionResult,
+)
 from ui.main_window import MainWindow
 
 
@@ -90,6 +95,105 @@ class FigureDigitizerGuiTests(unittest.TestCase):
 
         self.assertEqual(dialog._plot_bounds(), (0, 199, 0, 119))
         dialog.close()
+
+    def test_multi_curve_session_preserves_image_and_axis_calibration(self) -> None:
+        dialog = FigureDigitizerDialog()
+        image = QImage(100, 80, QImage.Format_RGB888)
+        image.fill(QColor("white"))
+        dialog._image_path = "multi_curve.png"
+        dialog._set_working_image(image)
+        dialog._calibration_pixels = {
+            "x1": (10.0, 70.0),
+            "x2": (90.0, 70.0),
+            "y1": (10.0, 70.0),
+            "y2": (10.0, 10.0),
+        }
+        dialog._x1_value_edit.setText("0")
+        dialog._x2_value_edit.setText("80")
+        dialog._y1_value_edit.setText("0")
+        dialog._y2_value_edit.setText("60")
+        calibration = dict(dialog._calibration_pixels)
+
+        dialog._dataset_name_edit.setText("red curve")
+        dialog._manual_points = [{"pixel_x": 20.0, "pixel_y": 40.0}]
+        dialog._roi_points = [(20.0, 40.0, 5.0)]
+        dialog._save_current_extraction_and_start_new()
+
+        self.assertEqual(dialog._calibration_pixels, calibration)
+        self.assertFalse(dialog._manual_points)
+        self.assertFalse(dialog._roi_points)
+        self.assertEqual(dialog._dataset_name_edit.text(), "red curve Curve 2")
+
+        dialog._dataset_name_edit.setText("blue curve")
+        dialog._manual_points = [{"pixel_x": 60.0, "pixel_y": 25.0}]
+        results = dialog.extraction_results()
+        self.assertEqual([result.dataset_name for result in results], ["red curve", "blue curve"])
+        self.assertEqual([len(result.rows) for result in results], [1, 1])
+        self.assertEqual(results[0].calibration_summary, results[1].calibration_summary)
+        dialog.close()
+
+    def test_main_window_imports_every_saved_figure_curve(self) -> None:
+        class FakeModeDialog:
+            def __init__(self, _parent: object) -> None:
+                pass
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def extraction_mode() -> str:
+                return "xy"
+
+        class FakeDigitizerDialog:
+            def __init__(self, _path: str, _parent: object) -> None:
+                pass
+
+            @staticmethod
+            def image_file_filter() -> str:
+                return "Images (*)"
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def extraction_results() -> list[FigureExtractionResult]:
+                return [
+                    FigureExtractionResult(
+                        dataset_name="curve one",
+                        rows=({"x": 1.0, "y": 2.0, "source_image": "figure.png"},),
+                        source_path="figure.png",
+                        extraction_kind="xy",
+                        calibration_summary="shared calibration",
+                        extraction_summary="manual curve one",
+                    ),
+                    FigureExtractionResult(
+                        dataset_name="curve two",
+                        rows=({"x": 3.0, "y": 4.0, "source_image": "figure.png"},),
+                        source_path="figure.png",
+                        extraction_kind="xy",
+                        calibration_summary="shared calibration",
+                        extraction_summary="manual curve two",
+                    ),
+                ]
+
+        window = MainWindow()
+        with (
+            patch("ui.main_window.FigureExtractionModeDialog", FakeModeDialog),
+            patch("ui.main_window.FigureDigitizerDialog", FakeDigitizerDialog),
+            patch("ui.main_window.QFileDialog.getOpenFileName", return_value=("figure.png", "")),
+            patch.object(window, "_confirm_large_dataset", return_value=True),
+        ):
+            window._import_from_figure()
+
+        self.assertEqual(window._workspace.get_dataset("curve one").frame.iloc[0].tolist(), [1.0, 2.0, "figure.png"])
+        self.assertEqual(window._workspace.get_dataset("curve two").frame.iloc[0].tolist(), [3.0, 4.0, "figure.png"])
+        self.assertIn(
+            "manual curve one",
+            window._workspace.get_dataset("curve one").metadata_for_column("x").comment,
+        )
+        window.close()
 
     def test_colourplot_probe_returns_calibrated_xyz_and_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

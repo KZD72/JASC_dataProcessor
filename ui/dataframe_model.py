@@ -242,6 +242,124 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return len(valid_rows)
 
+    def clear_cells(self, ranges: list[tuple[int, int, int, int]]) -> int:
+        """Clear values inside compact ``(top, left, bottom, right)`` ranges.
+
+        The operation records one undo snapshot regardless of the number of cells
+        and removes whole-column formula metadata for every touched column because
+        the formula result is no longer intact after a partial value deletion.
+        """
+        if self._dataset is None:
+            return 0
+
+        frame = self._dataset.frame
+        row_count = len(frame)
+        column_count = len(frame.columns)
+        selected_rows_by_column: dict[int, set[int]] = {}
+        for top, left, bottom, right in ranges:
+            bounded_top = max(0, min(int(top), row_count - 1))
+            bounded_bottom = max(0, min(int(bottom), row_count - 1))
+            bounded_left = max(0, min(int(left), column_count - 1))
+            bounded_right = max(0, min(int(right), column_count - 1))
+            if (
+                row_count == 0
+                or column_count == 0
+                or bounded_top > bounded_bottom
+                or bounded_left > bounded_right
+            ):
+                continue
+            for column in range(bounded_left, bounded_right + 1):
+                selected_rows_by_column.setdefault(column, set()).update(
+                    range(bounded_top, bounded_bottom + 1)
+                )
+
+        if not selected_rows_by_column:
+            return 0
+
+        active_rows_by_column: dict[int, list[int]] = {}
+        for column, rows in selected_rows_by_column.items():
+            sorted_rows = sorted(rows)
+            values = frame.iloc[sorted_rows, column]
+            active_rows = [
+                row
+                for row, is_present in zip(sorted_rows, values.notna().tolist())
+                if is_present
+            ]
+            if active_rows:
+                active_rows_by_column[column] = active_rows
+        changed_cells = sum(len(rows) for rows in active_rows_by_column.values())
+        if changed_cells == 0:
+            return 0
+
+        self.capture_undo_state()
+        for column, rows in active_rows_by_column.items():
+            column_name = str(frame.columns[column])
+            target = frame.iloc[:, column]
+            if target.dtype.kind == "i":
+                frame[column_name] = target.astype("Int64")
+            elif target.dtype.kind == "u":
+                frame[column_name] = target.astype("UInt64")
+            elif target.dtype.kind == "b":
+                frame[column_name] = target.astype("boolean")
+            frame.iloc[rows, column] = pd.NA
+            self._dataset.formulas.pop(column_name, None)
+        self._dataset.frame = frame
+        top = min(min(rows) for rows in active_rows_by_column.values())
+        bottom = max(max(rows) for rows in active_rows_by_column.values())
+        left = min(active_rows_by_column)
+        right = max(active_rows_by_column)
+        self.dataChanged.emit(
+            self.index(top, left),
+            self.index(bottom, right),
+            [Qt.DisplayRole, Qt.EditRole],
+        )
+        self.history_changed.emit()
+        return changed_cells
+
+    def resize_sheet(self, row_count: int, column_count: int) -> tuple[int, int]:
+        """Resize the worksheet to exact row and column counts in one undo step."""
+        if self._dataset is None:
+            raise ValueError("No dataset is selected.")
+        if row_count < 1 or column_count < 1:
+            raise ValueError("A worksheet must contain at least one row and one column.")
+
+        frame = self._dataset.frame
+        old_row_count, old_column_count = frame.shape
+        if (row_count, column_count) == (old_row_count, old_column_count):
+            return (old_row_count, old_column_count)
+
+        self.capture_undo_state()
+        self.beginResetModel()
+        try:
+            if row_count < old_row_count:
+                frame = frame.iloc[:row_count, :].copy().reset_index(drop=True)
+            elif row_count > old_row_count:
+                frame = frame.reset_index(drop=True).reindex(range(row_count))
+
+            if column_count < old_column_count:
+                removed_names = [str(name) for name in frame.columns[column_count:]]
+                frame = frame.iloc[:, :column_count].copy()
+                for column_name in removed_names:
+                    self._dataset.formulas.pop(column_name, None)
+                    self._dataset.column_metadata.pop(column_name, None)
+            elif column_count > old_column_count:
+                new_names = self._new_column_names(column_count - old_column_count)
+                new_columns = pd.DataFrame(
+                    {
+                        column_name: pd.Series(pd.NA, index=frame.index, dtype="object")
+                        for column_name in new_names
+                    },
+                    index=frame.index,
+                )
+                frame = pd.concat([frame, new_columns], axis=1)
+
+            self._dataset.frame = frame
+            self._dataset.sync_column_metadata_attrs()
+        finally:
+            self.endResetModel()
+            self.history_changed.emit()
+        return (row_count, column_count)
+
     def add_row(self) -> None:
         """Add an empty row to the end of the current dataset."""
         if self._dataset is None:

@@ -14,7 +14,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure
 from matplotlib.path import Path as MplPath
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QVBoxLayout, QWidget
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
 
 from core.workspace import COLUMN_NUMERIC_TYPES, Workspace, dataframe_column_metadata
@@ -146,6 +146,12 @@ class PlotNavigationToolbar(NavigationToolbar2QT):
         """Bind the standard navigation tools to the owning plot canvas."""
         self._plot_canvas_owner = plot_canvas
         super().__init__(plot_canvas.canvas, plot_canvas)
+        self.addSeparator()
+        copy_action = self.addAction("Copy")
+        copy_action.setToolTip("Copy the current plot visualization to the clipboard")
+        copy_action.triggered.connect(
+            lambda _checked=False: plot_canvas.copy_to_clipboard()
+        )
 
     def save_figure(self, *args: object) -> str:
         """Choose a destination and export with the configured physical size."""
@@ -218,6 +224,18 @@ class PlotCanvas(QWidget):
         self._export_width = float(width)
         self._export_height = float(height)
         self._export_size_mode = size_mode
+
+    def copy_to_clipboard(self) -> bool:
+        """Copy the current interactive canvas image without applying export geometry."""
+        application = QApplication.instance()
+        if application is None:
+            return False
+        self.canvas.draw()
+        pixmap = self.canvas.grab()
+        if pixmap.isNull():
+            return False
+        QApplication.clipboard().setPixmap(pixmap)
+        return True
 
     def export_figure(self, file_name: str) -> None:
         """Save using full-image or axes-box dimensions, then restore canvas geometry."""
@@ -418,6 +436,12 @@ class PlotCanvas(QWidget):
         x_limits: tuple[float | None, float | None] = (None, None),
         y_limits: tuple[float | None, float | None] = (None, None),
         right_y_limits: tuple[float | None, float | None] = (None, None),
+        x_label_font_size: float = 0.0,
+        x_tick_font_size: float = 0.0,
+        y_label_font_size: float = 0.0,
+        y_tick_font_size: float = 0.0,
+        right_y_label_font_size: float = 0.0,
+        right_y_tick_font_size: float = 0.0,
         grid_enabled: bool = True,
         legend_settings: LegendSettings | None = None,
         locators: list[PlotLocator] | None = None,
@@ -439,6 +463,12 @@ class PlotCanvas(QWidget):
                     x_limits=x_limits,
                     y_limits=y_limits,
                     right_y_limits=right_y_limits,
+                    x_label_font_size=x_label_font_size,
+                    x_tick_font_size=x_tick_font_size,
+                    y_label_font_size=y_label_font_size,
+                    y_tick_font_size=y_tick_font_size,
+                    right_y_label_font_size=right_y_label_font_size,
+                    right_y_tick_font_size=right_y_tick_font_size,
                     grid_enabled=grid_enabled,
                     legend_settings=legend_settings or LegendSettings(),
                     locators=locators,
@@ -466,6 +496,12 @@ class PlotCanvas(QWidget):
         x_limits: tuple[float | None, float | None],
         y_limits: tuple[float | None, float | None],
         right_y_limits: tuple[float | None, float | None],
+        x_label_font_size: float,
+        x_tick_font_size: float,
+        y_label_font_size: float,
+        y_tick_font_size: float,
+        right_y_label_font_size: float,
+        right_y_tick_font_size: float,
         grid_enabled: bool,
         legend_settings: LegendSettings,
         locators: list[PlotLocator] | None,
@@ -635,8 +671,14 @@ class PlotCanvas(QWidget):
                 located_points=[],
             )
 
-        self.axes.set_xlabel(x_label)
-        self.axes.set_ylabel(y_label)
+        x_label_kwargs = {"fontsize": x_label_font_size} if x_label_font_size > 0 else {}
+        y_label_kwargs = {"fontsize": y_label_font_size} if y_label_font_size > 0 else {}
+        self.axes.set_xlabel(x_label, **x_label_kwargs)
+        self.axes.set_ylabel(y_label, **y_label_kwargs)
+        if x_tick_font_size > 0:
+            self.axes.tick_params(axis="x", labelsize=x_tick_font_size)
+        if y_tick_font_size > 0:
+            self.axes.tick_params(axis="y", labelsize=y_tick_font_size)
         if x_scale == "log":
             self._seed_positive_axis_limits(self.axes, "x", x_axis_values)
         if y_scale == "log":
@@ -649,7 +691,14 @@ class PlotCanvas(QWidget):
             self.axes.grid(False)
 
         if self.right_axes is not None:
-            self.right_axes.set_ylabel(right_y_label)
+            right_label_kwargs = (
+                {"fontsize": right_y_label_font_size}
+                if right_y_label_font_size > 0
+                else {}
+            )
+            self.right_axes.set_ylabel(right_y_label, **right_label_kwargs)
+            if right_y_tick_font_size > 0:
+                self.right_axes.tick_params(axis="y", labelsize=right_y_tick_font_size)
             if right_y_scale == "log":
                 self._seed_positive_axis_limits(self.right_axes, "y", right_y_axis_values)
             self.right_axes.set_yscale(right_y_scale)
