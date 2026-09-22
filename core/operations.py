@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import keyword
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Number
 from typing import Any
@@ -226,6 +226,48 @@ class ExpressionResult:
     updated_rows: int
 
 
+def referenced_worksheet_names(expression: str) -> set[str]:
+    """Return literal worksheet names used by ``sheet(name, column)`` calls."""
+    try:
+        tree = ast.parse(expression.strip(), mode="eval")
+    except SyntaxError:
+        return set()
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "sheet" or not node.args:
+            continue
+        worksheet_arg = node.args[0]
+        if isinstance(worksheet_arg, ast.Constant) and isinstance(worksheet_arg.value, str):
+            names.add(worksheet_arg.value)
+    return names
+
+
+def rename_worksheet_references(expression: str, old_name: str, new_name: str) -> str:
+    """Rename literal ``sheet()`` worksheet references in one expression."""
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return expression
+
+    changed = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "sheet" or not node.args:
+            continue
+        worksheet_arg = node.args[0]
+        if isinstance(worksheet_arg, ast.Constant) and worksheet_arg.value == old_name:
+            worksheet_arg.value = new_name
+            changed = True
+    if not changed:
+        return expression
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+
+
 class _SafeNamespace:
     """Small attribute namespace exposing only explicitly listed members."""
 
@@ -267,13 +309,18 @@ def apply_column_expression(
     target_column: str,
     expression: str,
     row_positions: Sequence[int] | None = None,
+    worksheet_frames: Mapping[str, pd.DataFrame] | None = None,
 ) -> ExpressionResult:
     """Evaluate an expression and write its result into a DataFrame column."""
     clean_target = target_column.strip()
     if not clean_target:
         raise ExpressionError("Choose or enter a target column.")
 
-    values = evaluate_expression(frame, expression)
+    values = evaluate_expression(
+        frame,
+        expression,
+        worksheet_frames=worksheet_frames,
+    )
     target_index = _target_index(frame, row_positions)
 
     if clean_target not in frame.columns:
@@ -287,8 +334,17 @@ def apply_column_expression(
     return ExpressionResult(target_column=clean_target, updated_rows=len(target_index))
 
 
-def evaluate_expression(frame: pd.DataFrame, expression: str) -> pd.Series:
-    """Evaluate a constrained Python expression against DataFrame columns."""
+def evaluate_expression(
+    frame: pd.DataFrame,
+    expression: str,
+    worksheet_frames: Mapping[str, pd.DataFrame] | None = None,
+) -> pd.Series:
+    """Evaluate a constrained expression against columns and workspace sheets.
+
+    Cross-worksheet columns are aligned to the target worksheet by visible row
+    position. Shorter sources are padded with missing values and longer sources
+    are truncated to the target row count.
+    """
     clean_expression = expression.strip()
     if not clean_expression:
         raise ExpressionError("Enter an expression to apply.")
@@ -298,7 +354,7 @@ def evaluate_expression(frame: pd.DataFrame, expression: str) -> pd.Series:
     except SyntaxError as exc:
         raise ExpressionError(f"Expression syntax error: {exc.msg}") from exc
 
-    environment = _build_environment(frame)
+    environment = _build_environment(frame, worksheet_frames=worksheet_frames)
     validator = _ExpressionValidator(
         allowed_names=set(environment),
         callable_names=_callable_names(environment),
@@ -315,7 +371,10 @@ def evaluate_expression(frame: pd.DataFrame, expression: str) -> pd.Series:
     return _coerce_result_to_series(result, frame.index)
 
 
-def _build_environment(frame: pd.DataFrame) -> dict[str, object]:
+def _build_environment(
+    frame: pd.DataFrame,
+    worksheet_frames: Mapping[str, pd.DataFrame] | None = None,
+) -> dict[str, object]:
     """Build the names visible to the expression evaluator."""
     numpy_namespace = _build_numpy_namespace()
     scipy_namespace = _build_scipy_namespace()
@@ -330,6 +389,12 @@ def _build_environment(frame: pd.DataFrame) -> dict[str, object]:
         "np": numpy_namespace,
         "pi": np.pi,
         "row": pd.Series(np.arange(1, len(frame) + 1), index=frame.index),
+        "sheet": lambda sheet_name, column_name: _worksheet_column_by_name(
+            frame,
+            worksheet_frames,
+            sheet_name,
+            column_name,
+        ),
         "scipy": scipy_namespace,
         "signal": scipy_namespace.signal,
         "sp": scipy_namespace,
@@ -431,6 +496,31 @@ def _column_by_name(frame: pd.DataFrame, name: object) -> pd.Series:
     return frame[column_name]
 
 
+def _worksheet_column_by_name(
+    target_frame: pd.DataFrame,
+    worksheet_frames: Mapping[str, pd.DataFrame] | None,
+    worksheet_name: object,
+    column_name: object,
+) -> pd.Series:
+    """Return another worksheet column aligned to target rows by position."""
+    clean_worksheet_name = str(worksheet_name)
+    clean_column_name = str(column_name)
+    if worksheet_frames is None or clean_worksheet_name not in worksheet_frames:
+        raise ExpressionError(f"Worksheet '{clean_worksheet_name}' does not exist.")
+
+    source_frame = worksheet_frames[clean_worksheet_name]
+    if clean_column_name not in source_frame.columns:
+        raise ExpressionError(
+            f"Column '{clean_column_name}' does not exist in worksheet "
+            f"'{clean_worksheet_name}'."
+        )
+
+    positional_values = source_frame[clean_column_name].reset_index(drop=True)
+    aligned_values = positional_values.reindex(pd.RangeIndex(len(target_frame)))
+    aligned_values.index = target_frame.index
+    return aligned_values
+
+
 def _target_index(frame: pd.DataFrame, row_positions: Sequence[int] | None) -> pd.Index:
     """Return the DataFrame index targeted by an expression application."""
     if row_positions is None:
@@ -516,6 +606,18 @@ class _ExpressionValidator(ast.NodeVisitor):
         if isinstance(node.func, ast.Name):
             if node.func.id not in self._callable_names:
                 raise ExpressionError(f"'{node.func.id}' is not callable in expressions.")
+            if node.func.id == "sheet":
+                if len(node.args) != 2 or node.keywords:
+                    raise ExpressionError(
+                        'Use sheet("Worksheet", "Column") with exactly two quoted names.'
+                    )
+                if not all(
+                    isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                    for argument in node.args
+                ):
+                    raise ExpressionError(
+                        'Worksheet references require quoted names: sheet("Worksheet", "Column").'
+                    )
         elif isinstance(node.func, ast.Attribute):
             path = self._attribute_path(node.func)
             if path not in self._callable_attribute_names:

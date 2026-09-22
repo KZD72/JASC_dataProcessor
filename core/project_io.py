@@ -13,13 +13,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from core.workspace import ColumnMetadata, Workspace
+from core.workspace import ColumnMetadata, FigureExtractionSession, Workspace
 from models.fit_functions import CustomFitModel
 
 PROJECT_EXTENSION = ".jasc"
 _META_FILENAME = "project.json"
 _DATASETS_DIR = "datasets"
-_PROJECT_VERSION = 2
+_FIGURE_SESSIONS_DIR = "figure_sessions"
+_PROJECT_VERSION = 3
 
 
 def save_project(workspace: Workspace, path: str | Path) -> None:
@@ -32,16 +33,21 @@ def save_project(workspace: Workspace, path: str | Path) -> None:
     metadata = {
         "version": _PROJECT_VERSION,
         "datasets": [],
+        "figure_sessions": [],
         "plots": [],
         "custom_fit_models": [],
     }
 
     with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        figure_sessions: dict[str, FigureExtractionSession] = {}
         for index, dataset in enumerate(datasets):
             csv_name = f"{_DATASETS_DIR}/{index:04d}_{_sanitise_filename(dataset.name)}.csv"
             with archive.open(csv_name, "w") as raw_csv:
                 with TextIOWrapper(raw_csv, encoding="utf-8", newline="") as csv_stream:
                     dataset.frame.to_csv(csv_stream, index=False)
+
+            if dataset.figure_session is not None:
+                figure_sessions[dataset.figure_session.session_id] = dataset.figure_session
 
             metadata["datasets"].append({
                 "name": dataset.name,
@@ -49,11 +55,30 @@ def save_project(workspace: Workspace, path: str | Path) -> None:
                 "backend": dataset.backend,
                 "source_path": str(dataset.source_path) if dataset.source_path else None,
                 "formulas": dict(dataset.formulas),
+                "figure_session_id": (
+                    dataset.figure_session.session_id
+                    if dataset.figure_session is not None
+                    else None
+                ),
                 "column_metadata": {
                     str(column): entry.to_metadata()
                     for column, entry in dataset.column_metadata.items()
                     if not entry.is_empty()
                 },
+            })
+
+        for index, session in enumerate(figure_sessions.values()):
+            image_name = (
+                f"{_FIGURE_SESSIONS_DIR}/{index:04d}_"
+                f"{_sanitise_filename(session.session_id)}.png"
+            )
+            archive.writestr(image_name, session.image_png)
+            metadata["figure_sessions"].append({
+                "session_id": session.session_id,
+                "extraction_kind": session.extraction_kind,
+                "source_path": session.source_path,
+                "image_file": image_name,
+                "state": session.state,
             })
 
         for plot in workspace.list_plots():
@@ -86,6 +111,22 @@ def load_project(path: str | Path) -> Workspace:
                 f"this application supports (version {_PROJECT_VERSION})."
             )
 
+        figure_sessions: dict[str, FigureExtractionSession] = {}
+        for entry in metadata.get("figure_sessions", []):
+            try:
+                session_id = str(entry["session_id"])
+                image_png = archive.read(str(entry["image_file"]))
+            except (KeyError, TypeError, zipfile.BadZipFile):
+                continue
+            state = entry.get("state")
+            figure_sessions[session_id] = FigureExtractionSession(
+                session_id=session_id,
+                extraction_kind=str(entry.get("extraction_kind", "xy") or "xy"),
+                image_png=image_png,
+                source_path=str(entry.get("source_path", "") or ""),
+                state=dict(state) if isinstance(state, dict) else {},
+            )
+
         for entry in metadata.get("datasets", []):
             with archive.open(entry["csv_file"], "r") as raw_csv:
                 with TextIOWrapper(raw_csv, encoding="utf-8", newline="") as csv_stream:
@@ -103,6 +144,10 @@ def load_project(path: str | Path) -> Workspace:
             formulas = entry.get("formulas")
             if isinstance(formulas, dict):
                 dataset.formulas.update(formulas)
+
+            session_id = entry.get("figure_session_id")
+            if isinstance(session_id, str):
+                dataset.figure_session = figure_sessions.get(session_id)
 
             column_metadata = entry.get("column_metadata")
             if isinstance(column_metadata, dict):

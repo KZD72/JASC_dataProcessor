@@ -76,13 +76,22 @@ from core.data_prep import (
     sort_dataframe,
 )
 from core.file_io import (
+    AUTO_DELIMITER,
+    DelimitedFileInspection,
+    ImportOptions,
     SUPPORTED_EXCEL_EXTENSIONS,
     export_tabular_file,
+    inspect_delimited_file,
     inspect_excel_workbook,
     read_excel_sheets,
     read_tabular_file,
 )
-from core.operations import ExpressionError, ExpressionResult, apply_column_expression
+from core.operations import (
+    ExpressionError,
+    ExpressionResult,
+    apply_column_expression,
+    referenced_worksheet_names,
+)
 from core.workspace import (
     COLUMN_NUMERIC_TYPES,
     ColumnMetadata,
@@ -122,7 +131,7 @@ from math_engine.smoothing import (
     smooth_column,
     smoothing_operation_text,
 )
-from ui.data_table import RangeFillDialog, TableSizeDialog
+from ui.data_table import RangeFillDialog, SmartFillDialog, TableSizeDialog
 from ui.dataframe_model import DataFrameTableModel
 from ui.dialogs import (
     BATCH_COLUMN_BINDING_NAME,
@@ -137,6 +146,7 @@ from ui.dialogs import (
     DataFilterDialog,
     FFTDialog,
     FigureDigitizerDialog,
+    FigureExtractionRequest,
     FigureExtractionResult,
     FigureExtractionModeDialog,
     FitDialog,
@@ -344,6 +354,11 @@ class MainWindow(QMainWindow):
         self._editor_export_button.clicked.connect(self._export_current_dataset)
         self._editor_fill_range_button = QPushButton("Fill Range")
         self._editor_fill_range_button.clicked.connect(self._fill_dataset_range)
+        self._editor_smart_fill_button = QPushButton("Smart Fill")
+        self._editor_smart_fill_button.setToolTip(
+            "Complete blank selected cells from numeric, date-time, category, or custom-list patterns"
+        )
+        self._editor_smart_fill_button.clicked.connect(self._smart_fill_dataset_selection)
         self._editor_metadata_button = QPushButton("Column Metadata")
         self._editor_metadata_button.clicked.connect(self._edit_column_metadata)
 
@@ -353,7 +368,10 @@ class MainWindow(QMainWindow):
         layout.addLayout(self._button_row(self._editor_add_column_button, self._editor_insert_column_button))
         layout.addWidget(self._editor_resize_sheet_button)
         layout.addLayout(self._button_row(self._editor_rename_button, self._editor_remove_button))
-        layout.addLayout(self._button_row(self._editor_fill_range_button, self._editor_metadata_button))
+        layout.addLayout(
+            self._button_row(self._editor_fill_range_button, self._editor_smart_fill_button)
+        )
+        layout.addWidget(self._editor_metadata_button)
         layout.addWidget(self._editor_export_button)
         layout.addStretch(1)
         return panel
@@ -508,8 +526,8 @@ class MainWindow(QMainWindow):
         """Create a normal editable blank worksheet in the Data tab."""
         frame = pd.DataFrame(
             {
-                "x": pd.Series([float("nan")] * 25, dtype="float64"),
-                "y": pd.Series([float("nan")] * 25, dtype="float64"),
+                "x": pd.Series(pd.NA, index=range(25), dtype="object"),
+                "y": pd.Series(pd.NA, index=range(25), dtype="object"),
             }
         )
         try:
@@ -519,10 +537,8 @@ class MainWindow(QMainWindow):
             return
 
         dataset.metadata_for_column("x").role = "x"
-        dataset.metadata_for_column("x").value_type = "numeric"
         dataset.metadata_for_column("x").comment = "Default X column for a blank worksheet."
         dataset.metadata_for_column("y").role = "y"
-        dataset.metadata_for_column("y").value_type = "numeric"
         dataset.metadata_for_column("y").comment = "Default Y column for a blank worksheet."
         dataset.sync_column_metadata_attrs()
 
@@ -587,6 +603,62 @@ class MainWindow(QMainWindow):
         column_index = list(dataset.frame.columns).index(column_name)
         self._select_dataset_range(dialog.start_row() - 1, column_index, dialog.count(), 1)
         self.statusBar().showMessage(f"Filled {dialog.count()} value(s) in {dataset.name}.{column_name}")
+
+    def _smart_fill_dataset_selection(self) -> None:
+        """Complete blank cells in one selected rectangle from numeric seed values."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(
+                self,
+                "Smart Fill",
+                "Select a dataset before using Smart Fill.",
+            )
+            return
+
+        ranges = self._selected_dataset_ranges()
+        if len(ranges) != 1:
+            QMessageBox.information(
+                self,
+                "Smart Fill",
+                "Select one contiguous rectangular range containing seed values and blank cells.",
+            )
+            return
+
+        top, left, bottom, right = ranges[0]
+        column_names = [str(column) for column in dataset.frame.columns[left : right + 1]]
+        if len(column_names) == 1:
+            columns_text = f"column {column_names[0]}"
+        else:
+            columns_text = f"{len(column_names)} columns ({column_names[0]} to {column_names[-1]})"
+        dialog = SmartFillDialog(
+            f"Rows {top + 1}-{bottom + 1}, {columns_text}",
+            parent=self,
+        )
+        if dialog.exec() != SmartFillDialog.Accepted:
+            return
+
+        try:
+            plans = self._dataset_model.smart_fill_selection(
+                top,
+                bottom,
+                left,
+                right,
+                mode=dialog.mode(),
+                period=dialog.period(),
+                custom_values=dialog.custom_values(),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Smart Fill Failed", str(exc))
+            return
+
+        self._plot_tab_widget.refresh_controls(dataset.name)
+        self._update_dataset_summary()
+        self._select_dataset_range(top, left, bottom - top + 1, right - left + 1)
+        filled_count = sum(plan.filled_count for plan in plans.values())
+        patterns = ", ".join(sorted({plan.description for plan in plans.values()}))
+        self.statusBar().showMessage(
+            f"Smart Fill completed {filled_count} blank cell(s) in {dataset.name} ({patterns})"
+        )
 
     def _run_filter_query(self) -> None:
         """Create a filtered copy of a dataset from one simple condition."""
@@ -1110,6 +1182,9 @@ class MainWindow(QMainWindow):
         duplicate_dataset_action = data_menu.addAction("D&uplicate Dataset")
         duplicate_dataset_action.triggered.connect(self._duplicate_current_dataset)
 
+        resume_figure_action = data_menu.addAction("Resume &Figure Extraction...")
+        resume_figure_action.triggered.connect(self._resume_figure_extraction)
+
         delete_dataset_action = data_menu.addAction("Remo&ve Dataset...")
         delete_dataset_action.triggered.connect(self._delete_current_dataset)
 
@@ -1134,6 +1209,9 @@ class MainWindow(QMainWindow):
 
         fill_range_action = data_menu.addAction("&Fill Range...")
         fill_range_action.triggered.connect(self._fill_dataset_range)
+
+        smart_fill_action = data_menu.addAction("Smart Fill &Selection...")
+        smart_fill_action.triggered.connect(self._smart_fill_dataset_selection)
 
         data_menu.addSeparator()
 
@@ -1255,10 +1333,12 @@ class MainWindow(QMainWindow):
         self._paste_transposed_action = paste_transposed_action
         self._rename_dataset_action = rename_dataset_action
         self._duplicate_dataset_action = duplicate_dataset_action
+        self._resume_figure_action = resume_figure_action
         self._delete_dataset_action = delete_dataset_action
         self._add_column_action = add_column_action
         self._insert_column_action = insert_column_action
         self._fill_range_action = fill_range_action
+        self._smart_fill_action = smart_fill_action
         self._column_metadata_action = column_metadata_action
         self._remove_duplicates_action = remove_duplicates_action
         self._apply_formula_action = apply_formula_action
@@ -1800,22 +1880,33 @@ class MainWindow(QMainWindow):
         )
 
     def _import_data_file(self) -> None:
-        """Open a delimited file or modern Excel workbook."""
-        file_name, _selected_filter = QFileDialog.getOpenFileName(
+        """Open one workbook or batch-import delimited files with shared rules."""
+        file_names, _selected_filter = QFileDialog.getOpenFileNames(
             self,
-            "Import Data File",
+            "Import Data File(s)",
             "",
-            "Data Files (*.csv *.txt *.xlsx *.xlsm);;Excel Workbooks (*.xlsx *.xlsm);;"
-            "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)",
+            "Data Files (*.csv *.dat *.txt *.xlsx *.xlsm);;"
+            "Delimited Text (*.csv *.dat *.txt);;Excel Workbooks (*.xlsx *.xlsm);;"
+            "All Files (*)",
         )
-        if not file_name:
+        if not file_names:
             return
 
-        path = Path(file_name)
-        if path.suffix.lower() in SUPPORTED_EXCEL_EXTENSIONS:
-            self._import_excel_workbook(path)
+        paths = [Path(file_name) for file_name in file_names]
+        excel_paths = [path for path in paths if path.suffix.lower() in SUPPORTED_EXCEL_EXTENSIONS]
+        if excel_paths:
+            if len(paths) != 1:
+                QMessageBox.warning(
+                    self,
+                    "Mixed Batch Import",
+                    "Import one Excel workbook at a time, or select only CSV/DAT/TXT files "
+                    "for a multi-file import.",
+                )
+                self.statusBar().showMessage("Mixed-format batch import cancelled")
+                return
+            self._import_excel_workbook(excel_paths[0])
             return
-        if path.suffix.lower() in {".xls", ".xlsb"}:
+        if any(path.suffix.lower() in {".xls", ".xlsb"} for path in paths):
             QMessageBox.warning(
                 self,
                 "Unsupported Excel Format",
@@ -1825,38 +1916,159 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Unsupported Excel format")
             return
 
-        dialog = ImportOptionsDialog(self)
+        for path in paths:
+            if not self._confirm_large_file_import(path):
+                self.statusBar().showMessage("Batch import cancelled")
+                return
+
+        inspections: list[DelimitedFileInspection] = []
+        inspection_errors: list[str] = []
+        for path in paths:
+            try:
+                inspections.append(inspect_delimited_file(path))
+            except Exception as exc:
+                inspection_errors.append(f"{path.name}: {exc}")
+        if inspection_errors:
+            QMessageBox.critical(
+                self,
+                "Import Preflight Failed",
+                "One or more files could not be inspected:\n\n" + "\n".join(inspection_errors),
+            )
+            self.statusBar().showMessage("Batch import preflight failed")
+            return
+
+        dialog = ImportOptionsDialog(self, inspections=inspections)
         if dialog.exec() != ImportOptionsDialog.Accepted:
             return
+        options = dialog.options()
 
-        if not self._confirm_large_file_import(path):
-            self.statusBar().showMessage("Import cancelled")
+        effective_inspections = inspections
+        try:
+            if options.delimiter != AUTO_DELIMITER:
+                effective_inspections = [
+                    inspect_delimited_file(
+                        path,
+                        delimiter=options.delimiter,
+                        skip_rows=options.skip_rows,
+                    )
+                    for path in paths
+                ]
+            elif options.skip_rows is not None:
+                effective_inspections = [
+                    inspect_delimited_file(path, skip_rows=options.skip_rows)
+                    for path in paths
+                ]
+        except Exception as exc:
+            QMessageBox.critical(self, "Import Preflight Failed", str(exc))
+            self.statusBar().showMessage("Batch import preflight failed")
             return
 
-        try:
-            frame = read_tabular_file(path, dialog.options())
-            if not self._confirm_large_dataset(
-                frame,
-                title="Large Dataset",
-                source_label=path.name,
-            ):
-                self.statusBar().showMessage("Import cancelled")
+        pattern_choice = "keep"
+        if len(paths) > 1 and options.has_header is None:
+            pattern_choice = self._confirm_delimited_batch_pattern(effective_inspections)
+            if pattern_choice == "cancel":
+                self.statusBar().showMessage("Batch import cancelled")
                 return
-            dataset = self._workspace.add_dataset(
-                path.stem,
-                frame,
-                source_path=path,
-                copy_frame=False,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Import Failed", str(exc))
+
+        imported: list[Dataset] = []
+        import_errors: list[str] = []
+        for path, inspection in zip(paths, effective_inspections, strict=True):
+            file_options = options
+            if pattern_choice == "generic":
+                metadata_rows = (
+                    inspection.metadata_rows
+                    if options.skip_rows is None
+                    else options.skip_rows
+                )
+                file_options = ImportOptions(
+                    delimiter=inspection.delimiter,
+                    has_header=False,
+                    encoding=options.encoding,
+                    skip_rows=metadata_rows + (1 if inspection.has_header else 0),
+                )
+            try:
+                frame = read_tabular_file(path, file_options)
+                if not self._confirm_large_dataset(
+                    frame,
+                    title="Large Dataset",
+                    source_label=path.name,
+                ):
+                    import_errors.append(f"{path.name}: skipped after large-dataset warning")
+                    continue
+                imported.append(
+                    self._workspace.add_dataset(
+                        path.stem,
+                        frame,
+                        source_path=path,
+                        copy_frame=False,
+                    )
+                )
+            except Exception as exc:
+                import_errors.append(f"{path.name}: {exc}")
+
+        if not imported:
+            detail = "\n".join(import_errors) or "No files were imported."
+            QMessageBox.critical(self, "Import Failed", detail)
             self.statusBar().showMessage("Import failed")
             return
 
-        self._refresh_dataset_list(dataset.name)
+        self._refresh_dataset_list(imported[-1].name)
+        if import_errors:
+            QMessageBox.warning(
+                self,
+                "Batch Import Completed with Warnings",
+                "\n".join(import_errors),
+            )
+        total_rows = sum(len(dataset.frame) for dataset in imported)
         self.statusBar().showMessage(
-            f"Imported {dataset.name}: {len(dataset.frame)} rows, {len(dataset.frame.columns)} columns"
+            f"Imported {len(imported)} file(s) as datasets, {total_rows} total row(s)"
         )
+
+    def _confirm_delimited_batch_pattern(
+        self,
+        inspections: list[DelimitedFileInspection],
+    ) -> str:
+        """Resolve mixed/mismatched auto-detected headers in a delimited batch."""
+        header_states = {inspection.has_header for inspection in inspections}
+        detected_headers = {
+            tuple(inspection.column_names)
+            for inspection in inspections
+            if inspection.has_header
+        }
+        if len(header_states) <= 1 and len(detected_headers) <= 1:
+            return "keep"
+
+        reasons: list[str] = []
+        if len(header_states) > 1:
+            reasons.append("some files appear to have headers while others do not")
+        if len(detected_headers) > 1:
+            reasons.append("the detected header names differ between files")
+        details = "\n".join(
+            f"• {inspection.path.name}: "
+            f"{'header ' + ', '.join(inspection.column_names) if inspection.has_header else 'no header'}"
+            for inspection in inspections
+        )
+
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Warning)
+        message_box.setWindowTitle("Batch Header Pattern Mismatch")
+        message_box.setText("The selected files do not share one header pattern.")
+        message_box.setInformativeText(
+            f"Detected: {' and '.join(reasons)}.\n\n{details}\n\n"
+            "Keep Detected imports each file with its inferred headers. Use Generic Columns "
+            "drops detected header rows and names every dataset Column 1, Column 2, and so on."
+        )
+        keep_button = message_box.addButton("Keep Detected", QMessageBox.AcceptRole)
+        generic_button = message_box.addButton("Use Generic Columns", QMessageBox.DestructiveRole)
+        cancel_button = message_box.addButton("Cancel Batch", QMessageBox.RejectRole)
+        message_box.setDefaultButton(cancel_button)
+        message_box.exec()
+        clicked = message_box.clickedButton()
+        if clicked is keep_button:
+            return "keep"
+        if clicked is generic_button:
+            return "generic"
+        return "cancel"
 
     def _import_excel_workbook(self, path: Path) -> None:
         """Import selected worksheet tabs as independent value-only datasets."""
@@ -1953,7 +2165,74 @@ class MainWindow(QMainWindow):
 
         dialog_class = ColorPlotDigitizerDialog if extraction_mode == "colorplot" else FigureDigitizerDialog
         dialog = dialog_class(file_name, self)
-        if dialog.exec() != QDialog.Accepted:
+        self._run_figure_digitizer_dialog(dialog, extraction_mode)
+
+    def _resume_figure_extraction(self) -> None:
+        """Reopen the embedded image and calibration attached to a dataset."""
+        dataset = self._current_dataset()
+        if dataset is None or dataset.figure_session is None:
+            QMessageBox.information(
+                self,
+                "Resume Figure Extraction",
+                "Select a figure-extracted dataset with a saved image and calibration.",
+            )
+            return
+
+        session = dataset.figure_session
+        dialog_class = (
+            ColorPlotDigitizerDialog
+            if session.extraction_kind == "colorplot"
+            else FigureDigitizerDialog
+        )
+        dialog = dialog_class(parent=self, session=session)
+        self._run_figure_digitizer_dialog(dialog, session.extraction_kind)
+
+    def _run_figure_digitizer_dialog(self, dialog: QDialog, extraction_mode: str) -> None:
+        """Run a digitizer and import live or legacy result payloads."""
+        imported_datasets: list[Dataset] = []
+        skipped_messages: list[str] = []
+        extraction_signal = getattr(dialog, "extraction_created", None)
+        supports_live_creation = hasattr(extraction_signal, "connect")
+
+        def import_live_result(result: object) -> None:
+            request = result if isinstance(result, FigureExtractionRequest) else None
+            extraction_result = request.result if request is not None else result
+            if not isinstance(extraction_result, FigureExtractionResult):
+                return
+            imported, skipped = self._import_figure_results([extraction_result])
+            imported_datasets.extend(imported)
+            skipped_messages.extend(skipped)
+            if request is not None:
+                request.imported = bool(imported)
+                if not request.imported:
+                    request.error = "\n".join(skipped) or "The dataset was not imported."
+
+        if supports_live_creation:
+            extraction_signal.connect(import_live_result)
+
+        outcome = dialog.exec()
+
+        if supports_live_creation:
+            queued_method = getattr(dialog, "queued_extraction_results", None)
+            queued_results = queued_method() if callable(queued_method) else []
+            if queued_results:
+                imported, skipped = self._import_figure_results(queued_results)
+                imported_datasets.extend(imported)
+                skipped_messages.extend(skipped)
+            if imported_datasets:
+                self._report_figure_import(imported_datasets, skipped_messages)
+            elif skipped_messages:
+                QMessageBox.warning(
+                    self,
+                    "Import From Figure Failed",
+                    "\n".join(skipped_messages),
+                )
+                self.statusBar().showMessage("Figure import failed")
+            else:
+                self.statusBar().showMessage("Figure extraction closed without creating a dataset")
+            return
+
+        if outcome != QDialog.Accepted:
             self.statusBar().showMessage("Figure import cancelled")
             return
 
@@ -1975,8 +2254,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Import From Figure", "No extracted points were created.")
             return
 
+        imported, skipped = self._import_figure_results(results)
+        if not imported:
+            detail = "\n".join(skipped) or "No extracted curves were imported."
+            QMessageBox.warning(self, "Import From Figure Failed", detail)
+            self.statusBar().showMessage("Figure import failed")
+            return
+        self._report_figure_import(imported, skipped)
+
+    def _import_figure_results(
+        self,
+        results: list[FigureExtractionResult],
+    ) -> tuple[list[Dataset], list[str]]:
+        """Import digitizer results and attach their resumable figure sessions."""
         imported: list[Dataset] = []
         skipped: list[str] = []
+
         for result in results:
             frame = self._figure_extraction_frame(result.rows)
             if not self._confirm_large_dataset(
@@ -1987,6 +2280,14 @@ class MainWindow(QMainWindow):
                 skipped.append(f"{result.dataset_name}: skipped after large-dataset warning")
                 continue
             try:
+                if result.figure_session is not None:
+                    for existing_dataset in self._workspace.list_datasets():
+                        existing_session = existing_dataset.figure_session
+                        if (
+                            existing_session is not None
+                            and existing_session.session_id == result.figure_session.session_id
+                        ):
+                            existing_dataset.figure_session = result.figure_session
                 dataset = self._workspace.add_dataset(
                     result.dataset_name,
                     frame,
@@ -1994,17 +2295,17 @@ class MainWindow(QMainWindow):
                     copy_frame=False,
                 )
                 self._apply_figure_extraction_metadata(dataset, result)
+                dataset.figure_session = result.figure_session
                 imported.append(dataset)
             except Exception as exc:
                 skipped.append(f"{result.dataset_name}: {exc}")
 
-        if not imported:
-            detail = "\n".join(skipped) or "No extracted curves were imported."
-            QMessageBox.warning(self, "Import From Figure Failed", detail)
-            self.statusBar().showMessage("Figure import failed")
-            return
+        if imported:
+            self._refresh_dataset_list(imported[-1].name)
+        return imported, skipped
 
-        self._refresh_dataset_list(imported[-1].name)
+    def _report_figure_import(self, imported: list[Dataset], skipped: list[str]) -> None:
+        """Report the cumulative outcome of one figure-digitizer session."""
         total_points = sum(len(dataset.frame) for dataset in imported)
         self.statusBar().showMessage(
             f"Imported {len(imported)} figure curve(s), {total_points} total point(s)"
@@ -2589,16 +2890,20 @@ class MainWindow(QMainWindow):
         return plan_rows
 
     def _apply_column_formula(self) -> None:
-        """Apply a safe expression to all or selected rows in a column."""
+        """Apply a safe expression to an entire column or selected target cells."""
         dataset = self._current_dataset()
         if dataset is None:
             QMessageBox.information(self, "Apply Formula", "Select a dataset before applying a formula.")
             return
 
-        selected_rows = self._selected_dataset_rows()
+        selected_cell_columns = {
+            str(dataset.frame.columns[column_index])
+            for column_index in range(len(dataset.frame.columns))
+            if self._dataset_selection_contains_column(column_index)
+        }
         dialog = ColumnExpressionDialog(
             column_names=[str(column) for column in dataset.frame.columns],
-            selected_rows_available=bool(selected_rows),
+            selected_rows_available=bool(selected_cell_columns),
             default_target=self._default_formula_target(dataset),
             column_formulas=dataset.formulas,
             dataset_names=[
@@ -2607,12 +2912,22 @@ class MainWindow(QMainWindow):
                 if len(candidate.frame.columns) > 0
             ],
             current_dataset_name=dataset.name,
+            worksheet_columns={
+                candidate.name: [str(column) for column in candidate.frame.columns]
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            },
+            selected_cell_columns=selected_cell_columns,
             parent=self,
         )
         if dialog.exec() != ColumnExpressionDialog.Accepted:
             return
 
-        row_positions = selected_rows if dialog.apply_selected_rows_only() else None
+        row_positions = (
+            self._selected_dataset_rows_in_column(dialog.target_column())
+            if dialog.apply_selected_rows_only()
+            else None
+        )
         target_dataset_names = dialog.target_dataset_names()
         expression = dialog.expression()
         target_column = dialog.target_column()
@@ -2835,12 +3150,20 @@ class MainWindow(QMainWindow):
             f"Formula = {expression.strip()} "
             f"({self._batch_column_binding_label(column_binding_mode)})"
         )
+        worksheet_frames = self._formula_worksheet_frames(expression)
         if use_visible_model:
             result = self._dataset_model.apply_expression(
                 target_column=target_column,
                 expression=expression,
                 row_positions=row_positions,
+                worksheet_frames=worksheet_frames,
             )
+            if row_positions is not None:
+                operation_comment = (
+                    f"Cell formula = {expression.strip()} "
+                    f"({len(row_positions)} selected cells; "
+                    f"{self._batch_column_binding_label(column_binding_mode)})"
+                )
             set_column_operation_comment(dataset, result.target_column, operation_comment)
             return result
 
@@ -2850,10 +3173,14 @@ class MainWindow(QMainWindow):
             target_column=target_column,
             expression=expression,
             row_positions=row_positions,
+            worksheet_frames=worksheet_frames,
         )
         if target_frame is not dataset.frame:
             dataset.frame[result.target_column] = target_frame[result.target_column].reindex(dataset.frame.index)
-        dataset.formulas[result.target_column] = expression.strip()
+        if row_positions is None:
+            dataset.formulas[result.target_column] = expression.strip()
+        else:
+            dataset.formulas.pop(result.target_column, None)
         set_column_operation_comment(
             dataset,
             result.target_column,
@@ -2861,6 +3188,16 @@ class MainWindow(QMainWindow):
         )
         dataset.prune_column_metadata()
         return result
+
+    def _formula_worksheet_frames(self, expression: str) -> dict[str, pd.DataFrame]:
+        """Return only workspace frames named by cross-worksheet formula calls."""
+        frames: dict[str, pd.DataFrame] = {}
+        for worksheet_name in referenced_worksheet_names(expression):
+            try:
+                frames[worksheet_name] = self._workspace.get_dataset(worksheet_name).frame
+            except KeyError:
+                continue
+        return frames
 
     def _formula_batch_target_plan(
         self,
@@ -3107,6 +3444,7 @@ class MainWindow(QMainWindow):
                         target_dataset=target_dataset,
                         binding_mode=column_binding_mode,
                     ),
+                    worksheet_frames=self._formula_worksheet_frames(expression),
                 )
             )
 
@@ -8351,6 +8689,8 @@ class MainWindow(QMainWindow):
             self._resize_current_sheet()
         elif action == edit_actions["fill_range"]:
             self._fill_dataset_range()
+        elif action == edit_actions["smart_fill"]:
+            self._smart_fill_dataset_selection()
         elif action == edit_actions["metadata"]:
             self._edit_column_metadata()
         elif action == plot_action:
@@ -8382,6 +8722,8 @@ class MainWindow(QMainWindow):
         columns_menu.addSeparator()
         fill_range_action = columns_menu.addAction("Fill Range...")
         fill_range_action.setEnabled(has_dataset)
+        smart_fill_action = columns_menu.addAction("Smart Fill Selection...")
+        smart_fill_action.setEnabled(has_dataset and has_selection)
         metadata_action = columns_menu.addAction("Column Metadata...")
         metadata_action.setEnabled(has_dataset)
         menu.addSeparator()
@@ -8395,6 +8737,7 @@ class MainWindow(QMainWindow):
             "insert_column": insert_column_action,
             "delete_columns": delete_columns_action,
             "fill_range": fill_range_action,
+            "smart_fill": smart_fill_action,
             "metadata": metadata_action,
             "resize_sheet": resize_sheet_action,
         }
@@ -8865,6 +9208,23 @@ class MainWindow(QMainWindow):
             rows.update(range(selection_range.top(), selection_range.bottom() + 1))
         return sorted(rows)
 
+    def _selected_dataset_rows_in_column(self, column_name: str) -> list[int]:
+        """Return selected row positions that specifically touch one column."""
+        dataset = self._current_dataset()
+        selection_model = self._dataset_table.selectionModel()
+        if dataset is None or selection_model is None:
+            return []
+        try:
+            column_index = [str(column) for column in dataset.frame.columns].index(column_name)
+        except ValueError:
+            return []
+
+        rows: set[int] = set()
+        for selection_range in selection_model.selection():
+            if selection_range.left() <= column_index <= selection_range.right():
+                rows.update(range(selection_range.top(), selection_range.bottom() + 1))
+        return sorted(rows)
+
     def _update_dataset_summary(self) -> None:
         """Update dataset summary text and action enabled states."""
         dataset = self._dataset_model.dataset
@@ -8886,9 +9246,11 @@ class MainWindow(QMainWindow):
                 metadata_bits.append(f"{role_count} role(s)")
             metadata_text = f", {', '.join(metadata_bits)}" if metadata_bits else ""
             backend_text = f", backend={dataset.backend}" if dataset.backend != PANDAS_BACKEND else ""
+            figure_text = ", resumable figure session" if dataset.figure_session is not None else ""
             self._dataset_summary.setText(
                 f"{dataset.name}: {len(dataset.frame)} rows, "
-                f"{len(dataset.frame.columns)} columns{formula_text}{metadata_text}{backend_text}"
+                f"{len(dataset.frame.columns)} columns{formula_text}{metadata_text}"
+                f"{backend_text}{figure_text}"
             )
 
         self._export_action.setEnabled(has_dataset)
@@ -8898,11 +9260,15 @@ class MainWindow(QMainWindow):
         self._paste_transposed_action.setEnabled(has_dataset)
         self._rename_dataset_action.setEnabled(has_dataset)
         self._duplicate_dataset_action.setEnabled(has_dataset)
+        self._resume_figure_action.setEnabled(
+            bool(dataset is not None and dataset.figure_session is not None)
+        )
         self._delete_dataset_action.setEnabled(has_dataset)
         self._add_column_action.setEnabled(has_dataset)
         self._add_row_action.setEnabled(has_dataset)
         self._insert_column_action.setEnabled(has_dataset)
         self._fill_range_action.setEnabled(has_dataset)
+        self._smart_fill_action.setEnabled(has_dataset)
         self._column_metadata_action.setEnabled(has_dataset)
         self._insert_row_action.setEnabled(has_dataset)
         self._resize_sheet_action.setEnabled(has_dataset)
@@ -8929,6 +9295,7 @@ class MainWindow(QMainWindow):
         self._editor_remove_button.setEnabled(has_dataset)
         self._editor_export_button.setEnabled(has_dataset)
         self._editor_fill_range_button.setEnabled(has_dataset)
+        self._editor_smart_fill_button.setEnabled(has_dataset)
         self._editor_metadata_button.setEnabled(has_dataset)
         for button in getattr(self, "_data_prep_buttons", []):
             button.setEnabled(has_dataset)
@@ -9328,6 +9695,8 @@ class MainWindow(QMainWindow):
             self._start_plot_for_current_dataset()
         elif action == actions["export"]:
             self._export_current_dataset()
+        elif action == actions["resume_figure"]:
+            self._resume_figure_extraction()
         elif action == actions["duplicate"]:
             self._duplicate_dataset(dataset_name)
         elif action == actions["rename"]:
@@ -9341,6 +9710,11 @@ class MainWindow(QMainWindow):
         open_action = menu.addAction("Open Sheet")
         plot_action = menu.addAction("Create Plot from Dataset")
         export_action = menu.addAction("Export Dataset...")
+        resume_figure_action = menu.addAction("Resume Figure Extraction...")
+        dataset = self._current_dataset()
+        resume_figure_action.setEnabled(
+            bool(dataset is not None and dataset.figure_session is not None)
+        )
         self._add_dataset_workflow_submenus(menu)
         menu.addSeparator()
         duplicate_action = menu.addAction("Duplicate Sheet")
@@ -9350,6 +9724,7 @@ class MainWindow(QMainWindow):
             "open": open_action,
             "plot": plot_action,
             "export": export_action,
+            "resume_figure": resume_figure_action,
             "duplicate": duplicate_action,
             "rename": rename_action,
             "remove": delete_action,

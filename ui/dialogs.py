@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import uuid
 from dataclasses import dataclass
 from html import escape
 
@@ -11,7 +12,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -54,11 +55,17 @@ from PySide6.QtWidgets import (
 from scipy import ndimage, signal
 
 from core.color_scale import ColorScaleCalibration
-from core.file_io import ExcelWorkbookInspection, ImportOptions
+from core.file_io import (
+    AUTO_DELIMITER,
+    DelimitedFileInspection,
+    ExcelWorkbookInspection,
+    ImportOptions,
+)
 from core.workspace import (
     COLUMN_ROLE_OPTIONS,
     COLUMN_TYPE_OPTIONS,
     ColumnMetadata,
+    FigureExtractionSession,
     column_role_label,
     normalize_display_precision,
 )
@@ -978,45 +985,134 @@ class BinningDialog(QDialog):
 
 
 class ImportOptionsDialog(QDialog):
-    """Collect delimiter and header settings before importing a text file."""
+    """Review inferred delimited-file structure and choose batch import rules."""
 
     _DELIMITERS: tuple[tuple[str, str], ...] = (
+        ("Auto (infer from file)", AUTO_DELIMITER),
         ("Comma (,)", ","),
         ("Semicolon (;)", ";"),
         ("Tab", "\t"),
+        ("Pipe (|)", "|"),
         ("Space / whitespace", " "),
     )
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        """Create the delimiter and header-selection controls."""
+    _HEADER_MODES: tuple[tuple[str, str], ...] = (
+        ("Auto (detect for each file)", "auto"),
+        ("First tabular row contains column names", "header"),
+        ("No header row", "none"),
+    )
+    _METADATA_MODES: tuple[tuple[str, str], ...] = (
+        ("Auto (discard detected leading metadata)", "auto"),
+        ("Keep all leading rows", "none"),
+        ("Discard a fixed number of leading rows", "fixed"),
+    )
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        inspections: list[DelimitedFileInspection] | tuple[DelimitedFileInspection, ...] = (),
+    ) -> None:
+        """Create parser controls and an optional multi-file preflight table."""
         super().__init__(parent)
         self.setWindowTitle("Import Options")
         self.setModal(True)
+        self._inspections = tuple(inspections)
+        if self._inspections:
+            self.resize(980, 520)
 
         self._delimiter_combo = QComboBox()
         for label, delimiter in self._DELIMITERS:
             self._delimiter_combo.addItem(label, delimiter)
 
-        self._header_checkbox = QCheckBox("First row contains column names")
-        self._header_checkbox.setChecked(True)
+        self._header_combo = QComboBox()
+        for label, mode in self._HEADER_MODES:
+            self._header_combo.addItem(label, mode)
+
+        self._metadata_combo = QComboBox()
+        for label, mode in self._METADATA_MODES:
+            self._metadata_combo.addItem(label, mode)
+        self._metadata_rows = QSpinBox()
+        self._metadata_rows.setRange(0, 1_000_000)
+        self._metadata_rows.setValue(0)
+        self._metadata_rows.setEnabled(False)
+        self._metadata_combo.currentIndexChanged.connect(self._sync_metadata_controls)
 
         form = QFormLayout()
         form.addRow("Delimiter", self._delimiter_combo)
-        form.addRow("", self._header_checkbox)
+        form.addRow("Headers", self._header_combo)
+        form.addRow("Leading metadata", self._metadata_combo)
+        form.addRow("Rows to discard", self._metadata_rows)
+
+        hint = QLabel(
+            "Auto inspects each file independently. Detected leading preamble/metadata rows "
+            "are excluded before header detection. Review the table and use fixed rules when "
+            "the source format is known."
+        )
+        hint.setWordWrap(True)
+
+        self._inspection_table = QTableWidget(len(self._inspections), 7)
+        self._inspection_table.setHorizontalHeaderLabels(
+            ["File", "Delimiter", "Metadata rows", "Header", "Columns", "Names", "Data preview"]
+        )
+        self._inspection_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._inspection_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._inspection_table.verticalHeader().setVisible(False)
+        header = self._inspection_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for column in (1, 2, 3, 4):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        for row, inspection in enumerate(self._inspections):
+            preview = " | ".join(
+                ", ".join(values) for values in inspection.preview_rows[:2]
+            )
+            values = (
+                inspection.path.name,
+                inspection.delimiter_label,
+                str(inspection.metadata_rows),
+                "Detected" if inspection.has_header else "Not detected",
+                str(inspection.column_count),
+                ", ".join(inspection.column_names),
+                preview,
+            )
+            for column, value in enumerate(values):
+                self._inspection_table.setItem(row, column, QTableWidgetItem(value))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(hint)
         layout.addLayout(form)
+        if self._inspections:
+            layout.addWidget(self._inspection_table, 1)
         layout.addWidget(buttons)
+
+    def _sync_metadata_controls(self) -> None:
+        """Enable the fixed-row count only when that override is selected."""
+        self._metadata_rows.setEnabled(self._metadata_combo.currentData() == "fixed")
 
     def options(self) -> ImportOptions:
         """Return the selected parser options."""
+        header_mode = str(self._header_combo.currentData())
+        metadata_mode = str(self._metadata_combo.currentData())
+        has_header = None
+        if header_mode == "header":
+            has_header = True
+        elif header_mode == "none":
+            has_header = False
+        skip_rows = None
+        if metadata_mode == "none":
+            skip_rows = 0
+        elif metadata_mode == "fixed":
+            skip_rows = self._metadata_rows.value()
         return ImportOptions(
             delimiter=str(self._delimiter_combo.currentData()),
-            has_header=self._header_checkbox.isChecked(),
+            has_header=has_header,
+            skip_rows=skip_rows,
         )
 
 
@@ -1387,10 +1483,22 @@ class FigureExtractionResult:
     extraction_kind: str
     calibration_summary: str
     extraction_summary: str
+    figure_session: FigureExtractionSession | None = None
+
+
+@dataclass(slots=True)
+class FigureExtractionRequest:
+    """Synchronous UI-thread request to import one live digitizer result."""
+
+    result: FigureExtractionResult
+    imported: bool = False
+    error: str = ""
 
 
 class FigureDigitizerDialog(QDialog):
     """Import a raster figure and extract calibrated XY data from it."""
+
+    extraction_created = Signal(object)
 
     _IMAGE_FILTER = (
         "Image Files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif);;"
@@ -1414,6 +1522,7 @@ class FigureDigitizerDialog(QDialog):
         self,
         image_path: str | None = None,
         parent: QWidget | None = None,
+        session: FigureExtractionSession | None = None,
     ) -> None:
         """Build the figure digitizer workspace."""
         super().__init__(parent)
@@ -1446,7 +1555,9 @@ class FigureDigitizerDialog(QDialog):
         self._symbol_template_mask: np.ndarray | None = None
         self._symbol_template_color: tuple[float, float, float] | None = None
         self._saved_extractions: list[FigureExtractionResult] = []
+        self._created_extractions: list[FigureExtractionResult] = []
         self._multi_curve_name_root = ""
+        self._figure_session_id = session.session_id if session is not None else uuid.uuid4().hex
 
         self._view = FigureDigitizerView()
         self._view.setScene(self._scene)
@@ -1505,31 +1616,39 @@ class FigureDigitizerDialog(QDialog):
         canvas_widget = QWidget()
         canvas_widget.setLayout(canvas_layout)
 
-        controls = QTabWidget()
-        calibration_tab = self._build_calibration_tab()
-        controls.addTab(self._build_correction_tab(), "Correction")
-        controls.addTab(calibration_tab, "Calibration")
-        controls.addTab(self._build_extraction_tab(), "Extraction")
-        controls.addTab(self._build_output_tab(), "Output")
+        self._controls_tabs = QTabWidget()
+        self._correction_tab = self._build_correction_tab()
+        self._calibration_tab = self._build_calibration_tab()
+        self._extraction_tab = self._build_extraction_tab()
+        self._output_tab = self._build_output_tab()
+        self._controls_tabs.addTab(self._correction_tab, "Correction")
+        self._controls_tabs.addTab(self._calibration_tab, "Calibration")
+        self._controls_tabs.addTab(self._extraction_tab, "Extraction")
+        self._controls_tabs.addTab(self._output_tab, "Output")
+        self._controls_tabs.currentChanged.connect(self._handle_controls_tab_changed)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(canvas_widget)
-        splitter.addWidget(controls)
+        splitter.addWidget(self._controls_tabs)
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 2)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        ok_button = buttons.button(QDialogButtonBox.Ok)
-        if ok_button is not None:
-            ok_button.setText("Create Dataset(s)")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        buttons = QDialogButtonBox()
+        create_button = buttons.addButton(
+            "Create Dataset && Continue",
+            QDialogButtonBox.ActionRole,
+        )
+        close_button = buttons.addButton("Close", QDialogButtonBox.RejectRole)
+        create_button.clicked.connect(self._create_dataset_and_continue)
+        close_button.clicked.connect(self._close_digitizer)
 
         layout = QVBoxLayout(self)
         layout.addWidget(splitter, 1)
         layout.addWidget(buttons)
 
-        if image_path:
+        if session is not None:
+            self._restore_figure_session(session)
+        elif image_path:
             self.load_image(image_path)
 
     @classmethod
@@ -1545,6 +1664,114 @@ class FigureDigitizerDialog(QDialog):
         """Return the loaded image path."""
         return self._image_path
 
+    def figure_session(self) -> FigureExtractionSession | None:
+        """Capture the embedded working image and resumable calibration state."""
+        if self._image.isNull():
+            return None
+        image_bytes = QByteArray()
+        buffer = QBuffer(image_bytes)
+        if not buffer.open(QIODevice.WriteOnly) or not self._image.save(buffer, "PNG"):
+            return None
+        buffer.close()
+        state: dict[str, object] = {
+            "calibration_pixels": {
+                key: [float(point[0]), float(point[1])]
+                for key, point in self._calibration_pixels.items()
+            },
+            "calibration_values": {
+                "x1": self._x1_value_edit.text(),
+                "x2": self._x2_value_edit.text(),
+                "y1": self._y1_value_edit.text(),
+                "y2": self._y2_value_edit.text(),
+            },
+            "x_scale": str(self._x_scale_combo.currentData() or "linear"),
+            "y_scale": str(self._y_scale_combo.currentData() or "linear"),
+            "warp_applied": bool(self._warp_applied),
+            "dataset_name": self.dataset_name(),
+        }
+        state.update(self._session_specific_state())
+        return FigureExtractionSession(
+            session_id=self._figure_session_id,
+            extraction_kind=self.extraction_kind(),
+            image_png=bytes(image_bytes),
+            source_path=self._image_path,
+            state=state,
+        )
+
+    def _session_specific_state(self) -> dict[str, object]:
+        """Return workflow-specific JSON-safe state for project persistence."""
+        return {}
+
+    def _restore_figure_session(self, session: FigureExtractionSession) -> None:
+        """Restore an embedded image and calibration without extracted points."""
+        image = QImage.fromData(session.image_png, "PNG")
+        if image.isNull():
+            QMessageBox.warning(
+                self,
+                "Resume Figure Extraction",
+                "The saved figure image could not be decoded.",
+            )
+            return
+
+        self._image_path = session.source_path
+        self._original_image = image.copy()
+        self._warp_applied = bool(session.state.get("warp_applied", False))
+        self._warp_pixels.clear()
+        self._set_working_image(image.copy(), reset_view=False)
+        self._calibration_pixels = self._points_from_session_state(
+            session.state.get("calibration_pixels")
+        )
+
+        values = session.state.get("calibration_values")
+        if isinstance(values, dict):
+            for key, edit in (
+                ("x1", self._x1_value_edit),
+                ("x2", self._x2_value_edit),
+                ("y1", self._y1_value_edit),
+                ("y2", self._y2_value_edit),
+            ):
+                if key in values:
+                    edit.setText(str(values[key]))
+        self._set_combo_data(self._x_scale_combo, session.state.get("x_scale", "linear"))
+        self._set_combo_data(self._y_scale_combo, session.state.get("y_scale", "linear"))
+        self._restore_session_specific_state(session.state)
+
+        stored_name = str(session.state.get("dataset_name", "") or "").strip()
+        if stored_name:
+            self._multi_curve_name_root = stored_name
+            self._dataset_name_edit.setText(f"{stored_name} Continued")
+        self._set_default_warp_size_from_image()
+        self._update_source_label()
+        self._fit_image_in_view()
+        self._controls_tabs.setCurrentWidget(self._calibration_tab)
+        self._advance_click_target()
+        self._refresh_all()
+
+    def _restore_session_specific_state(self, state: dict[str, object]) -> None:
+        """Restore workflow-specific state after the shared calibration controls."""
+
+    @staticmethod
+    def _points_from_session_state(value: object) -> dict[str, tuple[float, float]]:
+        """Return valid two-coordinate point entries from persisted JSON state."""
+        if not isinstance(value, dict):
+            return {}
+        points: dict[str, tuple[float, float]] = {}
+        for key, coordinates in value.items():
+            if not isinstance(coordinates, (list, tuple)) or len(coordinates) != 2:
+                continue
+            try:
+                points[str(key)] = (float(coordinates[0]), float(coordinates[1]))
+            except (TypeError, ValueError):
+                continue
+        return points
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: object) -> None:
+        """Select a combo entry by stored user data when available."""
+        index = combo.findData(str(value))
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
     def extraction_kind(self) -> str:
         """Return the workflow identifier used by the dataset importer."""
         return "xy"
@@ -1556,6 +1783,27 @@ class FigureDigitizerDialog(QDialog):
             results.append(self._capture_current_extraction())
         return results
 
+    def queued_extraction_results(self) -> list[FigureExtractionResult]:
+        """Return curves explicitly queued for creation when the dialog closes."""
+        return list(self._saved_extractions)
+
+    def _close_digitizer(self) -> None:
+        """Close the dialog after protecting an uncreated current extraction."""
+        if self.extracted_rows():
+            reply = QMessageBox.question(
+                self,
+                "Uncreated Figure Extraction",
+                (
+                    "The current extracted points have not been created as a worksheet. "
+                    "Close and discard those current points?"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        QDialog.reject(self)
+
     def _capture_current_extraction(self) -> FigureExtractionResult:
         """Freeze the current extracted rows and provenance as one result."""
         return FigureExtractionResult(
@@ -1565,6 +1813,7 @@ class FigureDigitizerDialog(QDialog):
             extraction_kind=self.extraction_kind(),
             calibration_summary=self.calibration_summary(),
             extraction_summary=self.extraction_summary(),
+            figure_session=self.figure_session(),
         )
 
     def _unique_extraction_name(self, requested_name: str) -> str:
@@ -2140,23 +2389,50 @@ class FigureDigitizerDialog(QDialog):
         return tab
 
     def _build_multi_curve_controls(self) -> QWidget:
-        """Build session controls for saving several curves with one calibration."""
+        """Build status and a secondary queueing path for multi-curve sessions."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        save_button = QPushButton("Save Current Curve && Start New")
+        save_button = QPushButton("Queue Current Curve && Start New")
         save_button.setToolTip(
-            "Store the current extracted data, clear curve-specific points/ROI/template, "
-            "and keep the same image correction and X/Y calibration."
+            "Queue the current extraction for creation when the dialog closes. To create "
+            "the worksheet immediately, use Create Dataset & Continue below."
         )
         save_button.clicked.connect(self._save_current_extraction_and_start_new)
         self._saved_extractions_label = QLabel(
-            "No curves saved in this session. The final Create Dataset(s) action also includes the current curve."
+            "No curves queued or created in this session. Use Create Dataset & Continue "
+            "to add a worksheet without closing this window."
         )
         self._saved_extractions_label.setWordWrap(True)
         layout.addWidget(save_button)
         layout.addWidget(self._saved_extractions_label)
         return widget
+
+    def _create_dataset_and_continue(self) -> None:
+        """Emit the current extraction for immediate import and retain calibration."""
+        error = self._current_extraction_error()
+        if error is not None:
+            title, message = error
+            QMessageBox.warning(self, title, message)
+            return
+
+        result = self._capture_current_extraction()
+        request = FigureExtractionRequest(result=result)
+        self.extraction_created.emit(request)
+        if not request.imported:
+            QMessageBox.warning(
+                self,
+                "Create Figure Dataset",
+                request.error or "The dataset could not be added to the workspace.",
+            )
+            return
+        self._created_extractions.append(result)
+        if not self._multi_curve_name_root:
+            self._multi_curve_name_root = result.dataset_name
+        self._clear_current_extraction()
+        next_number = len(self._created_extractions) + len(self._saved_extractions) + 1
+        self._dataset_name_edit.setText(f"{self._multi_curve_name_root} Curve {next_number}")
+        self._refresh_saved_extractions_status()
 
     def _save_current_extraction_and_start_new(self) -> None:
         """Store the current curve and reset extraction state without recalibrating."""
@@ -2207,17 +2483,25 @@ class FigureDigitizerDialog(QDialog):
         if label is None:
             return
         if not self._saved_extractions:
-            label.setText(
-                "No curves saved in this session. The final Create Dataset(s) action also includes the current curve."
-            )
+            if self._created_extractions:
+                label.setText(
+                    f"Created {len(self._created_extractions)} dataset(s) in this session. "
+                    "The embedded image and calibration are retained for the next extraction."
+                )
+            else:
+                label.setText(
+                    "No curves queued or created in this session. Use Create Dataset & Continue "
+                    "to add a worksheet without closing this window."
+                )
             return
         summaries = ", ".join(
             f"{result.dataset_name} ({len(result.rows)} points)"
             for result in self._saved_extractions
         )
         label.setText(
-            f"Saved {len(self._saved_extractions)} curve(s): {summaries}. "
-            "Image correction and calibration are unchanged."
+            f"Queued {len(self._saved_extractions)} curve(s): {summaries}. "
+            f"Created {len(self._created_extractions)} dataset(s). Image correction and "
+            "calibration are unchanged."
         )
 
     def _choose_image(self) -> None:
@@ -2276,8 +2560,9 @@ class FigureDigitizerDialog(QDialog):
             self._source_label.setText("No image loaded")
             return
         correction_text = "corrected" if self._warp_applied else "original"
+        source_name = os.path.basename(self._image_path) or "Embedded project figure"
         self._source_label.setText(
-            f"{os.path.basename(self._image_path)} - {self._image.width()} x "
+            f"{source_name} - {self._image.width()} x "
             f"{self._image.height()} px ({correction_text})"
         )
 
@@ -2579,6 +2864,17 @@ class FigureDigitizerDialog(QDialog):
     def _handle_pan_toggled(self, enabled: bool) -> None:
         """Switch between canvas pan and picking modes."""
         self._view.set_point_picking_enabled(not enabled)
+        self._refresh_tool_mode_label()
+
+    def _handle_controls_tab_changed(self, _index: int) -> None:
+        """Arm the picker appropriate to the newly visible workflow page."""
+        current_tab = self._controls_tabs.currentWidget()
+        if current_tab is self._correction_tab:
+            self._advance_warp_target()
+        elif current_tab is self._calibration_tab:
+            self._advance_click_target()
+        else:
+            self._set_click_target("none")
         self._refresh_tool_mode_label()
 
     def _refresh_tool_mode_label(self) -> None:
@@ -4422,6 +4718,7 @@ class ColorPlotDigitizerDialog(FigureDigitizerDialog):
         self,
         image_path: str | None = None,
         parent: QWidget | None = None,
+        session: FigureExtractionSession | None = None,
     ) -> None:
         """Build the colour-plot extraction workspace."""
         self._colorbar_pixels: dict[str, tuple[float, float]] = {}
@@ -4429,12 +4726,58 @@ class ColorPlotDigitizerDialog(FigureDigitizerDialog):
         self._color_scale_cache: ColorScaleCalibration | None = None
         self._color_palette_cache: np.ndarray | None = None
         self._color_image_rgb_cache: np.ndarray | None = None
-        super().__init__(image_path, parent)
+        super().__init__(image_path, parent, session=session)
         self.setWindowTitle("Import From Figure - 2D Colour Plot")
 
     def extraction_kind(self) -> str:
         """Return the colour-plot workflow identifier."""
         return "colorplot"
+
+    def _session_specific_state(self) -> dict[str, object]:
+        """Persist empirical colour-scale calibration with the shared X/Y state."""
+        return {
+            "colorbar_pixels": {
+                key: [float(point[0]), float(point[1])]
+                for key, point in self._colorbar_pixels.items()
+            },
+            "color_low_value": self._color_low_value_edit.text(),
+            "color_high_value": self._color_high_value_edit.text(),
+            "color_scale": str(self._color_scale_combo.currentData() or "linear"),
+            "colorbar_width": int(self._colorbar_width_spin.value()),
+            "colorbar_samples": int(self._colorbar_samples_spin.value()),
+            "maximum_color_distance": float(self._maximum_color_distance_spin.value()),
+            "probe_patch_radius": int(self._probe_patch_radius_spin.value()),
+        }
+
+    def _restore_session_specific_state(self, state: dict[str, object]) -> None:
+        """Restore empirical colour-scale calibration and sampling controls."""
+        restored_points = self._points_from_session_state(state.get("colorbar_pixels"))
+        self._colorbar_pixels = {
+            key: point
+            for key, point in restored_points.items()
+            if key in {"low", "high"}
+        }
+        self._color_low_value_edit.setText(str(state.get("color_low_value", "0")))
+        self._color_high_value_edit.setText(str(state.get("color_high_value", "1")))
+        self._set_combo_data(self._color_scale_combo, state.get("color_scale", "linear"))
+        for key, spin in (
+            ("colorbar_width", self._colorbar_width_spin),
+            ("colorbar_samples", self._colorbar_samples_spin),
+            ("probe_patch_radius", self._probe_patch_radius_spin),
+        ):
+            try:
+                spin.setValue(int(state.get(key, spin.value())))
+            except (TypeError, ValueError):
+                pass
+        try:
+            self._maximum_color_distance_spin.setValue(
+                float(state.get("maximum_color_distance", self._maximum_color_distance_spin.value()))
+            )
+        except (TypeError, ValueError):
+            pass
+        self._color_scale_cache = None
+        if {"low", "high"}.issubset(self._colorbar_pixels):
+            self._rebuild_color_scale(show_errors=False)
 
     def dataset_name(self) -> str:
         """Return the requested output dataset name."""
@@ -5176,9 +5519,11 @@ class ColumnExpressionDialog(QDialog):
         column_formulas: dict[str, str] | None = None,
         dataset_names: list[str] | None = None,
         current_dataset_name: str = "",
+        worksheet_columns: dict[str, list[str]] | None = None,
+        selected_cell_columns: set[str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        """Create controls for target column, formula text, and row scope."""
+        """Create controls for target column, expression, and cell/column scope."""
         super().__init__(parent)
         self.setWindowTitle("Apply Formula")
         self.setModal(True)
@@ -5186,6 +5531,12 @@ class ColumnExpressionDialog(QDialog):
         self.resize(980, 560)
         self._column_formulas = column_formulas or {}
         self._current_dataset_name = current_dataset_name
+        self._worksheet_columns = worksheet_columns or {
+            current_dataset_name: list(column_names)
+        }
+        self._selected_cell_columns = set(selected_cell_columns or ())
+        if selected_rows_available and not self._selected_cell_columns:
+            self._selected_cell_columns.update(column_names)
         self._last_loaded_formula = ""
 
         self._target_combo = QComboBox()
@@ -5204,6 +5555,7 @@ class ColumnExpressionDialog(QDialog):
         self._target_conflict_combo.addItem("Create unique new column if target exists", "unique")
         self._target_conflict_combo.addItem("Stop and warn if target exists", "stop")
         self._target_conflict_combo.addItem("Overwrite/update existing column", "overwrite")
+        self._column_scope_conflict_policy = "unique"
 
         cpu_count = os.cpu_count() or 1
         self._batch_execution_combo = QComboBox()
@@ -5224,15 +5576,18 @@ class ColumnExpressionDialog(QDialog):
             'Examples: col1 + col2, x + y, sin(x), sqrt(col("Voltage"))'
         )
 
+        self._reference_worksheet_combo = QComboBox()
+        self._reference_worksheet_combo.addItems(list(self._worksheet_columns))
+        self._reference_worksheet_combo.setCurrentText(current_dataset_name)
+
         self._column_reference_combo = QComboBox()
-        for index, column_name in enumerate(column_names, start=1):
-            self._column_reference_combo.addItem(f"col{index} -> {column_name}", (index, column_name))
         self._insert_alias_button = QPushButton("Insert colN")
         self._insert_exact_button = QPushButton('Insert col("Name")')
 
         reference_panel = QWidget()
         reference_layout = QHBoxLayout(reference_panel)
         reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.addWidget(self._reference_worksheet_combo)
         reference_layout.addWidget(self._column_reference_combo, 1)
         reference_layout.addWidget(self._insert_alias_button)
         reference_layout.addWidget(self._insert_exact_button)
@@ -5249,9 +5604,9 @@ class ColumnExpressionDialog(QDialog):
         self._cheatsheet.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._cheatsheet.setMargin(8)
 
-        self._selected_rows_checkbox = QCheckBox("Apply only to selected rows")
-        self._selected_rows_checkbox.setEnabled(selected_rows_available)
-        self._selected_rows_checkbox.setChecked(selected_rows_available)
+        self._operation_scope_combo = QComboBox()
+        self._operation_scope_combo.addItem("Entire target column", "column")
+        self._operation_scope_combo.addItem("Selected cells in target column", "cells")
 
         self._dataset_list = QListWidget()
         self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
@@ -5265,8 +5620,8 @@ class ColumnExpressionDialog(QDialog):
             item.setSelected(dataset_name == current_dataset_name)
 
         self._batch_hint = QLabel(
-            "Selected-row mode only applies to the current sheet. "
-            "Uncheck it to apply the formula to multiple sheets. "
+            "Selected-cell scope only updates selected cells in the target column and "
+            "only applies to the current sheet. Choose entire-column scope for batches. "
             "Existing target columns are protected by the output policy above. "
             "Position matching treats source columns as col1, col2, ... on every target sheet."
         )
@@ -5282,7 +5637,7 @@ class ColumnExpressionDialog(QDialog):
         form.addRow("Expression", self._expression_edit)
         form.addRow("Insert column", reference_panel)
         form.addRow("", self._formula_hint)
-        form.addRow("", self._selected_rows_checkbox)
+        form.addRow("Operation scope", self._operation_scope_combo)
         form.addRow("Apply to sheets", self._dataset_list)
         form.addRow("", self._batch_hint)
 
@@ -5316,11 +5671,19 @@ class ColumnExpressionDialog(QDialog):
         layout.addWidget(buttons)
 
         self._target_combo.currentTextChanged.connect(self._load_formula_for_target)
+        self._target_combo.currentTextChanged.connect(self._update_operation_scope_state)
+        self._reference_worksheet_combo.currentTextChanged.connect(
+            self._populate_column_references
+        )
         self._column_reference_combo.currentIndexChanged.connect(self._update_column_insert_buttons)
         self._insert_alias_button.clicked.connect(self._insert_selected_column_alias)
         self._insert_exact_button.clicked.connect(self._insert_selected_column_exact)
-        self._selected_rows_checkbox.toggled.connect(self._update_dataset_selection_state)
+        self._operation_scope_combo.currentIndexChanged.connect(
+            self._update_dataset_selection_state
+        )
+        self._populate_column_references(self._reference_worksheet_combo.currentText())
         self._load_formula_for_target(self._target_combo.currentText(), force=True)
+        self._update_operation_scope_state()
         self._update_dataset_selection_state()
         self._update_column_insert_buttons()
 
@@ -5349,8 +5712,12 @@ class ColumnExpressionDialog(QDialog):
         return self._expression_edit.toPlainText().strip()
 
     def apply_selected_rows_only(self) -> bool:
-        """Return whether only selected rows should be updated."""
-        return self._selected_rows_checkbox.isChecked()
+        """Return whether only selected target cells should be updated."""
+        return self.operation_scope() == "cells"
+
+    def operation_scope(self) -> str:
+        """Return ``column`` or ``cells`` for the requested output scope."""
+        return str(self._operation_scope_combo.currentData() or "column")
 
     def target_dataset_names(self) -> list[str]:
         """Return the worksheet names selected for formula application."""
@@ -5367,11 +5734,18 @@ class ColumnExpressionDialog(QDialog):
         if not self.target_dataset_names():
             QMessageBox.warning(self, "Apply Formula", "Choose at least one target sheet.")
             return
+        if self.apply_selected_rows_only() and self.target_column() not in self._selected_cell_columns:
+            QMessageBox.warning(
+                self,
+                "Apply Formula",
+                "Select one or more cells in the target column, or use entire-column scope.",
+            )
+            return
         if self.apply_selected_rows_only() and self.target_dataset_names() != [self._current_dataset_name]:
             QMessageBox.warning(
                 self,
                 "Apply Formula",
-                "Selected-row mode can only apply to the current sheet.",
+                "Selected-cell scope can only apply to the current sheet.",
             )
             return
         super().accept()
@@ -5392,6 +5766,9 @@ class ColumnExpressionDialog(QDialog):
             "do not conflict with existing names.<br>"
             'Use <code>col("exact column name")</code> for names with spaces, symbols, or default '
             'manual-entry names. Example: <code>col("Column 1") + col("Column 2")</code>.<br>'
+            'Use <code>sheet("Worksheet", "Column")</code> to read another worksheet. '
+            "Values are matched by visible row position; a shorter source is padded with blanks "
+            "and a longer source is truncated.<br>"
             "Powers use <code>**</code>, so square a column with <code>x ** 2</code>. "
             "<code>^</code> is not exponentiation.<br>"
             "Common functions: <code>sin</code>, <code>cos</code>, <code>sqrt</code>, "
@@ -5429,22 +5806,58 @@ class ColumnExpressionDialog(QDialog):
         self._last_loaded_formula = ""
 
     def _update_dataset_selection_state(self) -> None:
-        """Limit target sheets when selected-row mode is active."""
-        selected_rows_only = self._selected_rows_checkbox.isChecked()
-        self._dataset_list.setEnabled(not selected_rows_only)
-        if not selected_rows_only:
+        """Limit target sheets when selected-cell scope is active."""
+        selected_cells_only = self.operation_scope() == "cells"
+        self._dataset_list.setEnabled(not selected_cells_only)
+        self._target_conflict_combo.setEnabled(not selected_cells_only)
+        if not selected_cells_only:
+            policy_index = self._target_conflict_combo.findData(
+                self._column_scope_conflict_policy
+            )
+            if policy_index >= 0:
+                self._target_conflict_combo.setCurrentIndex(policy_index)
             return
+
+        current_policy = str(self._target_conflict_combo.currentData() or "unique")
+        if current_policy != "overwrite":
+            self._column_scope_conflict_policy = current_policy
+        overwrite_index = self._target_conflict_combo.findData("overwrite")
+        if overwrite_index >= 0:
+            self._target_conflict_combo.setCurrentIndex(overwrite_index)
 
         for row in range(self._dataset_list.count()):
             item = self._dataset_list.item(row)
             item.setSelected(item.text() == self._current_dataset_name)
 
-    def _selected_column_reference(self) -> tuple[int, str] | None:
+    def _update_operation_scope_state(self) -> None:
+        """Enable selected-cell scope only for a selected existing target column."""
+        target_has_selected_cells = self.target_column() in self._selected_cell_columns
+        cell_item = self._operation_scope_combo.model().item(1)
+        if cell_item is not None:
+            cell_item.setEnabled(target_has_selected_cells)
+        if not target_has_selected_cells and self.operation_scope() == "cells":
+            self._operation_scope_combo.setCurrentIndex(0)
+
+    def _populate_column_references(self, worksheet_name: str) -> None:
+        """Populate insert choices for the selected source worksheet."""
+        self._column_reference_combo.clear()
+        for index, column_name in enumerate(self._worksheet_columns.get(worksheet_name, []), start=1):
+            if worksheet_name == self._current_dataset_name:
+                label = f"col{index} -> {column_name}"
+            else:
+                label = column_name
+            self._column_reference_combo.addItem(
+                label,
+                (index, column_name, worksheet_name),
+            )
+        self._update_column_insert_buttons()
+
+    def _selected_column_reference(self) -> tuple[int, str, str] | None:
         """Return the currently selected positional alias and column name."""
         data = self._column_reference_combo.currentData()
-        if not isinstance(data, tuple) or len(data) != 2:
+        if not isinstance(data, tuple) or len(data) != 3:
             return None
-        return int(data[0]), str(data[1])
+        return int(data[0]), str(data[1]), str(data[2])
 
     def _update_column_insert_buttons(self) -> None:
         """Refresh insert button labels for the selected column reference."""
@@ -5454,16 +5867,23 @@ class ColumnExpressionDialog(QDialog):
             self._insert_exact_button.setEnabled(False)
             return
 
-        index, column_name = selected
-        self._insert_alias_button.setEnabled(True)
+        index, column_name, worksheet_name = selected
+        is_current_worksheet = worksheet_name == self._current_dataset_name
+        self._insert_alias_button.setEnabled(is_current_worksheet)
         self._insert_exact_button.setEnabled(True)
         self._insert_alias_button.setText(f"Insert col{index}")
-        self._insert_exact_button.setText("Insert exact")
+        self._insert_exact_button.setText(
+            "Insert exact" if is_current_worksheet else "Insert sheet reference"
+        )
         self._insert_alias_button.setToolTip(
             f"Insert col{index}, the positional alias for {column_name}."
         )
         self._insert_exact_button.setToolTip(
-            f'Insert col("{column_name}") for an exact column-name reference.'
+            (
+                f'Insert col("{column_name}") for an exact column-name reference.'
+                if is_current_worksheet
+                else f'Insert sheet("{worksheet_name}", "{column_name}").'
+            )
         )
 
     def _insert_selected_column_alias(self) -> None:
@@ -5471,7 +5891,9 @@ class ColumnExpressionDialog(QDialog):
         selected = self._selected_column_reference()
         if selected is None:
             return
-        index, _column_name = selected
+        index, _column_name, worksheet_name = selected
+        if worksheet_name != self._current_dataset_name:
+            return
         self._insert_expression_text(f"col{index}")
 
     def _insert_selected_column_exact(self) -> None:
@@ -5479,8 +5901,15 @@ class ColumnExpressionDialog(QDialog):
         selected = self._selected_column_reference()
         if selected is None:
             return
-        _index, column_name = selected
-        self._insert_expression_text(f"col({self._python_string_literal(column_name)})")
+        _index, column_name, worksheet_name = selected
+        if worksheet_name == self._current_dataset_name:
+            reference = f"col({self._python_string_literal(column_name)})"
+        else:
+            reference = (
+                f"sheet({self._python_string_literal(worksheet_name)}, "
+                f"{self._python_string_literal(column_name)})"
+            )
+        self._insert_expression_text(reference)
 
     def _insert_expression_text(self, text: str) -> None:
         """Insert text at the expression cursor and return focus to the editor."""

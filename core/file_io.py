@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+from collections import Counter
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 import posixpath
 import re
@@ -12,8 +15,11 @@ from xml.etree import ElementTree
 import pandas as pd
 
 
-SUPPORTED_EXTENSIONS = {".csv", ".txt"}
+SUPPORTED_EXTENSIONS = {".csv", ".dat", ".txt"}
 SUPPORTED_EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
+AUTO_DELIMITER = "auto"
+_INFERRED_DELIMITER_CANDIDATES = ",;\t| "
+_DELIMITER_SAMPLE_SIZE = 128 * 1024
 
 _DIMENSION_PATTERN = re.compile(rb"<(?:[A-Za-z0-9_]+:)?dimension\b[^>]*\bref=\"([^\"]+)\"")
 
@@ -22,9 +28,34 @@ _DIMENSION_PATTERN = re.compile(rb"<(?:[A-Za-z0-9_]+:)?dimension\b[^>]*\bref=\"(
 class ImportOptions:
     """User-selected parser options for delimited text files."""
 
-    delimiter: str = ","
-    has_header: bool = True
+    delimiter: str = AUTO_DELIMITER
+    has_header: bool | None = None
     encoding: str = "utf-8"
+    skip_rows: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DelimitedFileInspection:
+    """Detected structure for one delimited text file before import."""
+
+    path: Path
+    delimiter: str
+    metadata_rows: int
+    has_header: bool
+    column_names: tuple[str, ...]
+    column_count: int
+    preview_rows: tuple[tuple[str, ...], ...]
+
+    @property
+    def delimiter_label(self) -> str:
+        """Return a compact user-facing name for the detected separator."""
+        return {
+            ",": "Comma",
+            ";": "Semicolon",
+            "\t": "Tab",
+            "|": "Pipe",
+            " ": "Whitespace",
+        }.get(self.delimiter, repr(self.delimiter))
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,14 +96,36 @@ class ExcelReadResult:
 
 def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
     """Read a CSV/TXT file into a DataFrame using the selected import options."""
-    file_path = Path(path)
-    if not file_path.exists():
-        raise FileNotFoundError(f"File does not exist: {file_path}")
-    if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
-        raise ValueError(f"Unsupported file type '{file_path.suffix}'. Expected {supported}.")
-
-    read_kwargs = _build_read_csv_kwargs(options)
+    file_path = _validated_tabular_path(path)
+    inspection: DelimitedFileInspection | None = None
+    if (
+        options.delimiter == AUTO_DELIMITER
+        or options.has_header is None
+        or options.skip_rows is None
+    ):
+        inspection = inspect_delimited_file(
+            file_path,
+            delimiter=options.delimiter,
+            encoding=options.encoding,
+            skip_rows=options.skip_rows,
+        )
+    delimiter = inspection.delimiter if inspection is not None else options.delimiter
+    has_header = (
+        inspection.has_header
+        if options.has_header is None and inspection is not None
+        else bool(options.has_header)
+    )
+    skip_rows = (
+        inspection.metadata_rows
+        if options.skip_rows is None and inspection is not None
+        else max(int(options.skip_rows or 0), 0)
+    )
+    read_kwargs = _build_read_csv_kwargs(
+        options,
+        delimiter=delimiter,
+        has_header=has_header,
+        skip_rows=skip_rows,
+    )
 
     try:
         frame = pd.read_csv(file_path, **read_kwargs)
@@ -80,13 +133,14 @@ def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
         raise ValueError(
             "Could not decode the file as UTF-8. Save it as UTF-8 or add encoding selection later."
         ) from exc
-    except pd.errors.ParserError as exc:
-        raise ValueError(f"Could not parse the file with the selected delimiter: {exc}") from exc
+    except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+        source = "inferred" if options.delimiter == AUTO_DELIMITER else "selected"
+        raise ValueError(f"Could not parse the file with the {source} delimiter: {exc}") from exc
 
     if frame.empty:
         raise ValueError("The selected file did not contain any rows.")
 
-    if not options.has_header:
+    if not has_header:
         frame.columns = [f"Column {index + 1}" for index in range(len(frame.columns))]
 
     return frame
@@ -188,22 +242,301 @@ def export_tabular_file(
         raise OSError(f"Could not export data to {file_path}: {exc}") from exc
 
 
-def _build_read_csv_kwargs(options: ImportOptions) -> dict[str, object]:
-    """Translate import dialog options into pandas read_csv keyword arguments."""
-    header = 0 if options.has_header else None
+def infer_tabular_delimiter(
+    path: str | Path,
+    encoding: str = "utf-8",
+) -> str:
+    """Infer a common delimiter from a bounded text sample.
 
-    if options.delimiter == " ":
+    Files without delimiter evidence are intentionally treated as comma-separated;
+    pandas will then read them as a valid single-column table. Restricting Sniffer's
+    candidate set prevents letters or digits in single-column data being mistaken
+    for separators.
+    """
+    file_path = Path(path)
+    sample = _read_delimited_sample(file_path, encoding)
+
+    if not sample.strip():
+        return ","
+    try:
+        dialect = csv.Sniffer().sniff(
+            sample,
+            delimiters=_INFERRED_DELIMITER_CANDIDATES,
+        )
+    except csv.Error:
+        lines = [line.strip() for line in sample.splitlines() if line.strip()]
+        whitespace_widths = [len(re.split(r"\s+", line)) for line in lines]
+        if (
+            len(whitespace_widths) >= 2
+            and whitespace_widths[0] > 1
+            and len(set(whitespace_widths)) == 1
+        ):
+            return " "
+        return ","
+    return str(dialect.delimiter)
+
+
+def inspect_delimited_file(
+    path: str | Path,
+    *,
+    delimiter: str = AUTO_DELIMITER,
+    encoding: str = "utf-8",
+    skip_rows: int | None = None,
+) -> DelimitedFileInspection:
+    """Infer separator, leading metadata rows, header presence, and a short preview."""
+    file_path = _validated_tabular_path(path)
+    sample = _read_delimited_sample(file_path, encoding)
+    if not sample.strip():
+        raise ValueError("The selected file did not contain any rows.")
+    resolved_delimiter = (
+        infer_tabular_delimiter(file_path, encoding)
+        if delimiter == AUTO_DELIMITER
+        else delimiter
+    )
+    parsed_rows = _sample_delimited_rows(sample, resolved_delimiter)
+    if not parsed_rows:
+        raise ValueError("The selected file did not contain any readable rows.")
+
+    if skip_rows is None:
+        table_width = _dominant_table_width(parsed_rows)
+        base_position = _first_stable_width_position(parsed_rows, table_width)
+        table_position, has_header = _infer_table_start_and_header(
+            parsed_rows,
+            base_position,
+            table_width,
+            resolved_delimiter,
+        )
+    else:
+        requested_start = max(int(skip_rows), 0)
+        table_position = next(
+            (
+                position
+                for position, (line_number, _row) in enumerate(parsed_rows)
+                if line_number >= requested_start
+            ),
+            len(parsed_rows) - 1,
+        )
+        table_width = len(parsed_rows[table_position][1])
+        has_header = _infer_header_at_position(
+            parsed_rows,
+            table_position,
+            table_width,
+            resolved_delimiter,
+        )
+    line_number, table_row = parsed_rows[table_position]
+    metadata_rows = line_number if skip_rows is None else max(int(skip_rows), 0)
+    if has_header:
+        column_names = tuple(_normalized_excel_headers(pd.Index(table_row)))
+        preview_start = table_position + 1
+    else:
+        column_names = tuple(f"Column {index + 1}" for index in range(table_width))
+        preview_start = table_position
+    preview = tuple(
+        tuple(row[:table_width])
+        for _line, row in parsed_rows[preview_start:]
+        if len(row) == table_width
+    )[:5]
+    return DelimitedFileInspection(
+        path=file_path,
+        delimiter=resolved_delimiter,
+        metadata_rows=metadata_rows,
+        has_header=has_header,
+        column_names=column_names,
+        column_count=table_width,
+        preview_rows=preview,
+    )
+
+
+def _validated_tabular_path(path: str | Path) -> Path:
+    """Return a validated CSV/DAT/TXT path."""
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"File does not exist: {file_path}")
+    if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+        raise ValueError(f"Unsupported file type '{file_path.suffix}'. Expected {supported}.")
+    return file_path
+
+
+def _read_delimited_sample(file_path: Path, encoding: str) -> str:
+    """Read the bounded text sample shared by delimiter and structure inference."""
+    try:
+        with file_path.open("r", encoding=encoding, newline="") as stream:
+            return stream.read(_DELIMITER_SAMPLE_SIZE)
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "Could not decode the file as UTF-8. Save it as UTF-8 or add encoding selection later."
+        ) from exc
+
+
+def _sample_delimited_rows(
+    sample: str,
+    delimiter: str,
+) -> list[tuple[int, tuple[str, ...]]]:
+    """Parse nonblank physical sample lines while retaining zero-based line numbers."""
+    rows: list[tuple[int, tuple[str, ...]]] = []
+    for line_number, line in enumerate(sample.splitlines()[:250]):
+        if not line.strip():
+            continue
+        if delimiter == " ":
+            values = tuple(value.strip() for value in re.split(r"\s+", line.strip()))
+        else:
+            try:
+                values = tuple(
+                    value.strip()
+                    for value in next(csv.reader([line], delimiter=delimiter))
+                )
+            except csv.Error:
+                continue
+        if values:
+            rows.append((line_number, values))
+    return rows
+
+
+def _dominant_table_width(rows: list[tuple[int, tuple[str, ...]]]) -> int:
+    """Return the most frequent row width, preferring wider layouts on ties."""
+    counts = Counter(len(row) for _line, row in rows)
+    return max(counts, key=lambda width: (counts[width], width))
+
+
+def _first_stable_width_position(
+    rows: list[tuple[int, tuple[str, ...]]],
+    width: int,
+) -> int:
+    """Find the first row beginning a stable block with the dominant width."""
+    for position, (_line, row) in enumerate(rows):
+        if len(row) != width:
+            continue
+        following = rows[position : position + 3]
+        matching = sum(len(candidate) == width for _line, candidate in following)
+        if matching >= min(2, len(following)):
+            return position
+    return next(position for position, (_line, row) in enumerate(rows) if len(row) == width)
+
+
+def _cell_kind(value: str) -> str:
+    """Classify a sample token coarsely for header/preamble inference."""
+    text = value.strip()
+    if not text:
+        return "blank"
+    normalized = text.replace(",", ".")
+    try:
+        float(normalized)
+    except ValueError:
+        return "text"
+    return "number"
+
+
+def _row_signature(row: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the coarse value-kind signature for one parsed row."""
+    return tuple(_cell_kind(value) for value in row)
+
+
+def _infer_table_start_and_header(
+    rows: list[tuple[int, tuple[str, ...]]],
+    base_position: int,
+    width: int,
+    delimiter: str,
+) -> tuple[int, bool]:
+    """Infer where tabular data begins and whether its first row is a header."""
+    for position in range(base_position, len(rows) - 1):
+        _line, row = rows[position]
+        if len(row) != width:
+            continue
+        signature = _row_signature(row)
+        if "number" not in signature:
+            continue
+        following_signatures = [
+            _row_signature(candidate)
+            for _candidate_line, candidate in rows[position : position + 4]
+            if len(candidate) == width
+        ]
+        if len(following_signatures) < 2:
+            continue
+        if sum(candidate == signature for candidate in following_signatures) < 2:
+            continue
+        previous_position = position - 1
+        if previous_position >= base_position:
+            _previous_line, previous = rows[previous_position]
+            if len(previous) == width and all(
+                kind in {"blank", "text"} for kind in _row_signature(previous)
+            ):
+                return previous_position, True
+        return position, False
+
+    return base_position, _infer_header_at_position(
+        rows,
+        base_position,
+        width,
+        delimiter,
+    )
+
+
+def _infer_header_at_position(
+    rows: list[tuple[int, tuple[str, ...]]],
+    position: int,
+    width: int,
+    delimiter: str,
+) -> bool:
+    """Infer header presence specifically at one chosen physical table start."""
+    first_signature = _row_signature(rows[position][1])
+    following = [
+        candidate
+        for _line, candidate in rows[position + 1 : position + 5]
+        if len(candidate) == width
+    ]
+    if following:
+        next_signatures = [_row_signature(candidate) for candidate in following]
+        numeric_following = sum("number" in signature for signature in next_signatures)
+        if "number" not in first_signature and numeric_following >= min(2, len(following)):
+            return True
+        if "number" in first_signature and numeric_following >= min(2, len(following)):
+            return False
+
+    sample_lines = []
+    for _line, row in rows[position : position + 25]:
+        if len(row) != width:
+            continue
+        output = StringIO()
+        writer = csv.writer(output, delimiter=delimiter if delimiter != " " else " ")
+        writer.writerow(row)
+        sample_lines.append(output.getvalue().strip("\r\n"))
+    has_header = True
+    if len(sample_lines) >= 2:
+        try:
+            has_header = csv.Sniffer().has_header("\n".join(sample_lines))
+        except csv.Error:
+            has_header = True
+    return has_header
+
+
+def _build_read_csv_kwargs(
+    options: ImportOptions,
+    *,
+    delimiter: str | None = None,
+    has_header: bool | None = None,
+    skip_rows: int | None = None,
+) -> dict[str, object]:
+    """Translate import dialog options into pandas read_csv keyword arguments."""
+    resolved_header = options.has_header if has_header is None else has_header
+    header = 0 if resolved_header else None
+    resolved_delimiter = options.delimiter if delimiter is None else delimiter
+    resolved_skip_rows = options.skip_rows if skip_rows is None else skip_rows
+
+    if resolved_delimiter == " ":
         return {
             "sep": r"\s+",
             "header": header,
             "encoding": options.encoding,
             "engine": "python",
+            "skiprows": max(int(resolved_skip_rows or 0), 0),
         }
 
     return {
-        "sep": options.delimiter,
+        "sep": resolved_delimiter,
         "header": header,
         "encoding": options.encoding,
+        "skiprows": max(int(resolved_skip_rows or 0), 0),
     }
 
 

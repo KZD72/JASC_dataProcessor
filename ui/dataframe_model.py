@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Number
 from typing import Any
@@ -11,6 +12,16 @@ from pandas.api.types import is_numeric_dtype
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 
 from core.operations import ExpressionResult, apply_column_expression
+from core.smart_fill import (
+    SMART_FILL_MODE_AUTO,
+    SMART_FILL_MODE_CATEGORY,
+    SMART_FILL_MODE_CUSTOM,
+    SMART_FILL_MODE_DATETIME,
+    SMART_FILL_MODE_NUMERIC,
+    SmartFillError,
+    SmartFillPlan,
+    plan_smart_fill,
+)
 from core.workspace import (
     COLUMN_NUMERIC_TYPES,
     ColumnMetadata,
@@ -176,6 +187,7 @@ class DataFrameTableModel(QAbstractTableModel):
             frame[column_name] = frame[column_name].astype("object")
 
         frame.iat[index.row(), index.column()] = normalized_value
+        self._coerce_auto_numeric_column(frame, str(column_name), metadata)
         self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
         self.history_changed.emit()
         return True
@@ -457,6 +469,11 @@ class DataFrameTableModel(QAbstractTableModel):
                     frame[column_name] = target_series.astype("float64")
 
                 frame.iloc[row_slice, target_column] = normalized_values.to_numpy()
+                self._coerce_auto_numeric_column(
+                    frame,
+                    column_name,
+                    self._dataset.column_metadata.get(column_name),
+                )
                 self._dataset.formulas.pop(column_name, None)
 
             for column_name in frame.columns[len(self._dataset.frame.columns):]:
@@ -650,11 +667,120 @@ class DataFrameTableModel(QAbstractTableModel):
             self.endResetModel()
             self.history_changed.emit()
 
+    def smart_fill_selection(
+        self,
+        start_row: int,
+        end_row: int,
+        start_column: int,
+        end_column: int,
+        *,
+        mode: str = SMART_FILL_MODE_AUTO,
+        period: int = 0,
+        custom_values: Sequence[str] = (),
+    ) -> dict[str, SmartFillPlan]:
+        """Fill blank cells from typed seed patterns in a rectangular selection."""
+        if self._dataset is None:
+            raise SmartFillError("No dataset is selected.")
+
+        frame = self._dataset.frame
+        if (
+            start_row < 0
+            or end_row < start_row
+            or end_row >= len(frame)
+            or start_column < 0
+            or end_column < start_column
+            or end_column >= len(frame.columns)
+        ):
+            raise SmartFillError("Select one valid rectangular worksheet range.")
+
+        plans: dict[str, SmartFillPlan] = {}
+        column_positions: dict[str, int] = {}
+        for column_position in range(start_column, end_column + 1):
+            column_name = str(frame.columns[column_position])
+            metadata = self._dataset.column_metadata.get(column_name)
+            column_mode = mode
+            if (
+                mode == SMART_FILL_MODE_AUTO
+                and metadata is not None
+                and metadata.value_type == "text"
+            ):
+                column_mode = SMART_FILL_MODE_CATEGORY
+            if (
+                column_mode == SMART_FILL_MODE_NUMERIC
+                and metadata is not None
+                and metadata.value_type == "text"
+            ):
+                raise SmartFillError(
+                    f"Column '{column_name}' is explicitly Text. Numeric Smart Fill requires a numeric column."
+                )
+            try:
+                plans[column_name] = plan_smart_fill(
+                    frame.iloc[:, column_position],
+                    start_row,
+                    end_row,
+                    mode=column_mode,
+                    period=period,
+                    custom_values=custom_values,
+                )
+            except SmartFillError as exc:
+                raise SmartFillError(f"Column '{column_name}': {exc}") from exc
+            column_positions[column_name] = column_position
+
+        self.capture_undo_state()
+        self.beginResetModel()
+        try:
+            for column_name, plan in plans.items():
+                column_position = column_positions[column_name]
+                column_dtype = frame.iloc[:, column_position].dtype
+                if plan.mode == SMART_FILL_MODE_NUMERIC and is_numeric_dtype(column_dtype):
+                    frame[column_name] = pd.to_numeric(
+                        frame.iloc[:, column_position], errors="coerce"
+                    ).astype("float64")
+                    column_position = list(frame.columns).index(column_name)
+                elif (
+                    plan.mode == SMART_FILL_MODE_DATETIME
+                    and not pd.api.types.is_datetime64_any_dtype(column_dtype)
+                ):
+                    frame[column_name] = frame.iloc[:, column_position].astype(object)
+                    column_position = list(frame.columns).index(column_name)
+                elif plan.mode in {
+                    SMART_FILL_MODE_CATEGORY,
+                    SMART_FILL_MODE_CUSTOM,
+                } and not (
+                    pd.api.types.is_object_dtype(column_dtype)
+                    or pd.api.types.is_string_dtype(column_dtype)
+                ):
+                    frame[column_name] = frame.iloc[:, column_position].astype(object)
+                    column_position = list(frame.columns).index(column_name)
+                frame.iloc[list(plan.row_positions), column_position] = list(plan.values)
+                self._coerce_auto_numeric_column(
+                    frame,
+                    column_name,
+                    self._dataset.column_metadata.get(column_name),
+                )
+                self._dataset.formulas.pop(column_name, None)
+                set_column_operation_comment(
+                    self._dataset,
+                    column_name,
+                    (
+                        f"Smart fill: {plan.description}, mode={plan.mode}, seeds={plan.seed_count}, "
+                        f"filled={plan.filled_count}, rows={start_row + 1}-{end_row + 1}"
+                    ),
+                )
+            return plans
+        except Exception:
+            self.discard_latest_undo_state()
+            raise
+        finally:
+            self.endResetModel()
+            self.history_changed.emit()
+
     def apply_expression(
         self,
         target_column: str,
         expression: str,
         row_positions: list[int] | None = None,
+        worksheet_frames: Mapping[str, pd.DataFrame] | None = None,
     ) -> ExpressionResult:
         """Apply a column expression to the current dataset."""
         if self._dataset is None:
@@ -668,12 +794,20 @@ class DataFrameTableModel(QAbstractTableModel):
                 target_column=target_column,
                 expression=expression,
                 row_positions=row_positions,
+                worksheet_frames=worksheet_frames,
             )
-            self._dataset.formulas[result.target_column] = expression.strip()
+            if row_positions is None:
+                self._dataset.formulas[result.target_column] = expression.strip()
+            else:
+                self._dataset.formulas.pop(result.target_column, None)
             set_column_operation_comment(
                 self._dataset,
                 result.target_column,
-                f"Formula = {expression.strip()}",
+                (
+                    f"Formula = {expression.strip()}"
+                    if row_positions is None
+                    else f"Cell formula = {expression.strip()} ({len(row_positions)} selected cells)"
+                ),
             )
             return result
         except Exception:
@@ -755,12 +889,33 @@ class DataFrameTableModel(QAbstractTableModel):
                 return numeric_value
             return _INVALID_TYPED_VALUE
 
-        if is_numeric_dtype(column):
-            numeric_value = pd.to_numeric(text, errors="coerce")
-            if not pd.isna(numeric_value):
-                return numeric_value
+        numeric_value = pd.to_numeric(text, errors="coerce")
+        if not pd.isna(numeric_value):
+            return numeric_value
 
         return text
+
+    @staticmethod
+    def _coerce_auto_numeric_column(
+        frame: pd.DataFrame,
+        column_name: str,
+        metadata: ColumnMetadata | None,
+    ) -> None:
+        """Promote an Auto column when all of its entered values are numeric."""
+        if metadata is not None and metadata.value_type:
+            return
+        column = frame[column_name]
+        blank = column.isna()
+        if column.dtype == object or pd.api.types.is_string_dtype(column.dtype):
+            strings = column.astype("string")
+            blank |= strings.str.strip().eq("").fillna(True)
+        nonblank = column.loc[~blank]
+        if nonblank.empty:
+            return
+        numeric = pd.to_numeric(nonblank, errors="coerce")
+        if numeric.isna().any():
+            return
+        frame[column_name] = pd.to_numeric(column.mask(blank), errors="coerce")
 
     @staticmethod
     def _format_display_value(value: object, metadata: ColumnMetadata | None) -> str:
@@ -839,7 +994,7 @@ class DataFrameTableModel(QAbstractTableModel):
         blank = text.isna() | text.eq("")
         value_type = metadata.value_type if metadata is not None else ""
 
-        if value_type == "text" or (not value_type and not is_numeric_dtype(target)):
+        if value_type == "text":
             return text.mask(blank, pd.NA).astype("object")
 
         numeric = pd.to_numeric(text.mask(blank), errors="coerce")

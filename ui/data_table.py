@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QSpinBox,
     QPushButton,
     QTableWidget,
@@ -31,6 +32,14 @@ from PySide6.QtWidgets import (
 )
 
 from core.clipboard_io import parse_tabular_clipboard
+from core.smart_fill import (
+    SMART_FILL_MODE_AUTO,
+    SMART_FILL_MODE_CATEGORY,
+    SMART_FILL_MODE_CUSTOM,
+    SMART_FILL_MODE_DATETIME,
+    SMART_FILL_MODE_NUMERIC,
+    normalize_custom_list,
+)
 
 
 class DataTableWidget(QWidget):
@@ -469,6 +478,121 @@ class RangeFillDialog(QDialog):
     def step(self) -> float:
         """Return the numeric increment between generated values."""
         return self._step.value()
+
+
+class SmartFillDialog(QDialog):
+    """Choose how blank cells should be inferred from selected seed values."""
+
+    def __init__(
+        self,
+        selection_description: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Create the smart-fill options dialog for one rectangular selection."""
+        super().__init__(parent)
+        self.setWindowTitle("Smart Fill Selection")
+        self.setMinimumWidth(500)
+
+        selection_label = QLabel(selection_description)
+        selection_label.setWordWrap(True)
+
+        self._mode = QComboBox()
+        self._mode.addItem("Auto", SMART_FILL_MODE_AUTO)
+        self._mode.addItem("Numeric", SMART_FILL_MODE_NUMERIC)
+        self._mode.addItem("Date-Time", SMART_FILL_MODE_DATETIME)
+        self._mode.addItem("Category Cycle", SMART_FILL_MODE_CATEGORY)
+        self._mode.addItem("Custom List", SMART_FILL_MODE_CUSTOM)
+
+        self._pattern = QComboBox()
+        self._pattern.addItem("Auto detect", 0)
+        self._pattern.addItem("One linear sequence", 1)
+        for period in range(2, 9):
+            self._pattern.addItem(f"{period} interleaved sequences", period)
+
+        self._custom_list = QPlainTextEdit()
+        self._custom_list.setPlaceholderText(
+            "One item per line, for example:\nMonday\nTuesday\nWednesday"
+        )
+        self._custom_list.setFixedHeight(115)
+
+        self._hint = QLabel()
+        self._hint.setWordWrap(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QFormLayout(self)
+        layout.addRow("Selection", selection_label)
+        layout.addRow("Mode", self._mode)
+        self._pattern_label = QLabel("Numeric pattern")
+        layout.addRow(self._pattern_label, self._pattern)
+        self._custom_list_label = QLabel("Custom list")
+        layout.addRow(self._custom_list_label, self._custom_list)
+        layout.addRow(self._hint)
+        layout.addRow(buttons)
+        self._mode.currentIndexChanged.connect(self._sync_mode_controls)
+        self._sync_mode_controls()
+
+    def _sync_mode_controls(self) -> None:
+        """Show only the controls and explanation relevant to the selected mode."""
+        mode = self.mode()
+        numeric_controls = mode in {SMART_FILL_MODE_AUTO, SMART_FILL_MODE_NUMERIC}
+        custom_controls = mode == SMART_FILL_MODE_CUSTOM
+        self._pattern_label.setVisible(numeric_controls)
+        self._pattern.setVisible(numeric_controls)
+        self._custom_list_label.setVisible(custom_controls)
+        self._custom_list.setVisible(custom_controls)
+
+        hints = {
+            SMART_FILL_MODE_AUTO: (
+                "Auto chooses Numeric for finite numbers, Date-Time for recognizable date "
+                "values, and Category Cycle otherwise. Existing cells are anchors and only "
+                "blank selected cells are written."
+            ),
+            SMART_FILL_MODE_NUMERIC: (
+                "One anchor repeats; two or more anchors define a row-position linear "
+                "sequence. Auto pattern can detect consecutive interleaved numeric seeds "
+                "such as 1, 10, 2, 20."
+            ),
+            SMART_FILL_MODE_DATETIME: (
+                "Date-Time infers the field order of numeric dates (including any ordering "
+                "of day, month, and year) and keeps it in filled cells. Exact month/month-end "
+                "steps are preserved; other values use a fixed elapsed-time interval."
+            ),
+            SMART_FILL_MODE_CATEGORY: (
+                "Enter one complete category cycle in consecutive cells, such as Red, Blue, "
+                "Green. Smart Fill repeats that cycle into selected blanks."
+            ),
+            SMART_FILL_MODE_CUSTOM: (
+                "Enter the ordered list once, one item per line. Existing anchors align the "
+                "list; a completely blank selection starts from its first item."
+            ),
+        }
+        self._hint.setText(hints[mode])
+
+    def mode(self) -> str:
+        """Return the requested inference mode."""
+        return str(self._mode.currentData())
+
+    def period(self) -> int:
+        """Return zero for automatic detection or the requested pattern period."""
+        return int(self._pattern.currentData())
+
+    def custom_values(self) -> tuple[str, ...]:
+        """Return nonblank custom-list entries in their entered order."""
+        return normalize_custom_list(self._custom_list.toPlainText().splitlines())
+
+    def accept(self) -> None:
+        """Require a nonempty ordered list when Custom List mode is selected."""
+        if self.mode() == SMART_FILL_MODE_CUSTOM and not self.custom_values():
+            QMessageBox.warning(
+                self,
+                "Custom List Required",
+                "Enter at least one custom-list item, one item per line.",
+            )
+            return
+        super().accept()
 
 
 class TableSizeDialog(QDialog):

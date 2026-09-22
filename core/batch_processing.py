@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 
@@ -52,6 +53,7 @@ class FormulaBatchTask:
     target_column: str
     expression: str
     frame: pd.DataFrame
+    worksheet_frames: Mapping[str, pd.DataFrame] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +142,7 @@ def _run_formula_batch_task(task: FormulaBatchTask) -> FormulaBatchWorkerResult:
             target_column=task.target_column,
             expression=task.expression,
             row_positions=None,
+            worksheet_frames=task.worksheet_frames,
         )
         return FormulaBatchWorkerResult(
             source_sheet=task.source_sheet,

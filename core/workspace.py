@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from core.data_backends import PANDAS_BACKEND, normalize_backend
+from core.operations import rename_worksheet_references
 from models.fit_functions import CustomFitModel
 
 
@@ -88,6 +89,17 @@ class ColumnMetadata:
 
 
 @dataclass(slots=True)
+class FigureExtractionSession:
+    """Embedded image and calibration state used to resume figure extraction."""
+
+    session_id: str
+    extraction_kind: str
+    image_png: bytes
+    source_path: str = ""
+    state: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class Dataset:
     """A named DataFrame plus optional source metadata."""
 
@@ -97,6 +109,7 @@ class Dataset:
     backend: str = PANDAS_BACKEND
     formulas: dict[str, str] = field(default_factory=dict)
     column_metadata: dict[str, ColumnMetadata] = field(default_factory=dict)
+    figure_session: FigureExtractionSession | None = None
 
     def metadata_for_column(self, column_name: str) -> ColumnMetadata:
         """Return metadata for a column, creating an empty record if needed."""
@@ -208,6 +221,7 @@ class Workspace:
         )
         duplicate.formulas = deepcopy(source.formulas)
         duplicate.column_metadata = copy_column_metadata(source.column_metadata)
+        duplicate.figure_session = deepcopy(source.figure_session)
         duplicate.sync_column_metadata_attrs()
         return duplicate
 
@@ -222,6 +236,11 @@ class Workspace:
         dataset = self._datasets.pop(old_name)
         dataset.name = unique_name
         self._datasets[unique_name] = dataset
+        for workspace_dataset in self._datasets.values():
+            workspace_dataset.formulas = {
+                column_name: rename_worksheet_references(expression, old_name, unique_name)
+                for column_name, expression in workspace_dataset.formulas.items()
+            }
         self._rename_dataset_references_in_plots(old_name, unique_name)
         return unique_name
 

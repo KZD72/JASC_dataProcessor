@@ -4,7 +4,7 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 
 ## Features
 
-- **Data Ingestion**: Import CSV/TXT data or select worksheet tabs from modern Excel `.xlsx`/`.xlsm` workbooks as value-only datasets, with explicit warnings for unsupported workbook objects; data can also be entered manually in the spreadsheet interface.
+- **Data Ingestion**: Batch-import CSV/DAT/TXT data with delimiter, leading-metadata, and header preflight/inference, or select worksheet tabs from modern Excel `.xlsx`/`.xlsm` workbooks as value-only datasets with explicit warnings for unsupported workbook objects; data can also be entered manually in the spreadsheet interface.
 - **Data Editing**: Edit imported datasets directly with bounded undo/redo, append/insert/delete row and column operations, fast block-oriented spreadsheet copy/paste, whole-column copy/paste, large-dataset warnings, sampled table auto-sizing, and per-column name/role/unit/long-name/comment metadata.
 - **Formula Engine**: Apply safe math operations to columns using a sandboxed expression evaluator with NumPy/SciPy support, positional aliases such as `col1`, exact-name insertion helpers, worksheet batch targets, and protected output naming by default.
 - **Signal Processing & Calculus**: Perform numerical differentiation, cumulative integration, FFT, and previewed smoothing with adjacent-average, median, Savitzky-Golay, LOWESS, FFT low-pass, or derivative-smoothing reconstruction.

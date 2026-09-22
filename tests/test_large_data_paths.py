@@ -65,7 +65,7 @@ class ClipboardBlockTests(unittest.TestCase):
         self.assertEqual(dataset.frame.shape, (1_000, 3))
         self.assertEqual(dataset.frame.iloc[999, 0], 999.0)
         self.assertEqual(dataset.frame.iloc[999, 1], "item-999")
-        self.assertEqual(dataset.frame.iloc[999, 2], "1000")
+        self.assertEqual(dataset.frame.iloc[999, 2], 1000.0)
         self.assertNotIn("x", dataset.formulas)
 
         self.assertTrue(model.undo())

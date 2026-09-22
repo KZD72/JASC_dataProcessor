@@ -1,6 +1,6 @@
 # JASC Data Processor - Comprehensive User Manual
 
-*Version 0.1.0 - reviewed against the application source on 24 August 2026*
+*Version 0.1.0 - reviewed against the application source on 22 September 2026*
 
 JASC Data Processor is a desktop application for scientific worksheet editing, data preparation, mathematical transforms, signal processing, interpolation, statistics, curve fitting, figure digitization, and Matplotlib-based visualization. This manual describes the features implemented in the current repository. Features listed as limitations are not yet available.
 
@@ -125,7 +125,7 @@ The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**
 | File | Open Project, Save Project, Save Project As, New Blank Sheet, Close Project, Import Data, Import From Figure, Export Dataset, Exit |
 | Edit | Undo, Redo, Clear Selected Cell Values, Delete Selected Rows, Delete Selected Columns, Paste Values Transposed |
 | View | Navigator/section/inspector visibility and Reset View to Default |
-| Data | Duplicate/Rename/Remove Dataset; Add/Insert Row or Column; Resize Sheet; Fill Range; all Data Preparation tools; Column Metadata; Apply Formula |
+| Data | Duplicate/Rename/Remove Dataset; Add/Insert Row or Column; Resize Sheet; Fill Range; Smart Fill Selection; all Data Preparation tools; Column Metadata; Apply Formula |
 | Analysis | Derivative, Integral, Smoothing, Interpolation, FFT, Inverse FFT, Statistics, Custom Fit Models, Curve Fit |
 | Plot | New Empty Plot, Save Current Plot, Copy Current Plot to Clipboard, Load/Duplicate/Remove Selected Plot |
 
@@ -185,6 +185,7 @@ A project is a ZIP archive containing CSV worksheet payloads and JSON metadata. 
 - Column formulas.
 - Column roles, value types, precision, units, long names, and comments.
 - Operation-provenance comments written by JASC.
+- Resumable figure-extraction sessions attached to digitized datasets, including an embedded working image and X/Y calibration; colour-plot sessions also retain their empirical colour-bar calibration.
 - Saved plot definitions, including plot series and appearance settings.
 - Project-scoped custom fit models.
 
@@ -203,19 +204,37 @@ Because worksheet payloads are CSV, specialized pandas dtypes are reconstructed 
 
 ## 4. Importing and Creating Data
 
-### Import CSV or TXT data
+### Import CSV, DAT, or TXT data
 
 1. Choose **File > Import Data...** (`Ctrl+I`) or use the toolbar action.
-2. Select a `.csv` or `.txt` file.
-3. In **Import Options**, choose one delimiter:
+2. Select one or several `.csv`, `.dat`, or `.txt` files. Every successfully imported file becomes an independent dataset named from its filename.
+3. Review the preflight table. For each file it shows the detected delimiter, number of leading metadata rows, header status, column count/names, and the first data values.
+4. Leave **Delimiter** on **Auto (infer from file)** or choose an explicit delimiter:
+   - Auto (comma, semicolon, tab, pipe, or whitespace)
    - Comma
    - Semicolon
    - Tab
+   - Pipe
    - Space / whitespace (one or more whitespace characters)
-4. Check **First row contains column names** when row 1 contains headers. Clear it to generate `Column 1`, `Column 2`, and so on.
-5. Confirm the import.
+5. Choose **Headers**:
+   - **Auto (detect for each file)** is the default.
+   - **First tabular row contains column names** forces a header after any discarded metadata rows.
+   - **No header row** keeps the first tabular row as data and creates `Column 1`, `Column 2`, and so on.
+6. Choose **Leading metadata**:
+   - **Auto (discard detected leading metadata)** is the default and is resolved independently for each file.
+   - **Keep all leading rows** begins parsing at the start of every file.
+   - **Discard a fixed number of leading rows** applies one explicit count to every selected file.
+7. Confirm the import.
 
-The current import dialog does not auto-detect a delimiter or header row, does not select an arbitrary starting row, and always reads text as UTF-8. If decoding fails, convert the source file to UTF-8 before importing.
+Auto examines a bounded sample before pandas reads the complete file. A file with no separator evidence imports as one column. Header and metadata detection use structural/value-pattern heuristics, so the preflight is intentionally visible and every inference can be overridden. JASC currently reads text as UTF-8; if decoding fails, convert the source file to UTF-8 before importing.
+
+When several files use Auto headers, JASC compares the results before importing. If some appear headerless or the detected names differ, choose:
+
+- **Keep Detected** to import each file with its own detected structure.
+- **Use Generic Columns** to drop detected header rows and consistently name columns `Column 1`, `Column 2`, and so on; genuinely headerless files keep their first data row.
+- **Cancel Batch** to import nothing and revise the source selection or rules.
+
+Unreadable files stop the preflight. Once importing begins, an individual parse failure or declined large-dataset warning is reported without removing other files imported successfully.
 
 The imported dataset uses the source filename as its base name and remembers the source path. Files of at least 100 MiB trigger a warning before parsing. Large parsed worksheets trigger a second size/memory warning before they enter the workspace.
 
@@ -244,7 +263,7 @@ Excel workbooks are compressed containers, so their in-memory DataFrames can be 
 Choose **File > New Blank Sheet** (`Ctrl+N`), the toolbar action, or **New Sheet** in the dataset navigator. JASC creates a normal workspace dataset with:
 
 - 25 initially blank rows.
-- Numeric `x` and `y` columns.
+- Auto-typed `x` and `y` columns. All-numeric input is stored numerically, while dates and text remain accepted without changing metadata first.
 - `X` and `Y` column roles already assigned.
 
 The sheet is immediately editable in the Data tab. Use Data menu commands to add or insert rows and columns.
@@ -259,6 +278,25 @@ Choose **Data > Fill Range...** to populate a sequence. Configure:
 - **Start value** and **Step**.
 
 JASC grows the worksheet if required and writes `start + offset * step`. It marks the output Numeric, assigns the X role when the name is `x`, `time`, or `t`, removes a stale formula from the overwritten column, and records provenance in the column comment.
+
+### Smart Fill from existing cell values
+
+Use **Data > Smart Fill Selection...**, the **Smart Fill** inspector button, or **Columns > Smart Fill Selection...** in the worksheet context menu to complete blank cells from values already entered in the sheet:
+
+1. Enter seed values when the selected mode requires them.
+2. Select one contiguous rectangle containing the seeds and blank destination cells. A Custom List may instead fill a completely blank selection.
+3. Open Smart Fill and select **Auto**, **Numeric**, **Date-Time**, **Category Cycle**, or **Custom List**.
+
+Smart Fill treats every existing value as an anchor and writes only blank selected cells. It handles:
+
+- **Auto** chooses Numeric when every anchor is a finite number, Date-Time for datetime values or recognizable date/time strings, and Category Cycle for other text. A column explicitly marked Text remains categorical in Auto even if its labels look numeric.
+- **Numeric** repeats one seed or applies linear interpolation/extrapolation to two or more anchors using visible worksheet row positions. For example, `1, 2, blank, blank` becomes `1, 2, 3, 4`; `1, blank, 2` becomes `1, 1.5, 2`. Numeric pattern controls can also detect or explicitly select two through eight interleaved linear sequences: `1, 10, 2, 20, blank, blank` becomes `1, 10, 2, 20, 3, 30`.
+- **Date-Time** repeats one timestamp or infers the interval between two or more anchors. Numeric text dates accept every ordering of day, month, and year (`day/month/year`, `month/day/year`, `year/month/day`, `year/day/month`, `day/year/month`, or `month/year/day`). Smart Fill infers one order from all anchors, uses sequence evidence when day and month are both 12 or less, falls back deterministically to day-first if the anchors cannot distinguish them, and keeps the inferred order, separator, and zero-padding in generated cells. Exact same-day or month-end monthly/yearly patterns use calendar offsets, so `2024-01-31, 2024-02-29` continues with `2024-03-31`; other patterns use elapsed-time interpolation/extrapolation.
+- **Category Cycle** takes the first consecutive seed block as one complete cycle. `Red, Blue, Green, blank, blank` continues with `Red, Blue`. Additional nonblank anchors must agree with the cycle.
+- **Custom List** accepts one ordered item per line. Existing anchors align the list case-insensitively; with no anchors, filling starts at its first item. Lists can represent weekdays, months, cities, colours, sample states, or a user-specific order.
+- Several selected columns are inferred independently using the same requested mode and custom list.
+
+The operation is deliberately deterministic and does not query the web. It does not guess arbitrary semantic relationships, nonlinear numeric models, or worksheet cell background formatting: colour names are category values, while actual cell colours would require a separate formatting system. Smart Fill is undoable, invalidates stale whole-column formula metadata in modified columns, and records its resolved mode and pattern in column provenance.
 
 ---
 
@@ -287,6 +325,8 @@ Use the **Correction** tab when a photograph or scan is skewed.
 4. Click **Apply Correction**.
 
 Calibration and extraction then operate on the rectified working image. **Clear Points** removes the four correction points. **Reset Original** restores the original image and clears pixel-dependent calibration and extraction state.
+
+Correction is optional. When you switch from **Correction** to **Calibration**, JASC automatically changes the canvas tool from the correction corners to the first unpicked X/Y calibration reference. Returning to Correction similarly selects the first unpicked correction corner.
 
 ### Step 2: calibrate X and Y
 
@@ -344,16 +384,27 @@ Open **Output** to set the dataset name and inspect the read-only preview. Each 
 - Extraction method, trace rule/color, ROI count, and source image.
 - Symbol ID, area, score, size, and template diagnostics.
 
-To extract another curve from the same figure without repeating calibration:
+To create a worksheet and continue extracting from the same figure without repeating calibration:
 
 1. Enter a distinct dataset name for the completed curve.
-2. Click **Save Current Curve & Start New**. JASC stores a snapshot of its rows and provenance, then clears only curve-specific manual points, uncertainty marks, automatic trace, symbol results/template, and ROI marks.
-3. Extract the next curve using the same working image, perspective correction, and X/Y calibration. Repeat the save/start action for any additional curves.
-4. Leave the last curve in the preview and click **Create Dataset(s)**. Every saved curve and the current curve are imported as separate workspace datasets. If the last curve was already saved and the current extraction is empty, the saved curves are still imported.
+2. Click **Create Dataset & Continue**. The worksheet is added to the workspace immediately while the digitizer remains open.
+3. After the worksheet is successfully added, JASC clears only curve-specific manual points, uncertainty marks, automatic trace, symbol results/template, and ROI marks. The embedded working image, perspective-correction result, and X/Y calibration remain available. If worksheet creation is declined or fails, the current extraction remains intact.
+4. Extract the next curve and repeat **Create Dataset & Continue** for every additional worksheet.
 
-The saved-curve status in **Output** lists how many curves are waiting to be imported. Loading another image, applying a new perspective correction, or resetting to the original image changes pixel geometry, so JASC asks for confirmation before clearing saved curves and calibration.
+**Queue Current Curve & Start New** remains available when several completed curves should be imported together when the dialog closes. The Output status distinguishes queued curves from datasets already created. **Close** warns before discarding an uncreated current extraction. Loading another image, applying a new perspective correction, or resetting to the original image changes pixel geometry, so JASC asks for confirmation before clearing queued curves and calibration.
 
-For a single curve, skip **Save Current Curve & Start New** and click **Create Dataset(s)** directly. JASC requires a loaded image, complete four-point calibration, at least one manual, traced, or symbol point, and a dataset name. Each created dataset receives numeric coordinate metadata, X/Y/error roles where appropriate, source/provenance comments, and the image source path.
+JASC requires a loaded image, complete four-point calibration, at least one manual, traced, or symbol point, and a dataset name. Each created dataset receives numeric coordinate metadata, X/Y/error roles where appropriate, source/provenance comments, the image source path, and a resumable figure-session snapshot.
+
+### Resume a saved figure extraction
+
+Every dataset created through **Create Dataset & Continue** stores a reference to its figure session. Choose the dataset and use **Data > Resume Figure Extraction...** or the dataset context menu to reopen it. JASC restores:
+
+- The exact working image used for digitization, embedded in the `.jasc` project rather than loaded from the original external path.
+- X/Y calibration pixels, values, and linear/log scale choices.
+- Whether the embedded working image resulted from perspective correction.
+- For 2D colour plots, colour-bar endpoints and values, normalization, sampling controls, validity threshold, and probe patch radius.
+
+Extracted point markers are deliberately not restored: reopening starts a clean next curve/probe set on the retained image and calibration. Datasets created from the same session share one embedded image inside the project archive. Saving embedded raster images increases `.jasc` project size, particularly when unrelated figures or high-resolution images are used.
 
 ### 2D colour plot / heatmap workflow
 
@@ -366,7 +417,7 @@ Choose **2D colour plot / heatmap** in the initial figure-type dialog. This work
 5. Adjust **Bar sample width** if necessary. JASC samples a median stripe across that width along the complete endpoint-to-endpoint segment. **Palette samples** controls its resolution. Click **Rebuild Scale** and inspect the displayed sampled palette.
 6. Set the probe **Median patch radius**. A small median patch reduces isolated compression noise, but a large radius can mix neighbouring colours near sharp boundaries.
 7. Click **Start Probing**, then click locations in the colour plot. The shared magnifier shows live X, Y, estimated Z, RGB, confidence, and validity. Click **Stop** when finished.
-8. In **Output**, inspect the rows. Use **Undo Last**, **Remove Selected**, or **Clear Probes** to clean the result. To preserve this probe set and begin another one with the same image, X/Y calibration, and colour-scale calibration, enter its dataset name and click **Save Current Curve & Start New**. Only the probes are cleared. Repeat as needed, then click **Create Dataset(s)** to import every saved and current probe set as a separate dataset.
+8. In **Output**, inspect the rows. Use **Undo Last**, **Remove Selected**, or **Clear Probes** to clean the result. Enter its dataset name and click **Create Dataset & Continue** to add the worksheet immediately while retaining the image, X/Y calibration, and colour-scale calibration. Only the probes are cleared, so additional probe datasets can be created without closing or recalibrating.
 
 Each output row contains calibrated `x`, `y`, and estimated `z`; source pixel coordinates; median red/green/blue values; normalized palette position; CIE Lab colour distance; confidence; ambiguity and validity flags; patch radius; extraction method; and source image. X, Y, and Z metadata roles are assigned automatically. Rows that fail the distance threshold or are ambiguous are deliberately retained so they can be inspected and filtered instead of silently discarded. **Maximum Lab distance** controls the validity cutoff.
 
@@ -421,7 +472,7 @@ Pasted columns are inserted before the destination and renamed automatically if 
 
 ### Undo and redo
 
-Use **Edit > Undo** (`Ctrl+Z`) and **Edit > Redo** (`Ctrl+Y`). History covers cell edits and clearing, worksheet resizing, row/column changes, clipboard pastes, Fill Range, formula writes, metadata/column renames, and current-sheet calculus/smoothing changes where the operation captures editor state.
+Use **Edit > Undo** (`Ctrl+Z`) and **Edit > Redo** (`Ctrl+Y`). History covers cell edits and clearing, worksheet resizing, row/column changes, clipboard pastes, Fill Range, Smart Fill, formula writes, metadata/column renames, and current-sheet calculus/smoothing changes where the operation captures editor state.
 
 History is dataset-specific and resets when the displayed dataset changes. Each undo and redo stack retains at most 20 snapshots and approximately 256 MiB. If one worksheet snapshot exceeds the budget, JASC performs the edit but warns that it cannot be undone. Creating/removing datasets or batch changes to non-visible sheets are not guaranteed to be undoable from the current table history.
 
@@ -544,8 +595,10 @@ Choose **Data > Apply Formula...** (`Ctrl+Shift+F`) to calculate a new column or
    - Stop and warn.
    - Overwrite/update the existing column.
 3. Enter the expression.
-4. Optionally apply only to selected rows. Selected-row mode applies only to the current sheet.
-5. Select one or more sheets for a full-column/batch operation.
+4. Choose the **Operation scope**:
+   - **Entire target column** evaluates and writes every row. This is the mode used for multi-sheet batches.
+   - **Selected cells in target column** writes only cells that are selected in that specific target column. It applies only to the current sheet and always updates the existing target column.
+5. Select one or more sheets for an entire-column/batch operation.
 6. Choose exact-name or position column matching for batch targets.
 7. For formula batches, choose **Auto**, **Sequential**, or **Parallel processes**, plus the maximum worker count.
 8. Confirm the preflight preview and run.
@@ -559,15 +612,19 @@ When a formula-backed target column is selected, JASC reloads its stored express
 | `voltage` | A column whose name is a safe Python identifier and does not conflict with a built-in name |
 | `col1`, `col2`, ... | First, second, and later columns by position |
 | `col("Voltage (V)")` | Exact-name access for spaces, punctuation, keywords, or conflicting names |
+| `sheet("Calibration", "Gain")` | Column `Gain` from worksheet `Calibration`, aligned by visible row position |
 | `row` | One-based row-number series |
 | `index` | The pandas index as a series |
 
-Use the dialog's **Insert colN** and **Insert col("Name")** buttons to avoid typing mistakes.
+Use the worksheet/column selectors and insert buttons to avoid typing mistakes. Choosing the current worksheet inserts `colN` or `col("Name")`; choosing another worksheet inserts a complete `sheet("Worksheet", "Column")` reference.
+
+Cross-worksheet values are matched by visible row position, independently of the pandas index. If the referenced worksheet is shorter than the target, remaining target rows receive missing values; extra source rows are ignored. Renaming a worksheet updates literal `sheet(...)` references saved in formula metadata.
 
 Examples:
 
 ```python
 col("Voltage (V)") / col("Current (A)")
+col("Raw signal") * sheet("Calibration", "Gain") + sheet("Calibration", "Offset")
 np.sin(col1) * np.exp(-col2)
 where(col1 > 0, sqrt(col1), nan)
 row * 0.1
@@ -594,7 +651,7 @@ The Help panel inside Apply Formula lists the allowed functions and examples for
 - File access, imports, Python builtins, private attributes, assignments, comprehensions, and arbitrary object access are blocked.
 - A scalar result is repeated across the sheet. A vector result must match the worksheet length.
 - Numeric/Scientific metadata is validated before downstream math operations.
-- Applying a formula stores the expression in project metadata and records it in the target column comment.
+- Entire-column application stores the expression in project metadata and records it in the target column comment. Selected-cell application records cell-scoped provenance but removes any whole-column formula marker because the complete column no longer represents one formula.
 
 ---
 
@@ -1097,12 +1154,14 @@ python main.py
 
 If `python` is not found, activate the environment where the dependencies were installed or invoke that environment's Python executable directly.
 
-### A CSV/TXT file parses incorrectly
+### A CSV/DAT/TXT file parses incorrectly
 
-- Reimport and choose the correct delimiter.
-- Check or clear **First row contains column names** as appropriate.
+- Review the preflight row, especially detected metadata rows, header status, and preview values.
+- Auto detects comma, semicolon, tab, pipe, and whitespace. If an unusual or inconsistent file is parsed incorrectly, reimport and choose an explicit delimiter.
+- Force **First tabular row contains column names** or **No header row** when header inference is wrong.
+- Choose a fixed number of leading rows when an instrument preamble cannot be distinguished reliably from the data table.
 - Save the source as UTF-8.
-- JASC does not currently auto-detect delimiters/headers, skip arbitrary leading rows, preview imports, or choose encodings.
+- JASC does not currently choose encodings or provide per-file manual overrides inside one batch; split unusually inconsistent files into separate imports when they require different forced rules.
 
 ### A numeric operation rejects a column
 
@@ -1144,7 +1203,7 @@ If `python` is not found, activate the environment where the dependencies were i
 The current version does not provide:
 
 - Excel export, legacy `.xls` import, named/range-only Excel import, database, JSON/XML, HDF5, NetCDF, MATLAB, or instrument-format connectors.
-- Import preview, arbitrary header/start rows, encoding selection, or batch file import.
+- Encoding selection, arbitrary non-leading row filtering during import, or different forced parser overrides for individual files inside one batch.
 - A workbook/folder hierarchy, matrix sheets, rich cell formatting, notes, or dependency/recalculation graphs.
 - Multi-condition filters, pivot tables, resampling, date/time tooling, or reusable preparation recipes.
 - Multi-panel pages, true 3D plots, polar/ternary plots, annotation objects, or general graph templates.
