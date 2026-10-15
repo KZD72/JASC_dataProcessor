@@ -122,11 +122,11 @@ The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**
 
 | Menu | Commands |
 | --- | --- |
-| File | Open Project, Save Project, Save Project As, New Blank Sheet, Close Project, Import Data, Import From Figure, Export Dataset, Exit |
+| File | Open Project, Save Project, four explicit Save As security modes, Signing Identities, New Blank Sheet, Close Project, Import Data, Import From Figure, Export Dataset, Exit |
 | Edit | Undo, Redo, Clear Selected Cell Values, Delete Selected Rows, Delete Selected Columns, Paste Values Transposed |
 | View | Navigator/section/inspector visibility and Reset View to Default |
 | Data | Duplicate/Rename/Remove Dataset; Add/Insert Row or Column; Resize Sheet; Fill Range; Smart Fill Selection; all Data Preparation tools; Column Metadata; Apply Formula |
-| Analysis | Derivative, Integral, Smoothing, Interpolation, FFT, Inverse FFT, Statistics, Custom Fit Models, Curve Fit |
+| Analysis | Derivative, Integral, Smoothing, Interpolation, FFT, Inverse FFT, Statistics, Baseline Correction, Peak Analysis, Raman Analysis, Custom Fit Models, Curve Fit |
 | Plot | New Empty Plot, Save Current Plot, Copy Current Plot to Clipboard, Load/Duplicate/Remove Selected Plot |
 
 ### Keyboard shortcuts
@@ -170,10 +170,11 @@ Names are made unique automatically. If `Sheet` already exists, another dataset 
 
 ### Open, save, and close a project
 
-1. Choose **File > Open Project...** to load a `.jasc` file. Opening a project replaces the current workspace after confirmation.
+1. Choose **File > Open Project...** to load an open `.jasc` or encrypted `.jascx` file. Encrypted projects prompt for their password. Opening a project replaces the current workspace after confirmation.
 2. Choose **File > Save Project** to save to the current project path. The first save opens the Save As dialog.
-3. Choose **File > Save Project As...** to choose a different path. JASC adds `.jasc` if no suffix is supplied.
-4. Choose **File > Close Project** to clear the workspace without closing JASC. This action warns that unsaved changes will be lost.
+3. Choose **File > Save Open Project As...** for a normal `.jasc`, or **File > Save Encrypted Project As...** for password-protected `.jascx`. Encrypted saves ask for **Encryption password** and **Confirm encryption password**; the password is retained only for the current open application session so later saves do not repeatedly prompt.
+4. Choose **File > Save Signed Open Project As...** for signed `.jasc`, or **File > Save Signed + Encrypted Project As...** for signed `.jascx`. These are separate menu actions rather than hidden file-type choices.
+5. Choose **File > Close Project** to clear the workspace without closing JASC. This action warns that unsaved changes will be lost.
 
 Save before using **File > Exit** or closing the application window. Project-level automatic save and recovery are not implemented.
 
@@ -182,12 +183,52 @@ Save before using **File > Exit** or closing the application window. Project-lev
 A project is a ZIP archive containing CSV worksheet payloads and JSON metadata. It preserves:
 
 - Dataset names, values, source paths, and backend labels.
+- Worksheet-level source/import metadata, parsed instrument fields, and exact raw text preambles.
 - Column formulas.
 - Column roles, value types, precision, units, long names, and comments.
 - Operation-provenance comments written by JASC.
 - Resumable figure-extraction sessions attached to digitized datasets, including an embedded working image and X/Y calibration; colour-plot sessions also retain their empirical colour-bar calibration.
 - Saved plot definitions, including plot series and appearance settings.
 - Project-scoped custom fit models.
+- Named spectral-analysis sessions with readable metric, fitted-curve, parameter,
+  and detected-peak tables plus their configuration and provenance.
+
+Every newly saved version 8 project contains an `integrity.json` **JASC Package Seal** introduced in version 6. Its canonical manifest records every other member's exact filename, original byte size, and SHA-256 digest together with a UTC creation timestamp, random package UUID, and 256-bit random nonce. JASC sorts and deterministically serializes that manifest, combines it with the `JASC-SEAL-v1` domain marker, and hashes it again to create the package seal. Each save receives a new identity and seal even when the scientific content is unchanged. Spectral-analysis internals are normal UTF-8 CSV members under `analyses/`, with JSON metadata in `project.json`, so derived results remain inspectable without JASC.
+
+JASC verifies the seal, names, sizes, and member hashes before loading. Missing, added, renamed, duplicated, resized, or changed members, including a manifest edited without correctly recreating the complete seal, trigger a **Project Integrity Warning** stating that the package may have been forged or damaged. The safe default is Cancel, with an explicit **Open Anyway** choice for a trusted source. Version 5 hash manifests and version 4 or older projects without a manifest remain loadable for backward compatibility.
+
+The Package Seal is designed as a practical normal-security forgery and corruption check. It makes casual CSV replacement or editing only one member hash insufficient, but it is not a digital signature or independent proof of authorship: a knowledgeable attacker who fully reproduces the documented algorithm can generate a different internally consistent package. Use encrypted `.jascx` when the package or threat model is sensitive.
+
+### Open and encrypted project packages
+
+The normal `.jasc` format remains the recommended open-science form. It is an ordinary ZIP archive, so its CSV values and JSON metadata can be recovered without JASC. It provides transparency and portability, not secrecy or proof of authorship.
+
+The optional `.jascx` form encrypts the complete `.jasc` package with AES-256-GCM. Its key is derived from the user password with Scrypt and a random salt; each save also uses a fresh random nonce. Authentication means that a wrong password or any ciphertext/header change is rejected before project data is loaded. Saves replace the destination atomically only after the new package has been completed. JASC never writes the password into the project.
+
+Encryption has deliberate trade-offs:
+
+- A `.jascx` package requires JASC (or a separately implemented compatible decryptor) and its password before the open ZIP/CSV contents can be recovered.
+- There is no password-recovery mechanism. Losing the password means losing access, so retain it in an appropriate password manager.
+- Anyone who knows the password can decrypt, edit, and encrypt a new package. Authenticated encryption therefore protects against outsiders and accidental/unauthorized byte changes, but it does not prove which authorized person created the package.
+- For publication and long-term preservation, save a separate open `.jasc` copy when confidentiality restrictions permit it.
+
+### Digital signatures and signing identities
+
+JASC can optionally sign the Package Seal with Ed25519. The private key creates the signature and must remain secret; the public key verifies it and can be distributed freely. Because the signature covers the Package Seal, an attacker who edits data and completely regenerates the normal manifest still cannot create the original author's signature without the private key.
+
+1. Choose **File > Create Signing Identity...**, select a `.jasc-key` location, enter the researcher or organization name, and protect the private key with a strong password.
+2. JASC writes a password-encrypted `.jasc-key` private identity and a matching `.jasc-pub` public identity. Back up the private key securely. Share only the public file.
+3. Choose **File > Save Signed Open Project As...** or **File > Save Signed + Encrypted Project As...**, then unlock the private key when the clearly labelled **Private-key password** prompt appears.
+4. Recipients obtain the `.jasc-pub` file through an independent trusted channel, compare its SHA-256 fingerprint, and choose **File > Trust Public Signing Key...**.
+
+When a project opens, JASC reports one of four states:
+
+- **Signed and trusted**: the Ed25519 signature is valid and its fingerprint is in the local trusted-signer list.
+- **Signature valid, signer unknown**: the mathematics is valid, but the public-key fingerprint has not been independently trusted.
+- **Unsigned**: the package has normal Package Seal protection but no author signature.
+- **Invalid signature**: the signature is missing where required, malformed, uses a different fingerprint, or no longer matches the Package Seal. JASC treats this as an integrity failure and defaults to cancelling the open operation.
+
+The signature record embeds the public key for portable mathematical verification, while the signed `project.json` declaration binds the claimed signer name and fingerprint to the sealed package. The embedded key alone does not establish identity; trust comes from comparing or importing the matching `.jasc-pub` fingerprint through an independent source. Signed encrypted projects are signed internally before AES-256-GCM encryption, so password authentication and author verification both apply after decryption.
 
 Because worksheet payloads are CSV, specialized pandas dtypes are reconstructed on load rather than serialized as native binary dataframe types.
 
@@ -208,25 +249,38 @@ Because worksheet payloads are CSV, specialized pandas dtypes are reconstructed 
 
 1. Choose **File > Import Data...** (`Ctrl+I`) or use the toolbar action.
 2. Select one or several `.csv`, `.dat`, or `.txt` files. Every successfully imported file becomes an independent dataset named from its filename.
-3. Review the preflight table. For each file it shows the detected delimiter, number of leading metadata rows, header status, column count/names, and the first data values.
-4. Leave **Delimiter** on **Auto (infer from file)** or choose an explicit delimiter:
+3. Review the preflight table. For each file it shows the detected text encoding, delimiter, number of leading metadata rows, header status, column count/names, and the first data values.
+4. Choose a **Data type**. **Auto (infer from file)** is the default; explicit choices are **General table**, **Single spectrum**, and **Spectroscopy map**.
+5. Choose a **Spectrometer** profile. **Auto / generic** is the default. **Horiba LabSpec** supports single spectra and wide spectroscopy maps; **B&W Tek** currently supports single spectra only. JASC stops an unsupported B&W Tek map selection instead of guessing another vendor format.
+6. Leave **Text encoding** on **Auto (detect safely)** or explicitly choose UTF-8, UTF-8 with BOM, UTF-16, Windows-1252/ANSI, or Latin-1. Auto recognizes byte-order marks first, then attempts strict UTF-8, Windows-1252, and Latin-1 without silently inserting replacement characters.
+7. Choose a **Number format**:
+   - **Auto (infer safely)** recognizes unambiguous decimal-point, decimal-comma, scientific-notation, and grouped values by column.
+   - **Decimal point: 1,234.56** treats `.` as decimal and `,` as thousands grouping.
+   - **Decimal comma: 1.234,56** treats `,` as decimal and `.` as thousands grouping.
+8. Leave **Delimiter** on **Auto (infer from file)** or choose an explicit delimiter:
    - Auto (comma, semicolon, tab, pipe, or whitespace)
    - Comma
    - Semicolon
    - Tab
    - Pipe
    - Space / whitespace (one or more whitespace characters)
-5. Choose **Headers**:
+9. Choose **Headers**:
    - **Auto (detect for each file)** is the default.
    - **First tabular row contains column names** forces a header after any discarded metadata rows.
    - **No header row** keeps the first tabular row as data and creates `Column 1`, `Column 2`, and so on.
-6. Choose **Leading metadata**:
-   - **Auto (discard detected leading metadata)** is the default and is resolved independently for each file.
-   - **Keep all leading rows** begins parsing at the start of every file.
-   - **Discard a fixed number of leading rows** applies one explicit count to every selected file.
-7. Confirm the import.
+10. Choose **Leading metadata**:
+   - **Auto (detect and preserve leading metadata)** is the default and is resolved independently for each file. These rows are excluded from the numeric table but retained with the worksheet.
+   - **Keep all leading rows as worksheet data** begins table parsing at the start of every file.
+   - **Use a fixed number of leading metadata rows** applies one explicit boundary to every selected file and retains those rows as metadata.
+11. Confirm the import.
 
-Auto examines a bounded sample before pandas reads the complete file. A file with no separator evidence imports as one column. Header and metadata detection use structural/value-pattern heuristics, so the preflight is intentionally visible and every inference can be overridden. JASC currently reads text as UTF-8; if decoding fails, convert the source file to UTF-8 before importing.
+Auto examines a bounded sample before pandas reads the complete file. A file with no separator evidence imports as one column. Header, metadata, and number-format detection use structural/value-pattern heuristics, so the preflight is intentionally visible and every inference can be overridden. Values such as `12,50` and `1.234,56`, or `12.50` and `1,234.56`, provide clear evidence. A value such as `1.234` alone is inherently ambiguous: it may mean one point two three four or one thousand two hundred thirty-four. Auto therefore retains the backward-compatible point-decimal interpretation; select the explicit comma-decimal mode when the dot is grouping. Leading records beginning with `#`, `$`, or `%`, plus common key/value forms, are parsed when possible and always retained verbatim. Use the **Worksheet Metadata** button above the Data table or **Data > Worksheet Metadata...** to review source/import details, selected number format, parsed fields, and the raw preamble.
+
+Spectrometer-oriented text support includes tab-separated decimal-comma numeric conversion used by Horiba exports, full semicolon-table import for B&W Tek single-spectrum files, and reconstruction of legacy Bruker IR text where a `#c` record stores the X coordinate array followed by scalar intensity values. The requested data type and spectrometer profile are retained in Worksheet Metadata.
+
+JASC also recognizes the wide Horiba LabSpec hyperspectral-map source layout. Its first data row has two blank cells or X/Y coordinate labels followed by numeric Raman shifts; each later row is one complete spatial-pixel spectrum. During import, JASC normalizes that matrix into four numeric worksheet columns: `X`, `Y`, `Raman Shift`, and `Intensity`. Each spatial pixel therefore contributes one worksheet row per Raman shift. Pixel order and Raman-shift order, including descending axes, are preserved. Worksheet Metadata records the wide source layout, normalized worksheet layout, spatial-pixel count, shifts per pixel, unit, and axis range. Map profiles for other manufacturers remain deferred until representative formats are supplied.
+
+Unknown records remain in the raw metadata rather than being discarded. The resolved encoding is recorded in Worksheet Metadata. If an unusual instrument encoding is not identified correctly, choose an explicit encoding and review the preflight before importing. Additional stacked/long-form/multi-acquisition vendor profiles remain planned.
 
 When several files use Auto headers, JASC compares the results before importing. If some appear headerless or the detected names differ, choose:
 
@@ -757,6 +811,220 @@ Generated queries are limited to 1,000,000 points.
 
 The result preserves query coordinates and adds one `{value_column}_interpolated` prediction column per selected value. Result-sheet templates can use `{source}` and `{column}` in batch mode.
 
+### Baseline Correction and Peak Analysis
+
+Choose **Analysis > Baseline Correction...** for a correction-only workflow,
+**Analysis > Peak Analysis...** for a general spectrum workflow, or **Analysis >
+Raman Analysis...** for the same tested configuration and numerical engines with
+results presented in the dedicated Raman Analysis module. The Raman entry does
+not maintain a divergent fitting implementation.
+
+The worksheet from which the command was launched is preselected, but it is not
+locked: choose any workspace worksheet in **Source & Range**, then select one
+X/spectral-axis column and one intensity column explicitly. The engines accept
+ascending or descending and evenly or irregularly spaced X values.
+Missing rows remain missing, while contiguous finite segments are analyzed
+independently. An optional physical-X range can limit the analysis.
+
+For a normalized long-form map, choose **Long-form map (group by X/Y)** under
+**Source layout**. JASC selects this automatically when the worksheet contains
+multiple finite `X`/`Y` coordinate groups, but the control remains explicit so a
+worksheet can be interpreted deliberately. Choose one entry under **Preview X/Y
+pixel**. Only that pixel's spectrum is used for interactive baseline, detection,
+and component-fit preview; the complete repeated-axis table is never treated as
+one spectrum.
+
+After the representative pixel looks correct, choose **Current long-form Raman
+map (group by X/Y)** under **Apply to**. Baseline Correction then applies the
+reviewed baseline parameters independently to every X/Y group. Peak Analysis
+does the same for baseline/detection/fitting and matches reviewed components by
+center tolerance. The saved analysis retains `X` and `Y` on every metric, curve,
+peak, and parameter row. A single-pixel result remains available by choosing
+**Current preview spectrum / selected pixel** instead.
+
+The **Baseline** tab provides:
+
+- arPLS (automatic default), AsLS, airPLS, SNIP, and rubber-band methods;
+- manual anchors with linear, PCHIP, or Akima interpolation. Choose **Explicit
+  X:Y baseline points** to enter `x:y` pairs separated by semicolons, or **X
+  positions (sample each source signal)** to enter a list such as
+  `100; 250; 400; 700`;
+- constant, linear, and polynomial backgrounds; and
+- explicit positive, negative, or mixed peak polarity.
+
+X-only anchors are the recommended reusable segment definition. JASC stores the
+physical X positions, then independently interpolates the current source signal
+at those positions whenever the correction runs. The same profile therefore
+uses identical spectral locations across worksheets or map pixels without
+incorrectly copying one spectrum's baseline Y values into another. Every anchor
+must be unique and inside the finite, selected X range. The resolved X:Y points
+are retained in operation provenance.
+
+`pybaselines` is the preferred backend. If it is absent, JASC uses a sparse,
+memory-bounded fallback and reports that fact in the warnings/provenance. The
+preview reports convergence and iteration diagnostics. One-sided baseline
+methods warn when mixed-polarity peaks may bias the result.
+
+The **Detection** tab uses prominence-based SciPy peak finding on the corrected
+signal. Prominence may be explicit or estimated from robust first-difference
+noise. Height/SNR, minimum center distance, minimum/maximum FWHM, minimum
+plateau width, maximum candidate count, polarity, and optional moving-median or
+Savitzky-Golay smoothing are configurable. Distances and widths are always in
+physical X units, including on irregular axes.
+
+The preview shows raw data with its baseline and corrected data with linked peak
+markers. In the review table you can disable a candidate, edit its center,
+remove it, or add a candidate at a physical X coordinate. Numerical analysis
+always uses the complete input; only preview rendering is decimated for long
+spectra.
+
+Use the toolbar directly above the preview to inspect small features. **Zoom**
+lets you drag a rectangle around a small peak, **Pan** moves through the enlarged
+view, **Back/Forward** revisit view changes, and **Home** restores the complete
+preview. The toolbar's save action exports the currently displayed preview image;
+it does not create an analysis worksheet or parameter profile.
+
+### Reusing Peak Analysis parameters
+
+Use **Save Parameters...** and **Load Parameters...** at the top of either
+Baseline Correction or Peak Analysis. Profiles are portable, human-readable
+UTF-8 JSON files with the `.jasc-analysis.json` extension. A profile saved from
+Baseline Correction contains the range and baseline subset; one saved from Peak
+Analysis additionally contains detector and fit settings. Together the fields are:
+
+- the optional physical analysis range;
+- every baseline method control, interpolation choice, and explicit or X-only
+  anchor list;
+- every detection threshold, physical distance/FWHM/plateau control, width
+  relative height, smoothing choice, and candidate limit;
+- corrected/raw fit mode, the shared baseline, loss function, maximum
+  evaluations, and peak-center matching tolerance; and
+- reviewed component enable states, reference centers, polarities, and registered
+  peak-model choices.
+
+Loading a profile changes algorithm settings only. It does not change the source
+worksheet, source columns, output names, output scope, or selected batch sheets.
+After detection refreshes, saved component models are assigned to the nearest
+compatible reviewed centers. Batch/map execution continues to enforce the
+explicit center-matching tolerance. Profile files carry a schema name and version;
+unknown or malformed profiles are rejected instead of being partially guessed.
+
+The **Fit Components** tab creates one row per reviewed peak. Enable or disable
+each component and independently choose a registered Gaussian, Lorentzian,
+Voigt, pseudo-Voigt, Pearson VII, sech-squared, Laplace, Fano, asymmetric
+Gaussian, split Lorentzian, exponentially modified Gaussian, Fraser-Suzuki, or
+Doniach-Sunjic model. Starting centers, heights/areas, and physical widths come
+from the reviewed detector results with model-specific conversions.
+
+Fano is handled as an interference resonance rather than an ordinary one-lobe
+peak. Its positive `amplitude` is the continuum-referenced scale, `center` is the
+unshifted resonance position, `gamma` is half the natural linewidth, and signed
+`q` sets the peak/dip orientation. JASC tries several physically distinct q
+starts and reports resonance position, natural linewidth, q, peak position, dip
+position, peak contrast, dip contrast, and propagated position/intensity errors.
+Its integrated area is explicitly a signed integral over the selected fitting
+window and should not be interpreted as a window-independent total area.
+
+Use **Corrected signal** to fit the baseline-corrected values with a fixed zero
+fit baseline. Use **Raw signal** to fit one shared zero, constant, linear, or
+quadratic baseline plus all enabled peaks. Individual peak offsets are suppressed
+so the baseline is not counted once per component. Least-squares, soft-L1, and
+Huber loss are available. **Fit Selected Components** previews the total fit and
+each component and reports convergence, R squared, RMSE, AIC, and BIC.
+
+Completed full fits are saved first as named analysis sessions under **Workspace
+> Analyses**. Signal, peak, fit-curve, parameter, and map worksheets are unchecked
+by default and are optional exports, preventing intermediate results from
+crowding the Data navigator. Peak rows record
+source/channel, source row, center, polarity, raw/corrected height, prominence,
+FWHM, boundaries and bases, signed area, local SNR, plateau width, asymmetry,
+detector, manual status, and whether the reviewed row is enabled. Worksheet
+metadata stores the complete baseline/detection settings, convergence, warnings,
+noise estimate, software versions, and source columns.
+
+The **Output & Batch** tab can optionally create a composite-fit curve worksheet
+(`observed`, shared `baseline`, `total_fit`, `residual`, and every peak component)
+and a tidy parameter worksheet containing semantic roles, bounds, fixed state,
+standard errors, integrated areas, fit metrics, status, and errors.
+
+Choose an application scope:
+
+- **Current source worksheet** fits only the selected source.
+- **Selected worksheets (batch)** applies the reviewed peak models to the checked
+  worksheets. Each spectrum is redetected and matched to the reviewed centers by
+  the selected physical-X tolerance; peaks are never matched only by prominence
+  rank.
+- **Current long-form Raman map** groups the selected worksheet by its normalized
+  `X` and `Y` columns and fits every pixel spectrum. Curve, peak, parameter, and
+  summary rows carry their X/Y coordinates. A failed worksheet or pixel is
+  reported in the cumulative summary without discarding successful jobs.
+
+### Raman Analysis result viewer
+
+The main workspace starts with only **Data** and **Plot**. After a fit is
+successfully completed, or after a saved result is opened from **Workspace >
+Analyses**, JASC creates the contextual **Raman Results** tab and opens the
+persistent session there. Merely starting JASC or loading a project does not add
+an empty Raman tab. The Workspace **Analyses** section is likewise hidden when
+the project contains no saved analysis sessions.
+
+The map displays the selected numeric parameter or quality metric over X/Y.
+Regular grids render as a heatmap and irregular positions as coloured spatial
+points. Choose **All / quality** or one reviewed peak, then choose intensity,
+area, position, FWHM, asymmetry, native parameters/errors, baseline, SNR, RMSE,
+R squared, or another stored metric. Click a map position, or use **Spectrum /
+pixel**, to update the linked raw/baseline/corrected spectrum, individual
+components, and total fit. The primary view deliberately keeps only the 2D map
+and selected-pixel fit visible so both remain large enough for inspection.
+The fitted-spectrum title shows only the selected X/Y coordinates rather than
+repeating a potentially long source filename. Double-click either plot title,
+an X/Y axis label or tick area, or the fitted-spectrum legend to edit it in
+place. The axis editor controls its label, scale, automatic/manual limits,
+label/tick sizes, and grid.
+
+Double-click the spectrum legend, or use **Curves / Legend...**, to show or hide
+the raw/original signal, removed preprocessing baseline, corrected signal, fit
+input, shared fit baseline, total fit, and individual peak components. The same
+dialog edits legend labels, position, text size, columns, frame, and opacity;
+the button remains available even if every curve or the legend itself is hidden.
+Enable **Show diagnostics** when needed to reveal a compact lower panel with
+separate **Residual / Fit Error**, **Metric Distribution**, and **QC Details**
+tabs. Hiding diagnostics returns that space to the map and fitted spectrum.
+
+Use **Export Results to Worksheets...** only when a normal worksheet is needed.
+The export dialog independently offers parameter maps/fit quality, all fitted
+curves, detailed parameters, and detected/reviewed peaks. Published tables retain
+the analysis and source names in metadata. The internal metrics table contains
+exactly one row per X/Y pixel. Peak identity follows the reviewed template order
+(`peak_1`, `peak_2`, and so on), not the prominence rank at each pixel.
+Available map columns include:
+
+- fitted `peak_N_intensity`, signed integrated `peak_N_area`, fitted
+  `peak_N_position`, numerical `peak_N_fwhm`, and half-width
+  `peak_N_asymmetry`;
+- local `peak_N_snr`, detected position, model name, every native model parameter,
+  and the covariance-derived standard error for each fitted parameter;
+- standardized position/intensity/area/FWHM/asymmetry standard-error columns where
+  that uncertainty is directly available;
+- `fit_r_squared`, `fit_rmse`, `fit_mae`, `fit_aic`, `fit_bic`, convergence,
+  evaluation count, robust noise estimate, and baseline minimum/mean/maximum; and
+- numeric `fit_success` plus text status/error fields. Failed pixels remain in
+  their spatial row with NaN result cells, preserving the coordinate grid.
+
+The dedicated viewer draws these results directly. For further customization,
+export **Parameter maps and fit quality**, then open **2D Maps > Interpolated
+Heatmap** (or a contour subtype), choose `X` and `Y`, and select, for example,
+`peak_1_area`, `peak_1_position`, `peak_1_asymmetry`, or `fit_rmse` as Z. RMSE/MAE
+describe the complete overlapping fit; per-parameter standard errors quantify
+individual fitted-parameter uncertainty. A derived area or numerical FWHM may
+have no direct standard error when it is not a native model parameter, in which
+case its standard-error cell is intentionally blank/NaN rather than estimated
+without a defensible propagation model.
+
+Batch and map execution currently runs sequentially with a cancellable progress
+dialog. The shared background-worker/parallel implementation and advanced
+per-parameter bound/fixed/tied editing remain roadmap work.
+
 ---
 
 ## 10. Statistics Workbench
@@ -833,7 +1101,7 @@ Batch statistics creates long summary results and, when applicable, a wide summa
 Choose **Analysis > Curve Fit...** (`Ctrl+Shift+C`).
 
 1. Select one X column and one or more Y columns.
-2. Select a model and optimizer.
+2. Select a model category, model, and optimizer.
 3. Edit each parameter's initial value, optional lower/upper bounds, and Fixed checkbox.
 4. Configure uncertainty, confidence, residual, and output options.
 5. Select target sheets and column matching.
@@ -841,20 +1109,24 @@ Choose **Analysis > Curve Fit...** (`Ctrl+Shift+C`).
 
 ### Built-in models
 
-- Linear, quadratic, and cubic.
-- Exponential growth, exponential decay, and double exponential decay.
-- Gaussian, asymmetric Gaussian, Lorentzian, and pseudo-Voigt.
-- Sine and damped sine.
-- Logistic and Gompertz.
-- Error-function step.
-- Power law.
-- Log-normal peak.
-- Weibull saturation.
-- Heidler impulse.
-- Bessel J and Bessel Y.
-- Stretched exponential.
+The Category control keeps the 66 built-in functions navigable. **All models** is also available when you want the original flat view.
 
-The dialog shows the selected equation, parameter order, and static defaults.
+| Category | Included models |
+|---|---|
+| Polynomial | Constant, linear, quadratic, cubic, quartic, and quintic |
+| Exponential & decay | Exponential growth, one/two/three-component decay, exponential association, and stretched exponential |
+| Growth & sigmoidal | Four- and five-parameter logistic, Gompertz, Richards, Boltzmann, Hill sigmoid, and Weibull saturation |
+| Peak - symmetric | Gaussian, Lorentzian, exact Voigt, pseudo-Voigt, Pearson VII, sech-squared, and Laplace |
+| Peak - asymmetric | Split Gaussian, split Lorentzian, exponentially modified Gaussian, log-normal, Fraser-Suzuki, Doniach-Sunjic, and Fano resonance |
+| Transition & waveform | Error-function and arctangent steps, smooth rectangular pulse, sine, cosine, damped sine/cosine, sine-squared, and two-harmonic Fourier series |
+| Power, logarithmic & rational | Power law, shifted logarithm, shifted reciprocal, and first-order rational |
+| Binding & kinetics | Michaelis-Menten, Hill saturation, substrate inhibition, and one-/two-site binding |
+| Rheology | Bingham, Herschel-Bulkley, Cross, and Carreau |
+| Probability distributions | Normal, gamma, Weibull, and log-normal PDFs plus Gaussian and Weibull CDFs |
+| Special & physical | Bessel J/Y, Heidler impulse, Arrhenius, and wavelength-domain Planck spectrum |
+| Custom | Project-defined safe expression models |
+
+The dialog shows the selected category description, equation, parameter order, and static defaults. Width conventions are named explicitly: Gaussian `sigma` is a standard deviation and Lorentzian `gamma` is a half width at half maximum. The exact Voigt uses both conventions. The EMG uses area scaling; its `center` is the mean of the underlying Gaussian component. Planck expects wavelength in metres and Arrhenius expects absolute temperature with `activation_over_R` in kelvin.
 
 ### Optimizers and parameter constraints
 
@@ -863,7 +1135,7 @@ The dialog shows the selected equation, parameter order, and static defaults.
 - **Dogbox** supports bounded least squares.
 - **Orthogonal Distance Regression** supports uncertainty in both X and Y.
 
-Blank bounds are unbounded. Fixed parameters remain at their initial values. At least one parameter must remain free.
+Blank bounds are unbounded. Built-in models prefill recommended domain bounds for scale/width/time parameters and bounded fractions such as pseudo-Voigt `eta`; these remain editable. Clear all finite bounds before choosing Levenberg-Marquardt, which only supports unconstrained fitting. Fixed parameters remain at their initial values. At least one parameter must remain free.
 
 ### Uncertainty and weighting
 
@@ -956,8 +1228,13 @@ Accepted changes redraw immediately and update the corresponding lateral Plot In
 | 2D Maps | Interpolated Heatmap | X/Y/Z scattered coordinates, interpolation method, grid resolution |
 | 2D Maps | Contour | X/Y/Z scattered coordinates, interpolation method, grid resolution |
 | 2D Maps | Filled Contour | X/Y/Z scattered coordinates, interpolation method, grid resolution |
+| Spectra Plot | Spectral Heatmap | Long-form X/Y/Raman-shift-or-frequency/intensity data; target center; closest or linear spectral sampling |
+| Spectra Plot | Spectral Contour | Long-form spectral-map data rendered as contour lines at the target center |
+| Spectra Plot | Filled Spectral Contour | Long-form spectral-map data rendered as filled contours at the target center |
 
-2D-map interpolation choices are **Linear**, **Cubic spline**, and **Piecewise cubic**. Maps require numeric Z values and at least three distinct non-collinear X/Y coordinate points. Rendering failures appear as a message on the canvas instead of a blank plot.
+2D-map interpolation choices are **Linear**, **Cubic spline**, and **Piecewise cubic**. The **Palette** selector now occupies its own full-width row above interpolation and grid resolution; it applies Viridis, Plasma, Inferno, Magma, Cividis, Turbo, grayscale, diverging, terrain/ocean, and other supplied Matplotlib colour maps and is retained in saved plots. **Colour-bar label** sets a custom intensity/Z label; leaving it blank uses the selected value column automatically. The rendered colour-bar label can also be edited directly by double-clicking it, like the other rendered axis labels. A dedicated row above the canvas follows the mouse and reports `x`, `y`, and interpolated Z/intensity for ordinary and spectral maps; masked interpolation edges fall back to the closest measured map pixel. Maps require numeric Z values and at least three distinct non-collinear X/Y coordinate points. Rendering failures appear as a message on the canvas instead of a blank plot.
+
+For an imported hyperspectral map, choose **Spectra Plot** and select its worksheet. JASC automatically proposes `X`, `Y`, `Raman Shift` (or a frequency/wavenumber equivalent), and `Intensity`. Enter the target center and choose **Closest measured shift** to take the nearest available spectral sample independently at every pixel, or **Linear spectral interpolation** to interpolate between the two surrounding samples in every pixel spectrum. The separate 2D-map interpolation control then determines how those sampled XY intensities are drawn on the spatial grid. Target center, spectral column, sampling method, spatial interpolation, and grid resolution are retained in saved plots.
 
 Composition plots cannot be mixed with XY series, and only one composition series can render at a time. Pie/donut require positive values. Voronoi regions are value-weighted approximations and automatically reduce label density for large category counts.
 

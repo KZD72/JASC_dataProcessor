@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, fields, replace
 
+import numpy as np
+import pandas as pd
 from PySide6.QtCore import QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -74,7 +76,8 @@ _PLOT_STYLE_CYCLES: list[tuple[str, str]] = [
 _SCIENCEPLOTS_STYLE_NAMES = {
     "science", "ieee", "nature", "notebook", "bright", "high-vis", "no-latex",
 }
-_SURFACE_PLOT_TYPES = {"heatmap", "contour", "contourf"}
+_SPECTRAL_PLOT_TYPES = {"spectra_heatmap", "spectra_contour", "spectra_contourf"}
+_SURFACE_PLOT_TYPES = {"heatmap", "contour", "contourf"} | _SPECTRAL_PLOT_TYPES
 _PIE_PLOT_TYPES = {"pie", "donut"}
 _VORONOI_PLOT_TYPES = {"voronoi"}
 _COMPOSITION_PLOT_TYPES = _PIE_PLOT_TYPES | _VORONOI_PLOT_TYPES
@@ -83,6 +86,7 @@ _PLOT_FAMILIES: list[tuple[str, str, tuple[str, ...]]] = [
     ("distribution", "Distribution", ("histogram", "box", "violin")),
     ("composition", "Composition", ("pie", "donut", "voronoi")),
     ("surface", "2D Maps", ("heatmap", "contour", "contourf")),
+    ("spectra", "Spectra Plot", ("spectra_heatmap", "spectra_contour", "spectra_contourf")),
 ]
 _PLOT_FAMILY_TYPES = {key: plot_types for key, _label, plot_types in _PLOT_FAMILIES}
 _PLOT_TYPE_TO_FAMILY = {
@@ -100,6 +104,26 @@ _INTERPOLATION_LABELS: dict[str, str] = {
     "linear": "Linear",
     "cubic_spline": "Cubic spline",
     "piecewise_cubic": "Piecewise cubic",
+}
+_SPECTRAL_SAMPLING_LABELS: dict[str, str] = {
+    "nearest": "Closest measured shift",
+    "linear": "Linear spectral interpolation",
+}
+_COLOR_MAP_LABELS: dict[str, str] = {
+    "viridis": "Viridis",
+    "plasma": "Plasma",
+    "inferno": "Inferno",
+    "magma": "Magma",
+    "cividis": "Cividis",
+    "turbo": "Turbo",
+    "gray": "Grayscale",
+    "hot": "Hot",
+    "coolwarm": "Cool-Warm",
+    "RdBu_r": "Red-Blue",
+    "Spectral_r": "Spectral",
+    "terrain": "Terrain",
+    "ocean": "Ocean",
+    "jet": "Jet (legacy)",
 }
 _PLOT_SERIES_FIELDS = {field.name for field in fields(PlotSeries)}
 _PLOT_LOCATOR_FIELDS = {field.name for field in fields(PlotLocator)}
@@ -196,11 +220,13 @@ class PlotTab(QWidget):
         self._set_combo_items(self._x_dataset_combo, names, selected_dataset)
         self._set_combo_items(self._y_dataset_combo, names, selected_dataset)
         self._set_combo_items(self._z_dataset_combo, names, selected_dataset)
+        self._set_combo_items(self._spectral_dataset_combo, names, selected_dataset)
         self._update_column_combo(self._x_dataset_combo, self._x_column_combo, ("x",))
         self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo, ("x_error", "error"))
         self._update_column_combo(self._y_dataset_combo, self._y_column_combo, ("y",))
         self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo, ("y_error", "error"))
         self._update_column_combo(self._z_dataset_combo, self._z_column_combo, ("z",))
+        self._update_spectral_column_combos()
         self._update_distribution_columns_list()
         self._set_controls_enabled(bool(names))
         self._prefill_axis_labels_from_plot_context()
@@ -256,6 +282,10 @@ class PlotTab(QWidget):
                 )
             if series.z_dataset == dataset_name:
                 updates["z_column"] = rename_map.get(series.z_column, series.z_column)
+                updates["spectral_column"] = rename_map.get(
+                    series.spectral_column,
+                    series.spectral_column,
+                )
 
             clean_updates = {
                 key: value
@@ -526,6 +556,8 @@ class PlotTab(QWidget):
         self._y_err_column_combo = QComboBox()
         self._z_dataset_combo = QComboBox()
         self._z_column_combo = QComboBox()
+        self._spectral_dataset_combo = QComboBox()
+        self._spectral_column_combo = QComboBox()
 
         self._plot_family_combo = QComboBox()
         for family_key, family_label, _plot_types in _PLOT_FAMILIES:
@@ -555,6 +587,8 @@ class PlotTab(QWidget):
             self._color_combo.addItem(label, data)
 
         self._series_label_edit = QLineEdit()
+        self._colorbar_label_edit = QLineEdit()
+        self._colorbar_label_edit.setPlaceholderText("Automatic from intensity/Z column")
         self._series_legend_checkbox = QCheckBox("Show this series in legend")
         self._series_legend_checkbox.setChecked(True)
 
@@ -605,6 +639,19 @@ class PlotTab(QWidget):
         self._surface_resolution_spin = QSpinBox()
         self._surface_resolution_spin.setRange(10, 500)
         self._surface_resolution_spin.setValue(120)
+
+        self._color_map_combo = QComboBox()
+        for color_map, label in _COLOR_MAP_LABELS.items():
+            self._color_map_combo.addItem(label, color_map)
+
+        self._spectral_center_spin = QDoubleSpinBox()
+        self._spectral_center_spin.setRange(-1.0e12, 1.0e12)
+        self._spectral_center_spin.setDecimals(8)
+        self._spectral_center_spin.setSingleStep(1.0)
+
+        self._spectral_sampling_combo = QComboBox()
+        for key, label in _SPECTRAL_SAMPLING_LABELS.items():
+            self._spectral_sampling_combo.addItem(label, key)
 
         self._voronoi_shape_combo = QComboBox()
         for label, data in _VORONOI_SHAPES:
@@ -846,6 +893,12 @@ class PlotTab(QWidget):
         self._voronoi_options_panel = self._build_voronoi_options_panel()
         self._add_series_row(sf, "plot_family", "Plot family", self._plot_family_combo)
         self._add_series_row(sf, "plot_type", "Subtype", self._plot_type_combo)
+        self._add_series_row(
+            sf,
+            "spectral_dataset",
+            "Spectral map dataset",
+            self._spectral_dataset_combo,
+        )
         self._add_series_row(sf, "x_dataset", "X dataset", self._x_dataset_combo)
         self._add_series_row(sf, "x_column", "X column", self._x_column_combo)
         self._add_series_row(sf, "x_error", "X error", self._x_err_column_combo)
@@ -853,10 +906,34 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "y_column", "Y column", self._y_column_combo)
         self._add_series_row(sf, "z_dataset", "Z dataset", self._z_dataset_combo)
         self._add_series_row(sf, "z_column", "Z column", self._z_column_combo)
+        self._add_series_row(
+            sf,
+            "spectral_column",
+            "Raman shift / frequency",
+            self._spectral_column_combo,
+        )
+        self._add_series_row(
+            sf,
+            "spectral_center",
+            "Target center",
+            self._spectral_center_spin,
+        )
+        self._add_series_row(
+            sf,
+            "spectral_sampling",
+            "Spectral sampling",
+            self._spectral_sampling_combo,
+        )
         self._add_series_row(sf, "distribution_columns", "Columns", self._distribution_columns_list)
         self._add_series_row(sf, "y_error", "Y error", self._y_err_column_combo)
         self._add_series_row(sf, "y_axis", "Y axis", self._y_axis_combo)
         self._add_series_row(sf, "label", "Label", self._series_label_edit)
+        self._add_series_row(
+            sf,
+            "colorbar_label",
+            "Colour-bar label",
+            self._colorbar_label_edit,
+        )
         self._add_series_row(sf, "show_in_legend", None, self._series_legend_checkbox)
         self._add_series_row(sf, "line", "Line", self._line_style_combo)
         self._add_series_row(sf, "line_width", "Line width", self._line_width_spin)
@@ -867,6 +944,7 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "fill_options", None, self._fill_options_panel)
         self._add_series_row(sf, "histogram_options", None, self._histogram_options_panel)
         self._add_series_row(sf, "distribution_options", None, self._distribution_options_panel)
+        self._add_series_row(sf, "color_map", "Palette", self._color_map_combo)
         self._add_series_row(sf, "surface_options", None, self._surface_options_panel)
         self._add_series_row(sf, "voronoi_options", None, self._voronoi_options_panel)
         sb = QVBoxLayout()
@@ -1050,6 +1128,12 @@ class PlotTab(QWidget):
         self._z_dataset_combo.currentTextChanged.connect(
             lambda: self._update_column_combo(self._z_dataset_combo, self._z_column_combo, ("z",))
         )
+        self._spectral_dataset_combo.currentTextChanged.connect(
+            self._sync_spectral_dataset_mapping
+        )
+        self._spectral_column_combo.currentTextChanged.connect(
+            self._update_spectral_center_range
+        )
         self._plot_family_combo.currentIndexChanged.connect(self._handle_plot_family_changed)
         self._plot_type_combo.currentIndexChanged.connect(self._apply_plot_type_defaults)
         self._locator_series_combo.currentIndexChanged.connect(self._update_locator_mode_controls)
@@ -1202,6 +1286,9 @@ class PlotTab(QWidget):
             self._y_column_combo,
             self._z_dataset_combo,
             self._z_column_combo,
+            self._spectral_dataset_combo,
+            self._spectral_column_combo,
+            self._spectral_sampling_combo,
             self._y_axis_combo,
         ):
             combo.currentIndexChanged.connect(
@@ -1281,15 +1368,20 @@ class PlotTab(QWidget):
             self._y_err_column_combo,
             self._z_dataset_combo,
             self._z_column_combo,
+            self._spectral_dataset_combo,
+            self._spectral_column_combo,
+            self._spectral_sampling_combo,
             self._y_axis_combo,
             self._line_style_combo,
             self._marker_combo,
             self._color_combo,
+            self._color_map_combo,
             self._interpolation_method_combo,
             self._voronoi_shape_combo,
         ):
             combo.currentIndexChanged.connect(self._handle_series_editor_changed)
         self._series_label_edit.textChanged.connect(self._handle_series_editor_changed)
+        self._colorbar_label_edit.textChanged.connect(self._handle_series_editor_changed)
         for spin in (
             self._line_width_spin,
             self._marker_size_spin,
@@ -1297,6 +1389,7 @@ class PlotTab(QWidget):
             self._fill_alpha_spin,
             self._histogram_bins_spin,
             self._surface_resolution_spin,
+            self._spectral_center_spin,
         ):
             spin.valueChanged.connect(self._handle_series_editor_changed)
         for checkbox in (
@@ -1407,6 +1500,8 @@ class PlotTab(QWidget):
         """Refresh subtype choices after changing the plot family."""
         current_type = str(self._plot_type_combo.currentData() or "")
         self._refresh_plot_type_combo(current_type)
+        if str(self._plot_family_combo.currentData() or "") == "spectra":
+            self._sync_spectral_dataset_mapping()
         self._apply_plot_type_defaults()
         self._prefill_axis_labels_from_plot_context()
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
@@ -1434,6 +1529,112 @@ class PlotTab(QWidget):
                 pass
         self._set_combo_items(col_combo, cols, preferred)
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
+
+    def _sync_spectral_dataset_mapping(self, _name: str = "") -> None:
+        """Use one long-form spectral-map dataset for all four required columns."""
+        name = self._spectral_dataset_combo.currentText()
+        for combo in (
+            self._x_dataset_combo,
+            self._y_dataset_combo,
+            self._z_dataset_combo,
+        ):
+            if combo.currentText() != name:
+                combo.setCurrentText(name)
+        self._update_spectral_column_combos()
+
+    def _update_spectral_column_combos(self) -> None:
+        """Populate and sensibly preselect long-form spectral-map columns."""
+        name = self._spectral_dataset_combo.currentText()
+        columns: list[str] = []
+        if name:
+            try:
+                columns = [
+                    str(column)
+                    for column in self._workspace.get_dataset(name).frame.columns
+                ]
+            except KeyError:
+                pass
+
+        x_column = self._named_column(
+            columns,
+            ("x", "x_coord", "x coordinate", "map x coordinate"),
+        )
+        y_column = self._named_column(
+            columns,
+            ("y", "y_coord", "y coordinate", "map y coordinate"),
+        )
+        spectral_column = self._named_column(
+            columns,
+            ("raman shift", "wavenumber", "wave number", "frequency", "wavelength"),
+        )
+        intensity_column = self._named_column(
+            columns,
+            ("intensity", "raman intensity", "signal", "counts", "count"),
+        )
+
+        self._set_combo_items(self._x_column_combo, columns, x_column)
+        self._set_combo_items(self._y_column_combo, columns, y_column)
+        self._set_combo_items(self._z_column_combo, columns, intensity_column)
+        self._set_combo_items(
+            self._spectral_column_combo,
+            columns,
+            spectral_column,
+        )
+        self._update_spectral_center_range()
+        self._set_controls_enabled(bool(self._workspace.dataset_names()))
+
+    @staticmethod
+    def _named_column(columns: list[str], candidates: tuple[str, ...]) -> str | None:
+        """Return an exact, then substring, case-insensitive column-name match."""
+        normalized = {column.strip().casefold(): column for column in columns}
+        for candidate in candidates:
+            if candidate in normalized:
+                return normalized[candidate]
+        for candidate in candidates:
+            for normalized_name, column in normalized.items():
+                if candidate in normalized_name:
+                    return column
+        return None
+
+    def _update_spectral_center_range(self, _column: str = "") -> None:
+        """Constrain the target-center editor to the selected measured spectral axis."""
+        name = self._spectral_dataset_combo.currentText()
+        column = self._spectral_column_combo.currentText()
+        if not name or not column:
+            return
+        try:
+            dataset = self._workspace.get_dataset(name)
+            values = pd.to_numeric(
+                dataset.frame[column],
+                errors="coerce",
+            ).dropna()
+        except (KeyError, TypeError):
+            return
+        finite = np.sort(values[np.isfinite(values)].unique())
+        if finite.size == 0:
+            return
+
+        old_value = self._spectral_center_spin.value()
+        minimum = float(finite[0])
+        maximum = float(finite[-1])
+        suggested = float(finite[finite.size // 2])
+        if minimum <= old_value <= maximum:
+            suggested = old_value
+        step = 1.0
+        if finite.size > 1:
+            positive_steps = np.diff(finite)
+            positive_steps = positive_steps[positive_steps > 0]
+            if positive_steps.size:
+                step = float(np.median(positive_steps))
+
+        self._spectral_center_spin.blockSignals(True)
+        self._spectral_center_spin.setRange(minimum, maximum)
+        self._spectral_center_spin.setSingleStep(step)
+        self._spectral_center_spin.setValue(suggested)
+        metadata = dataset.column_metadata.get(column)
+        unit = metadata.unit if metadata is not None else ""
+        self._spectral_center_spin.setSuffix(f" {unit}" if unit else "")
+        self._spectral_center_spin.blockSignals(False)
 
     def _update_distribution_columns_list(self) -> None:
         """Refresh the multi-column selector used by distribution plots."""
@@ -1525,6 +1726,10 @@ class PlotTab(QWidget):
                 and self._x_column_combo.count() > 0
                 and self._y_column_combo.count() > 0
                 and self._z_column_combo.count() > 0
+                and (
+                    plot_type not in _SPECTRAL_PLOT_TYPES
+                    or self._spectral_column_combo.count() > 0
+                )
             )
         else:
             can_add = has_data and self._x_column_combo.count() > 0 and self._y_column_combo.count() > 0
@@ -1600,8 +1805,30 @@ class PlotTab(QWidget):
             clean_state["distribution_columns"] = ()
         clean_state["z_dataset"] = str(clean_state.get("z_dataset", "") or "")
         clean_state["z_column"] = str(clean_state.get("z_column", "") or "")
+        clean_state["spectral_column"] = str(
+            clean_state.get("spectral_column", "") or ""
+        )
+        try:
+            clean_state["spectral_center"] = float(
+                clean_state.get("spectral_center", 0.0)
+            )
+        except (TypeError, ValueError):
+            clean_state["spectral_center"] = 0.0
+        spectral_sampling = str(
+            clean_state.get("spectral_sampling", "nearest") or "nearest"
+        )
+        clean_state["spectral_sampling"] = (
+            spectral_sampling if spectral_sampling in _SPECTRAL_SAMPLING_LABELS else "nearest"
+        )
         clean_state["interpolation_method"] = str(
             clean_state.get("interpolation_method", "linear") or "linear"
+        )
+        color_map = str(clean_state.get("color_map", "viridis") or "viridis")
+        clean_state["color_map"] = (
+            color_map if color_map in _COLOR_MAP_LABELS else "viridis"
+        )
+        clean_state["colorbar_label"] = str(
+            clean_state.get("colorbar_label", "") or ""
         )
         clean_state["voronoi_shape"] = self._normalized_voronoi_shape(
             str(clean_state.get("voronoi_shape", "circle") or "circle")
@@ -1924,11 +2151,20 @@ class PlotTab(QWidget):
             self._x_column_combo.count() == 0
             or self._y_column_combo.count() == 0
             or self._z_column_combo.count() == 0
+            or (
+                plot_type in _SPECTRAL_PLOT_TYPES
+                and self._spectral_column_combo.count() == 0
+            )
         ):
             QMessageBox.information(
                 self,
                 "Add Series",
-                "Choose X, Y, and Z columns before adding a 2D map.",
+                (
+                    "Choose X, Y, Raman shift/frequency, and intensity columns "
+                    "before adding a spectra plot."
+                    if plot_type in _SPECTRAL_PLOT_TYPES
+                    else "Choose X, Y, and Z columns before adding a 2D map."
+                ),
             )
             return
         non_xy_types = {"box", "violin", "histogram"} | _SURFACE_PLOT_TYPES
@@ -1990,6 +2226,31 @@ class PlotTab(QWidget):
             distribution_show_outliers=self._distribution_outliers_checkbox.isChecked(),
             interpolation_method=str(self._interpolation_method_combo.currentData() or "linear"),
             grid_resolution=self._surface_resolution_spin.value(),
+            color_map=(
+                str(self._color_map_combo.currentData() or "viridis")
+                if plot_type in _SURFACE_PLOT_TYPES
+                else "viridis"
+            ),
+            colorbar_label=(
+                self._colorbar_label_edit.text().strip()
+                if plot_type in _SURFACE_PLOT_TYPES
+                else ""
+            ),
+            spectral_column=(
+                self._spectral_column_combo.currentText()
+                if plot_type in _SPECTRAL_PLOT_TYPES
+                else ""
+            ),
+            spectral_center=(
+                self._spectral_center_spin.value()
+                if plot_type in _SPECTRAL_PLOT_TYPES
+                else 0.0
+            ),
+            spectral_sampling=(
+                str(self._spectral_sampling_combo.currentData() or "nearest")
+                if plot_type in _SPECTRAL_PLOT_TYPES
+                else "nearest"
+            ),
             voronoi_shape=str(self._voronoi_shape_combo.currentData() or "circle"),
         )
 
@@ -2053,6 +2314,21 @@ class PlotTab(QWidget):
         self._z_dataset_combo.setCurrentText(series.z_dataset or series.y_dataset)
         self._update_column_combo(self._z_dataset_combo, self._z_column_combo)
         self._z_column_combo.setCurrentText(series.z_column)
+        if series.plot_type in _SPECTRAL_PLOT_TYPES:
+            self._spectral_dataset_combo.setCurrentText(
+                series.z_dataset or series.y_dataset
+            )
+            self._update_spectral_column_combos()
+            self._x_column_combo.setCurrentText(series.x_column)
+            self._y_column_combo.setCurrentText(series.y_column)
+            self._z_column_combo.setCurrentText(series.z_column)
+            self._spectral_column_combo.setCurrentText(series.spectral_column)
+            self._update_spectral_center_range()
+            self._spectral_center_spin.setValue(series.spectral_center)
+            self._set_combo_data(
+                self._spectral_sampling_combo,
+                series.spectral_sampling,
+            )
         self._set_distribution_column_selection(
             list(series.distribution_columns) or ([series.y_column] if series.plot_type in {"box", "violin"} else [])
         )
@@ -2062,6 +2338,7 @@ class PlotTab(QWidget):
         self._set_combo_data(self._plot_type_combo, series.plot_type)
         self._set_combo_data(self._y_axis_combo, series.y_axis)
         self._series_label_edit.setText(series.custom_label)
+        self._colorbar_label_edit.setText(series.colorbar_label)
         self._series_legend_checkbox.setChecked(series.show_in_legend)
         self._set_combo_data(self._line_style_combo, series.line_style)
         self._set_combo_data_or_add(self._marker_combo, series.marker, "Custom symbol")
@@ -2078,6 +2355,7 @@ class PlotTab(QWidget):
         self._distribution_outliers_checkbox.setChecked(series.distribution_show_outliers)
         self._set_combo_data(self._interpolation_method_combo, series.interpolation_method)
         self._surface_resolution_spin.setValue(series.grid_resolution)
+        self._set_combo_data(self._color_map_combo, series.color_map)
         self._set_combo_data(
             self._voronoi_shape_combo,
             self._normalized_voronoi_shape(series.voronoi_shape),
@@ -2181,14 +2459,21 @@ class PlotTab(QWidget):
         marker_types = {"scatter", "line_marker", "errorbar"}
         distribution_types = {"box", "violin"}
         coordinate_types = x_y_types | _SURFACE_PLOT_TYPES
+        is_spectral = plot_type in _SPECTRAL_PLOT_TYPES
 
-        self._set_series_row_visible("x_dataset", plot_type in coordinate_types)
+        self._set_series_row_visible("spectral_dataset", is_spectral)
+        self._set_series_row_visible("x_dataset", plot_type in coordinate_types and not is_spectral)
         self._set_series_row_visible("x_column", plot_type in coordinate_types)
         self._set_series_row_visible("x_error", plot_type == "errorbar")
         self._set_series_row_visible("y_error", plot_type == "errorbar")
+        self._set_series_row_visible("y_dataset", not is_spectral)
         self._set_series_row_visible("y_column", plot_type not in distribution_types)
-        self._set_series_row_visible("z_dataset", plot_type in _SURFACE_PLOT_TYPES)
+        self._set_series_row_visible("z_dataset", plot_type in _SURFACE_PLOT_TYPES and not is_spectral)
         self._set_series_row_visible("z_column", plot_type in _SURFACE_PLOT_TYPES)
+        self._set_series_row_visible("spectral_column", is_spectral)
+        self._set_series_row_visible("spectral_center", is_spectral)
+        self._set_series_row_visible("spectral_sampling", is_spectral)
+        self._set_series_row_visible("colorbar_label", plot_type in _SURFACE_PLOT_TYPES)
         self._set_series_row_visible("distribution_columns", plot_type in distribution_types)
         self._set_series_row_visible("y_axis", plot_type in {"line", "scatter", "line_marker", "errorbar", "bar", "area"})
         self._set_series_row_visible("line", plot_type in line_types)
@@ -2210,6 +2495,7 @@ class PlotTab(QWidget):
         )
         self._set_series_row_visible("histogram_options", plot_type == "histogram")
         self._set_series_row_visible("distribution_options", plot_type in distribution_types)
+        self._set_series_row_visible("color_map", plot_type in _SURFACE_PLOT_TYPES)
         self._set_series_row_visible("surface_options", plot_type in _SURFACE_PLOT_TYPES)
         self._set_series_row_visible("voronoi_options", plot_type == "voronoi")
 
@@ -2223,6 +2509,10 @@ class PlotTab(QWidget):
                 "line_width",
                 "Statistic line width" if plot_type == "violin" else "Line width",
             )
+        elif is_spectral:
+            self._set_series_row_label("x_column", "X coordinate")
+            self._set_series_row_label("y_column", "Y coordinate")
+            self._set_series_row_label("z_column", "Intensity")
         elif plot_type in _SURFACE_PLOT_TYPES:
             self._set_series_row_label("x_dataset", "X dataset")
             self._set_series_row_label("x_column", "X coordinate")
@@ -2518,6 +2808,9 @@ class PlotTab(QWidget):
         if element == "series" and isinstance(payload, int):
             self._edit_series_appearance_from_canvas(payload)
             return
+        if element == "colorbar_label" and isinstance(payload, int):
+            self._edit_colorbar_label_from_canvas(payload)
+            return
         if element == "title":
             self._edit_plot_title_from_canvas()
             return
@@ -2564,6 +2857,40 @@ class PlotTab(QWidget):
         self._refresh_locator_series_combo()
         self._render_plot(silent_if_empty=True)
         self.status_message.emit(f"Series '{updated.label}' updated from the canvas")
+
+    def _edit_colorbar_label_from_canvas(self, row: int) -> None:
+        """Edit one surface colour-bar label and synchronize its series state."""
+        if not 0 <= row < len(self._plot_series):
+            return
+        if self._series_editor_dirty:
+            QMessageBox.information(
+                self,
+                "Unapplied Series Edits",
+                "Update or revert the selected series before editing the colour bar on the canvas.",
+            )
+            return
+        series = self._plot_series[row]
+        dialog = PlotTextEditDialog(
+            "Edit Colour-Bar Label",
+            "Label",
+            series.colorbar_label or PlotCanvas.default_colorbar_label(series),
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        updated = replace(series, colorbar_label=dialog.text_value().strip())
+        self._plot_series[row] = updated
+        item = self._series_list.item(row)
+        if item is not None:
+            item.setText(self._series_text(updated))
+        self._series_list.blockSignals(True)
+        self._series_list.setCurrentRow(row)
+        self._series_list.blockSignals(False)
+        self._editing_series_row = row
+        self._load_series_controls(updated)
+        self._update_series_editor_state()
+        self._render_plot(silent_if_empty=True)
+        self.status_message.emit("Colour-bar label updated from the canvas")
 
     def _edit_plot_title_from_canvas(self) -> None:
         """Edit the figure title and immediately synchronize the inspector."""
@@ -2854,8 +3181,18 @@ class PlotTab(QWidget):
             bits.extend([
                 f"Z: {series.z_column}",
                 _INTERPOLATION_LABELS.get(series.interpolation_method, series.interpolation_method),
+                _COLOR_MAP_LABELS.get(series.color_map, series.color_map),
                 f"{series.grid_resolution} grid",
             ])
+            if series.plot_type in _SPECTRAL_PLOT_TYPES:
+                bits.insert(1, f"{series.spectral_column}: {series.spectral_center:g}")
+                bits.insert(
+                    2,
+                    _SPECTRAL_SAMPLING_LABELS.get(
+                        series.spectral_sampling,
+                        series.spectral_sampling,
+                    ),
+                )
         elif series.plot_type in _COMPOSITION_PLOT_TYPES:
             bits.extend([
                 f"labels: {series.x_column}",

@@ -123,6 +123,42 @@ class ExplicitOperationColumnSelectionTests(unittest.TestCase):
         finally:
             dialog.deleteLater()
 
+    def test_fit_models_are_filterable_by_scientific_category(self) -> None:
+        dialog = FitDialog(
+            self.columns,
+            "sheet",
+            default_x_column="x",
+            dataset_names=["sheet"],
+            current_dataset_name="sheet",
+        )
+        try:
+            self.assertEqual(dialog.model_category(), "Polynomial")
+            polynomial_keys = {
+                dialog._model_combo.itemData(index)
+                for index in range(dialog._model_combo.count())
+            }
+            self.assertIn("linear", polynomial_keys)
+            self.assertIn("quintic", polynomial_keys)
+            self.assertNotIn("gaussian", polynomial_keys)
+
+            peak_index = dialog._model_category_combo.findData("Peak - symmetric")
+            dialog._model_category_combo.setCurrentIndex(peak_index)
+            peak_keys = {
+                dialog._model_combo.itemData(index)
+                for index in range(dialog._model_combo.count())
+            }
+            self.assertIn("gaussian", peak_keys)
+            self.assertIn("voigt", peak_keys)
+            self.assertIn("pearson_vii", peak_keys)
+            self.assertNotIn("linear", peak_keys)
+            sigma_row = [
+                dialog._parameter_table.item(row, 0).text()
+                for row in range(dialog._parameter_table.rowCount())
+            ].index("sigma")
+            self.assertGreater(dialog.lower_bounds()[sigma_row], 0.0)
+        finally:
+            dialog.deleteLater()
+
     def test_accepting_without_a_target_column_shows_clear_validation(self) -> None:
         dialog = ColumnMathDialog(
             "Derivative",

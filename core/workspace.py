@@ -10,6 +10,7 @@ import pandas as pd
 
 from core.data_backends import PANDAS_BACKEND, normalize_backend
 from core.operations import rename_worksheet_references
+from core.spectral_analysis import SpectralAnalysisSession
 from models.fit_functions import CustomFitModel
 
 
@@ -36,6 +37,69 @@ COLUMN_TYPE_LABELS: dict[str, str] = {
 COLUMN_TYPE_OPTIONS: tuple[tuple[str, str], ...] = tuple(COLUMN_TYPE_LABELS.items())
 COLUMN_NUMERIC_TYPES = {"numeric", "scientific"}
 DATAFRAME_COLUMN_METADATA_ATTR = "jasc_column_metadata"
+
+
+@dataclass(slots=True)
+class WorksheetMetadata:
+    """Descriptive and import metadata attached to an entire worksheet."""
+
+    fields: list[tuple[str, str]] = field(default_factory=list)
+    raw_lines: list[str] = field(default_factory=list)
+    import_details: dict[str, str] = field(default_factory=dict)
+
+    def is_empty(self) -> bool:
+        """Return whether the worksheet has no stored metadata."""
+        return not (self.fields or self.raw_lines or self.import_details)
+
+    def to_metadata(self) -> dict[str, object]:
+        """Return a JSON-friendly representation for project persistence."""
+        return {
+            "fields": [
+                {"name": str(name), "value": str(value)}
+                for name, value in self.fields
+            ],
+            "raw_lines": [str(line) for line in self.raw_lines],
+            "import_details": {
+                str(name): str(value)
+                for name, value in self.import_details.items()
+            },
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: object) -> "WorksheetMetadata":
+        """Restore worksheet metadata from a project entry."""
+        if not isinstance(metadata, dict):
+            return cls()
+
+        fields: list[tuple[str, str]] = []
+        raw_fields = metadata.get("fields", [])
+        if isinstance(raw_fields, list):
+            for entry in raw_fields:
+                if isinstance(entry, dict):
+                    fields.append((
+                        str(entry.get("name", "") or ""),
+                        str(entry.get("value", "") or ""),
+                    ))
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    fields.append((str(entry[0]), str(entry[1])))
+
+        raw_lines_value = metadata.get("raw_lines", [])
+        raw_lines = (
+            [str(line) for line in raw_lines_value]
+            if isinstance(raw_lines_value, list)
+            else []
+        )
+        raw_details = metadata.get("import_details", {})
+        import_details = (
+            {str(name): str(value) for name, value in raw_details.items()}
+            if isinstance(raw_details, dict)
+            else {}
+        )
+        return cls(
+            fields=fields,
+            raw_lines=raw_lines,
+            import_details=import_details,
+        )
 
 
 @dataclass(slots=True)
@@ -109,6 +173,7 @@ class Dataset:
     backend: str = PANDAS_BACKEND
     formulas: dict[str, str] = field(default_factory=dict)
     column_metadata: dict[str, ColumnMetadata] = field(default_factory=dict)
+    worksheet_metadata: WorksheetMetadata = field(default_factory=WorksheetMetadata)
     figure_session: FigureExtractionSession | None = None
 
     def metadata_for_column(self, column_name: str) -> ColumnMetadata:
@@ -171,7 +236,11 @@ class Workspace:
         """Initialize empty dataset and saved-plot registries."""
         self._datasets: dict[str, Dataset] = {}
         self._plots: dict[str, SavedPlot] = {}
+        self._spectral_analyses: dict[str, SpectralAnalysisSession] = {}
         self._custom_fit_models: dict[str, CustomFitModel] = {}
+        self.project_signature_status = "unsigned"
+        self.project_signer_fingerprint: str | None = None
+        self.project_signer_name: str | None = None
 
     def add_dataset(
         self,
@@ -221,6 +290,7 @@ class Workspace:
         )
         duplicate.formulas = deepcopy(source.formulas)
         duplicate.column_metadata = copy_column_metadata(source.column_metadata)
+        duplicate.worksheet_metadata = deepcopy(source.worksheet_metadata)
         duplicate.figure_session = deepcopy(source.figure_session)
         duplicate.sync_column_metadata_attrs()
         return duplicate
@@ -242,6 +312,9 @@ class Workspace:
                 for column_name, expression in workspace_dataset.formulas.items()
             }
         self._rename_dataset_references_in_plots(old_name, unique_name)
+        for analysis in self._spectral_analyses.values():
+            if analysis.source_dataset == old_name:
+                analysis.source_dataset = unique_name
         return unique_name
 
     def get_dataset(self, name: str) -> Dataset:
@@ -296,6 +369,40 @@ class Workspace:
         """Return saved plot names in insertion order."""
         return list(self._plots.keys())
 
+    def add_spectral_analysis(
+        self,
+        analysis: SpectralAnalysisSession,
+    ) -> SpectralAnalysisSession:
+        """Store a spectral analysis under a unique navigator name."""
+        clean_name = analysis.name.strip() or "Spectral Analysis"
+        unique_name = self._make_unique_analysis_name(clean_name)
+        analysis.name = unique_name
+        self._spectral_analyses[unique_name] = analysis
+        return analysis
+
+    def get_spectral_analysis(self, name: str) -> SpectralAnalysisSession:
+        """Return one stored spectral analysis."""
+        return self._spectral_analyses[name]
+
+    def list_spectral_analyses(self) -> list[SpectralAnalysisSession]:
+        """Return analyses in insertion order."""
+        return list(self._spectral_analyses.values())
+
+    def spectral_analysis_names(self) -> list[str]:
+        """Return stored analysis names in insertion order."""
+        return list(self._spectral_analyses.keys())
+
+    def remove_spectral_analysis(self, name: str) -> None:
+        """Remove an analysis without touching its source dataset."""
+        if name not in self._spectral_analyses:
+            raise KeyError(f"Analysis '{name}' does not exist in the workspace.")
+        del self._spectral_analyses[name]
+
+    def duplicate_spectral_analysis(self, name: str) -> SpectralAnalysisSession:
+        """Duplicate a result session and all of its internal frames."""
+        source = self.get_spectral_analysis(name)
+        return self.add_spectral_analysis(source.copy(name=self._copy_base_name(source.name)))
+
     def add_custom_fit_model(self, model: CustomFitModel) -> CustomFitModel:
         """Add a custom fit model under a unique display name."""
         unique_name = self._make_unique_custom_fit_model_name(model.name)
@@ -324,6 +431,7 @@ class Workspace:
         """Remove all datasets, saved plots, and custom fit models from the workspace."""
         self._datasets.clear()
         self._plots.clear()
+        self._spectral_analyses.clear()
         self._custom_fit_models.clear()
 
     def _make_unique_name(self, base_name: str) -> str:
@@ -353,6 +461,15 @@ class Workspace:
 
         counter = 2
         while f"{base_name} ({counter})" in self._plots:
+            counter += 1
+        return f"{base_name} ({counter})"
+
+    def _make_unique_analysis_name(self, base_name: str) -> str:
+        """Return an analysis name that does not collide with existing analyses."""
+        if base_name not in self._spectral_analyses:
+            return base_name
+        counter = 2
+        while f"{base_name} ({counter})" in self._spectral_analyses:
             counter += 1
         return f"{base_name} ({counter})"
 

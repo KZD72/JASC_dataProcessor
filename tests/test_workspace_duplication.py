@@ -24,6 +24,8 @@ class WorkspaceDuplicationTests(unittest.TestCase):
             source_path=Path("measurements.csv"),
         )
         source.formulas["signal"] = 'col("time") + 2'
+        source.worksheet_metadata.fields = [("Instrument", "Test rig")]
+        source.worksheet_metadata.raw_lines = ["#Instrument=Test rig"]
         metadata = source.metadata_for_column("signal")
         metadata.role = "y"
         metadata.unit = "V"
@@ -42,13 +44,16 @@ class WorkspaceDuplicationTests(unittest.TestCase):
         pd.testing.assert_frame_equal(duplicate.frame, source.frame)
         self.assertEqual(duplicate.formulas, source.formulas)
         self.assertEqual(duplicate.column_metadata["signal"].unit, "V")
+        self.assertEqual(duplicate.worksheet_metadata.fields, source.worksheet_metadata.fields)
 
         duplicate.frame.loc[0, "signal"] = 99.0
         duplicate.formulas["signal"] = "changed"
         duplicate.column_metadata["signal"].unit = "mV"
+        duplicate.worksheet_metadata.fields[0] = ("Instrument", "Changed")
         self.assertEqual(source.frame.loc[0, "signal"], 2.0)
         self.assertEqual(source.formulas["signal"], 'col("time") + 2')
         self.assertEqual(source.column_metadata["signal"].unit, "V")
+        self.assertEqual(source.worksheet_metadata.fields[0], ("Instrument", "Test rig"))
 
     def test_duplicate_plot_deep_copies_nested_definition(self) -> None:
         workspace = Workspace()

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -389,15 +392,572 @@ class ProjectStreamingTests(unittest.TestCase):
         )
         dataset.metadata_for_column("x").role = "x"
         dataset.sync_column_metadata_attrs()
+        dataset.worksheet_metadata.fields = [("Instrument", "Raman")]
+        dataset.worksheet_metadata.raw_lines = ["#Instrument=Raman"]
+        dataset.worksheet_metadata.import_details = {"Format": "Delimited text"}
 
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "streamed.jasc"
             project_io.save_project(workspace, path)
+            integrity = project_io.verify_project_integrity(path)
+            with zipfile.ZipFile(path, "r") as archive:
+                project_metadata = json.loads(archive.read("project.json"))
+                manifest = json.loads(archive.read("integrity.json"))
             loaded = project_io.load_project(path)
 
+        self.assertTrue(integrity.has_manifest)
+        self.assertTrue(integrity.verified)
+        self.assertEqual(integrity.problems, ())
+        self.assertEqual(project_metadata["version"], 8)
+        self.assertEqual(manifest["schema"], "jasc-package-seal-v1")
+        self.assertEqual(manifest["algorithm"], "sha256")
+        self.assertEqual(len(manifest["seal"]), 64)
+        self.assertEqual(len(manifest["nonce"]), 44)
+        self.assertTrue(manifest["created_utc"].endswith("Z"))
+        self.assertEqual(set(manifest["files"]["project.json"]), {"size", "sha256"})
         loaded_dataset = loaded.get_dataset("sheet")
         pd.testing.assert_frame_equal(loaded_dataset.frame, dataset.frame)
         self.assertEqual(loaded_dataset.column_metadata["x"].role, "x")
+        self.assertEqual(
+            loaded_dataset.worksheet_metadata.fields,
+            [("Instrument", "Raman")],
+        )
+        self.assertEqual(
+            loaded_dataset.worksheet_metadata.raw_lines,
+            ["#Instrument=Raman"],
+        )
+
+    def test_changed_project_member_fails_integrity_check(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("sheet", pd.DataFrame({"x": [1.0, 2.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tampered.jasc"
+            project_io.save_project(workspace, path)
+            with zipfile.ZipFile(path, "r") as archive:
+                members = {
+                    entry.filename: archive.read(entry.filename)
+                    for entry in archive.infolist()
+                    if not entry.is_dir()
+                }
+            dataset_name = next(name for name in members if name.startswith("datasets/"))
+            members[dataset_name] = b"x\n999\n"
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+
+            report = project_io.verify_project_integrity(path)
+            with self.assertRaises(project_io.ProjectIntegrityError):
+                project_io.load_project(path)
+            loaded = project_io.load_project(path, allow_integrity_mismatch=True)
+
+        self.assertTrue(report.has_manifest)
+        self.assertFalse(report.verified)
+        self.assertTrue(any(dataset_name in problem for problem in report.problems))
+        self.assertEqual(loaded.get_dataset("sheet").frame["x"].tolist(), [999])
+
+    def test_package_seal_rejects_recalculated_member_hash_and_size(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("sheet", pd.DataFrame({"x": [1.0, 2.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "resealed-member.jasc"
+            project_io.save_project(workspace, path)
+            with zipfile.ZipFile(path, "r") as archive:
+                members = {
+                    entry.filename: archive.read(entry.filename)
+                    for entry in archive.infolist()
+                    if not entry.is_dir()
+                }
+            dataset_name = next(name for name in members if name.startswith("datasets/"))
+            forged_data = b"x\n999\n"
+            members[dataset_name] = forged_data
+            manifest = json.loads(members["integrity.json"])
+            manifest["files"][dataset_name] = {
+                "size": len(forged_data),
+                "sha256": hashlib.sha256(forged_data).hexdigest(),
+            }
+            members["integrity.json"] = json.dumps(manifest).encode("utf-8")
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+
+            report = project_io.verify_project_integrity(path)
+            with self.assertRaises(project_io.ProjectIntegrityError):
+                project_io.load_project(path)
+
+        self.assertFalse(report.verified)
+        self.assertIn("package seal mismatch", report.problems)
+        self.assertFalse(any(problem == f"changed '{dataset_name}'" for problem in report.problems))
+
+    def test_each_save_has_a_unique_package_identity_and_seal(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("sheet", pd.DataFrame({"x": [1.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            manifests = []
+            for filename in ("first.jasc", "second.jasc"):
+                path = Path(folder) / filename
+                project_io.save_project(workspace, path)
+                with zipfile.ZipFile(path, "r") as archive:
+                    manifests.append(json.loads(archive.read("integrity.json")))
+
+        self.assertNotEqual(manifests[0]["package_uuid"], manifests[1]["package_uuid"])
+        self.assertNotEqual(manifests[0]["nonce"], manifests[1]["nonce"])
+        self.assertNotEqual(manifests[0]["seal"], manifests[1]["seal"])
+
+    def test_signing_identity_is_encrypted_and_public_identity_is_shareable(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            private_path = Path(folder) / "researcher.jasc-key"
+            identity, public_path = project_io.create_signing_identity(
+                private_path,
+                name="Researcher Name",
+                password="private key password",
+            )
+            private_bytes = private_path.read_bytes()
+            public_identity = project_io.load_public_identity(public_path)
+            unlocked = project_io.load_signing_identity(
+                private_path,
+                password="private key password",
+            )
+            with self.assertRaises(project_io.SigningKeyError):
+                project_io.load_signing_identity(private_path, password="wrong")
+
+        self.assertIn(b"ENCRYPTED PRIVATE KEY", private_bytes)
+        self.assertNotIn(identity.public_key, private_bytes)
+        self.assertEqual(public_identity.name, "Researcher Name")
+        self.assertEqual(public_identity.fingerprint, identity.fingerprint)
+        self.assertEqual(unlocked.fingerprint, identity.fingerprint)
+
+    def test_signed_project_verifies_author_key_and_identity(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("signed data", pd.DataFrame({"x": [1.0, 2.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            identity, _public_path = project_io.create_signing_identity(
+                Path(folder) / "author.jasc-key",
+                name="Test Author",
+                password="key password",
+            )
+            path = Path(folder) / "signed.jasc"
+            project_io.save_project(workspace, path, signing_identity=identity)
+            report = project_io.verify_project_integrity(path)
+            loaded = project_io.load_project(path)
+            with zipfile.ZipFile(path, "r") as archive:
+                manifest = json.loads(archive.read("integrity.json"))
+
+        self.assertTrue(report.verified)
+        self.assertEqual(report.signature_status, "valid")
+        self.assertEqual(report.signer_fingerprint, identity.fingerprint)
+        self.assertEqual(report.signer_name, "Test Author")
+        self.assertEqual(loaded.project_signature_status, "valid")
+        self.assertEqual(loaded.project_signer_fingerprint, identity.fingerprint)
+        self.assertEqual(manifest["signature"]["algorithm"], "ed25519")
+        self.assertEqual(manifest["signature"]["signed_object"], "package_seal")
+
+    def test_signature_rejects_fully_resealed_forged_content(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("signed data", pd.DataFrame({"x": [1.0, 2.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            identity, _public_path = project_io.create_signing_identity(
+                Path(folder) / "author.jasc-key",
+                name="Test Author",
+                password="key password",
+            )
+            path = Path(folder) / "forged-signed.jasc"
+            project_io.save_project(workspace, path, signing_identity=identity)
+            with zipfile.ZipFile(path, "r") as archive:
+                members = {
+                    entry.filename: archive.read(entry.filename)
+                    for entry in archive.infolist()
+                    if not entry.is_dir()
+                }
+            dataset_name = next(name for name in members if name.startswith("datasets/"))
+            forged_data = b"x\n999\n"
+            members[dataset_name] = forged_data
+            manifest = json.loads(members["integrity.json"])
+            manifest["files"][dataset_name] = {
+                "size": len(forged_data),
+                "sha256": hashlib.sha256(forged_data).hexdigest(),
+            }
+            manifest_core = {
+                key: value
+                for key, value in manifest.items()
+                if key not in {"seal", "signature"}
+            }
+            manifest["seal"] = project_io._package_seal_digest(manifest_core)
+            members["integrity.json"] = json.dumps(manifest).encode("utf-8")
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+
+            report = project_io.verify_project_integrity(path)
+            with self.assertRaises(project_io.ProjectIntegrityError):
+                project_io.load_project(path)
+
+        self.assertFalse(report.verified)
+        self.assertEqual(report.signature_status, "invalid")
+        self.assertIn("invalid digital signature", report.problems)
+        self.assertFalse(any(problem.startswith("changed '") for problem in report.problems))
+
+    def test_required_signature_cannot_be_silently_removed(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("signed data", pd.DataFrame({"x": [1.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            identity, _public_path = project_io.create_signing_identity(
+                Path(folder) / "author.jasc-key",
+                name="Test Author",
+                password="key password",
+            )
+            path = Path(folder) / "stripped-signature.jasc"
+            project_io.save_project(workspace, path, signing_identity=identity)
+            with zipfile.ZipFile(path, "r") as archive:
+                members = {
+                    entry.filename: archive.read(entry.filename)
+                    for entry in archive.infolist()
+                    if not entry.is_dir()
+                }
+            manifest = json.loads(members["integrity.json"])
+            manifest.pop("signature")
+            members["integrity.json"] = json.dumps(manifest).encode("utf-8")
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+
+            report = project_io.verify_project_integrity(path)
+
+        self.assertFalse(report.verified)
+        self.assertEqual(report.signature_status, "invalid")
+        self.assertIn("required digital signature is missing", report.problems)
+
+    def test_encrypted_project_round_trip_is_authenticated(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset(
+            "private data",
+            pd.DataFrame({"x": [1.0, 2.0], "note": ["alpha", "beta"]}),
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "private.jascx"
+            project_io.save_project(workspace, path, password="correct horse battery staple")
+            encrypted_bytes = path.read_bytes()
+            integrity = project_io.verify_project_integrity(
+                path,
+                password="correct horse battery staple",
+            )
+            self.assertTrue(project_io.is_encrypted_project(path))
+            loaded = project_io.load_project(
+                path,
+                password="correct horse battery staple",
+            )
+
+        self.assertFalse(encrypted_bytes.startswith(b"PK"))
+        self.assertNotIn(b"private data", encrypted_bytes)
+        self.assertTrue(integrity.verified)
+        pd.testing.assert_frame_equal(
+            loaded.get_dataset("private data").frame,
+            workspace.get_dataset("private data").frame,
+        )
+
+    def test_encrypted_project_rejects_missing_wrong_and_tampered_credentials(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("sheet", pd.DataFrame({"x": [1.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "private.jascx"
+            project_io.save_project(workspace, path, password="right password")
+            with self.assertRaises(project_io.ProjectPasswordRequiredError):
+                project_io.load_project(path)
+            with self.assertRaises(project_io.ProjectDecryptionError):
+                project_io.load_project(path, password="wrong password")
+
+            payload = bytearray(path.read_bytes())
+            payload[-20] ^= 0x01
+            path.write_bytes(payload)
+            with self.assertRaises(project_io.ProjectDecryptionError):
+                project_io.load_project(path, password="right password")
+
+    def test_encrypted_project_preserves_and_verifies_author_signature(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("private signed", pd.DataFrame({"x": [1.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            identity, _public_path = project_io.create_signing_identity(
+                Path(folder) / "author.jasc-key",
+                name="Private Author",
+                password="key password",
+            )
+            path = Path(folder) / "private-signed.jascx"
+            project_io.save_project(
+                workspace,
+                path,
+                password="project password",
+                signing_identity=identity,
+            )
+            report = project_io.verify_project_integrity(
+                path,
+                password="project password",
+            )
+            loaded = project_io.load_project(path, password="project password")
+
+        self.assertTrue(report.verified)
+        self.assertEqual(report.signature_status, "valid")
+        self.assertEqual(report.signer_fingerprint, identity.fingerprint)
+        self.assertEqual(loaded.project_signature_status, "valid")
+
+    def test_encrypted_save_as_requests_and_confirms_password(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        window = MainWindow()
+        window._workspace.add_dataset("sheet", pd.DataFrame({"x": [1.0]}))
+        try:
+            with (
+                patch(
+                    "ui.main_window.QFileDialog.getSaveFileName",
+                    return_value=(
+                        "protected",
+                        "Encrypted JASC Project (*.jascx)",
+                    ),
+                ),
+                patch(
+                    "ui.main_window.QInputDialog.getText",
+                    side_effect=[("secret", True), ("secret", True)],
+                ) as password_prompt,
+                patch("ui.main_window.project_io.save_project") as save_project,
+            ):
+                window._save_project_as()
+
+            save_project.assert_called_once_with(
+                window._workspace,
+                Path("protected.jascx"),
+                password="secret",
+            )
+            self.assertEqual(window._project_path, Path("protected.jascx"))
+            self.assertEqual(password_prompt.call_args_list[0].args[2], "Encryption password:")
+            self.assertEqual(
+                password_prompt.call_args_list[1].args[2],
+                "Confirm encryption password:",
+            )
+        finally:
+            window.close()
+
+    def test_file_menu_exposes_each_project_security_save_mode(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        window = MainWindow()
+        try:
+            file_action = next(
+                action
+                for action in window.menuBar().actions()
+                if action.text() == "&File"
+            )
+            file_menu = file_action.menu()
+            self.assertIsNotNone(file_menu)
+            labels = {action.text().replace("&", "") for action in file_menu.actions()}
+            self.assertIn("Save Open Project As...", labels)
+            self.assertIn("Save Encrypted Project As...", labels)
+            self.assertIn("Save Signed Open Project As...", labels)
+            self.assertIn("Save Signed + Encrypted Project As...", labels)
+            self.assertIn("Signing Identities", labels)
+        finally:
+            window.close()
+
+    def test_signed_save_as_uses_selected_private_identity(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        window = MainWindow()
+        window._workspace.add_dataset("sheet", pd.DataFrame({"x": [1.0]}))
+        identity = project_io.SigningPrivateIdentity(
+            "Researcher",
+            "SHA256:" + "a" * 64,
+            b"p" * 32,
+            object(),
+        )
+        try:
+            with (
+                patch(
+                    "ui.main_window.QFileDialog.getOpenFileName",
+                    return_value=("researcher.jasc-key", ""),
+                ),
+                patch(
+                    "ui.main_window.QFileDialog.getSaveFileName",
+                    return_value=("signed-project", "Signed Open JASC Project (*.jasc)"),
+                ),
+                patch(
+                    "ui.main_window.QInputDialog.getText",
+                    return_value=("key password", True),
+                ) as key_password_prompt,
+                patch(
+                    "ui.main_window.project_io.load_signing_identity",
+                    return_value=identity,
+                ),
+                patch("ui.main_window.project_io.save_project") as save_project,
+            ):
+                window._save_signed_project_as()
+
+            save_project.assert_called_once_with(
+                window._workspace,
+                Path("signed-project.jasc"),
+                password=None,
+                signing_identity=identity,
+            )
+            self.assertEqual(window._project_signature_fingerprint, identity.fingerprint)
+            self.assertEqual(window._workspace.project_signature_status, "valid")
+            self.assertEqual(
+                key_password_prompt.call_args.args[2],
+                "Private-key password:",
+            )
+        finally:
+            window.close()
+
+    def test_main_window_prompts_to_open_encrypted_project(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        window = MainWindow()
+        loaded_workspace = Workspace()
+        loaded_workspace.add_dataset("private", pd.DataFrame({"x": [1.0]}))
+        try:
+            with (
+                patch(
+                    "ui.main_window.QFileDialog.getOpenFileName",
+                    return_value=("private.jascx", ""),
+                ),
+                patch(
+                    "ui.main_window.QInputDialog.getText",
+                    return_value=("secret", True),
+                ),
+                patch(
+                    "ui.main_window.project_io.load_project",
+                    side_effect=[
+                        project_io.ProjectPasswordRequiredError("password needed"),
+                        loaded_workspace,
+                    ],
+                ) as load_project,
+            ):
+                window._open_project()
+
+            self.assertEqual(window._workspace.dataset_names(), ["private"])
+            self.assertEqual(window._project_password, "secret")
+            self.assertEqual(load_project.call_count, 2)
+            self.assertEqual(load_project.call_args.kwargs["password"], "secret")
+        finally:
+            window.close()
+
+    def test_failed_save_keeps_existing_project_file(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("sheet", pd.DataFrame({"x": [1.0]}))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "existing.jasc"
+            path.write_bytes(b"previous project bytes")
+            with (
+                patch(
+                    "core.project_io._write_project_archive",
+                    side_effect=RuntimeError("simulated write failure"),
+                ),
+                self.assertRaises(RuntimeError),
+            ):
+                project_io.save_project(workspace, path)
+
+            self.assertEqual(path.read_bytes(), b"previous project bytes")
+
+    def test_unsigned_version_four_project_remains_backward_compatible(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("legacy", pd.DataFrame({"x": [1.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "legacy.jasc"
+            project_io.save_project(workspace, path)
+            with zipfile.ZipFile(path, "r") as archive:
+                members = {
+                    entry.filename: archive.read(entry.filename)
+                    for entry in archive.infolist()
+                    if not entry.is_dir() and entry.filename != "integrity.json"
+                }
+            metadata = json.loads(members["project.json"].decode("utf-8"))
+            metadata["version"] = 4
+            members["project.json"] = json.dumps(metadata).encode("utf-8")
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+
+            report = project_io.verify_project_integrity(path)
+            loaded = project_io.load_project(path)
+
+        self.assertFalse(report.has_manifest)
+        self.assertFalse(report.verified)
+        self.assertEqual(loaded.dataset_names(), ["legacy"])
+
+    def test_version_five_hash_manifest_remains_backward_compatible(self) -> None:
+        workspace = Workspace()
+        workspace.add_dataset("version five", pd.DataFrame({"x": [1.0]}))
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "version-five.jasc"
+            project_io.save_project(workspace, path)
+            with zipfile.ZipFile(path, "r") as archive:
+                members = {
+                    entry.filename: archive.read(entry.filename)
+                    for entry in archive.infolist()
+                    if not entry.is_dir() and entry.filename != "integrity.json"
+                }
+            metadata = json.loads(members["project.json"])
+            metadata["version"] = 5
+            members["project.json"] = json.dumps(metadata).encode("utf-8")
+            legacy_manifest = {
+                "algorithm": "sha256",
+                "files": {
+                    name: hashlib.sha256(payload).hexdigest()
+                    for name, payload in members.items()
+                },
+            }
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+                archive.writestr("integrity.json", json.dumps(legacy_manifest))
+
+            report = project_io.verify_project_integrity(path)
+            loaded = project_io.load_project(path)
+
+        self.assertTrue(report.has_manifest)
+        self.assertTrue(report.verified)
+        self.assertEqual(loaded.dataset_names(), ["version five"])
+
+    def test_main_window_warns_before_opening_forged_package(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        window = MainWindow()
+        integrity_error = project_io.ProjectIntegrityError(
+            project_io.ProjectIntegrityReport(
+                has_manifest=True,
+                verified=False,
+                problems=("changed 'datasets/sheet.csv'",),
+            )
+        )
+        try:
+            with (
+                patch(
+                    "ui.main_window.QFileDialog.getOpenFileName",
+                    return_value=("forged.jasc", ""),
+                ),
+                patch(
+                    "ui.main_window.project_io.load_project",
+                    side_effect=integrity_error,
+                ),
+                patch.object(
+                    QMessageBox,
+                    "warning",
+                    return_value=QMessageBox.Cancel,
+                ) as warning,
+            ):
+                window._open_project()
+
+            warning.assert_called_once()
+            self.assertIn("may have been forged", warning.call_args.args[2])
+            self.assertEqual(window._workspace.dataset_names(), [])
+        finally:
+            window.close()
 
     def test_workspace_can_adopt_a_freshly_parsed_frame(self) -> None:
         frame = pd.DataFrame({"x": [1, 2, 3]})

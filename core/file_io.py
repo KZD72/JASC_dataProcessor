@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
 import posixpath
@@ -12,12 +12,48 @@ import re
 from zipfile import BadZipFile, ZipFile
 from xml.etree import ElementTree
 
+import numpy as np
 import pandas as pd
 
 
 SUPPORTED_EXTENSIONS = {".csv", ".dat", ".txt"}
 SUPPORTED_EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
+AUTO_ENCODING = "auto"
+SUPPORTED_TEXT_ENCODINGS = {
+    AUTO_ENCODING,
+    "utf-8",
+    "utf-8-sig",
+    "utf-16",
+    "cp1252",
+    "latin-1",
+}
 AUTO_DELIMITER = "auto"
+AUTO_DATA_KIND = "auto"
+DATA_KIND_TABLE = "table"
+DATA_KIND_SPECTRUM = "spectrum"
+DATA_KIND_SPECTRAL_MAP = "spectral_map"
+AUTO_SPECTROMETER = "auto"
+SPECTROMETER_HORIBA = "horiba"
+SPECTROMETER_BWTEK = "bwtek"
+AUTO_NUMBER_FORMAT = "auto"
+NUMBER_FORMAT_DOT_DECIMAL = "dot_decimal"
+NUMBER_FORMAT_COMMA_DECIMAL = "comma_decimal"
+SUPPORTED_NUMBER_FORMATS = {
+    AUTO_NUMBER_FORMAT,
+    NUMBER_FORMAT_DOT_DECIMAL,
+    NUMBER_FORMAT_COMMA_DECIMAL,
+}
+SUPPORTED_DATA_KINDS = {
+    AUTO_DATA_KIND,
+    DATA_KIND_TABLE,
+    DATA_KIND_SPECTRUM,
+    DATA_KIND_SPECTRAL_MAP,
+}
+SUPPORTED_SPECTROMETERS = {
+    AUTO_SPECTROMETER,
+    SPECTROMETER_HORIBA,
+    SPECTROMETER_BWTEK,
+}
 _INFERRED_DELIMITER_CANDIDATES = ",;\t| "
 _DELIMITER_SAMPLE_SIZE = 128 * 1024
 
@@ -30,8 +66,11 @@ class ImportOptions:
 
     delimiter: str = AUTO_DELIMITER
     has_header: bool | None = None
-    encoding: str = "utf-8"
+    encoding: str = AUTO_ENCODING
     skip_rows: int | None = None
+    data_kind: str = AUTO_DATA_KIND
+    spectrometer: str = AUTO_SPECTROMETER
+    number_format: str = AUTO_NUMBER_FORMAT
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +84,9 @@ class DelimitedFileInspection:
     column_names: tuple[str, ...]
     column_count: int
     preview_rows: tuple[tuple[str, ...], ...]
+    format_name: str = "delimited"
+    spectral_axis: tuple[str, ...] = ()
+    encoding: str = "utf-8"
 
     @property
     def delimiter_label(self) -> str:
@@ -94,22 +136,42 @@ class ExcelReadResult:
     errors: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class DelimitedMetadata:
+    """Exact leading text plus best-effort key/value metadata fields."""
+
+    raw_lines: tuple[str, ...]
+    fields: tuple[tuple[str, str], ...]
+
+
 def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
     """Read a CSV/TXT file into a DataFrame using the selected import options."""
+    validate_import_profile(options.data_kind, options.spectrometer)
+    validate_number_format(options.number_format)
+    if options.data_kind == DATA_KIND_SPECTRAL_MAP and options.has_header is False:
+        raise ValueError(
+            "Spectroscopy maps require the first tabular row to contain the spectral axis. "
+            "Use Auto headers or select that the first tabular row contains column names."
+        )
     file_path = _validated_tabular_path(path)
+    resolved_encoding = resolve_text_encoding(file_path, options.encoding)
     inspection: DelimitedFileInspection | None = None
     if (
         options.delimiter == AUTO_DELIMITER
         or options.has_header is None
         or options.skip_rows is None
+        or options.data_kind == DATA_KIND_SPECTRAL_MAP
     ):
         inspection = inspect_delimited_file(
             file_path,
             delimiter=options.delimiter,
-            encoding=options.encoding,
+            encoding=resolved_encoding,
             skip_rows=options.skip_rows,
+            data_kind=options.data_kind,
+            spectrometer=options.spectrometer,
         )
     delimiter = inspection.delimiter if inspection is not None else options.delimiter
+    resolved_encoding = inspection.encoding if inspection is not None else resolved_encoding
     has_header = (
         inspection.has_header
         if options.has_header is None and inspection is not None
@@ -120,8 +182,22 @@ def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
         if options.skip_rows is None and inspection is not None
         else max(int(options.skip_rows or 0), 0)
     )
+    if inspection is not None and inspection.format_name == "bruker_ir":
+        return _read_bruker_ir_export(file_path, resolved_encoding)
+    if (
+        inspection is not None
+        and inspection.format_name == "spectral_map_matrix"
+        and has_header
+    ):
+        return _read_spectral_map_matrix(
+            file_path,
+            inspection,
+            encoding=resolved_encoding,
+            number_format=options.number_format,
+        )
+
     read_kwargs = _build_read_csv_kwargs(
-        options,
+        replace(options, encoding=resolved_encoding),
         delimiter=delimiter,
         has_header=has_header,
         skip_rows=skip_rows,
@@ -131,7 +207,7 @@ def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
         frame = pd.read_csv(file_path, **read_kwargs)
     except UnicodeDecodeError as exc:
         raise ValueError(
-            "Could not decode the file as UTF-8. Save it as UTF-8 or add encoding selection later."
+            f"Could not decode the file with the selected {resolved_encoding} encoding."
         ) from exc
     except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
         source = "inferred" if options.delimiter == AUTO_DELIMITER else "selected"
@@ -142,8 +218,44 @@ def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
 
     if not has_header:
         frame.columns = [f"Column {index + 1}" for index in range(len(frame.columns))]
+    return _convert_localized_numeric_columns(
+        frame,
+        delimiter,
+        number_format=options.number_format,
+    )
 
-    return frame
+
+def read_leading_metadata(
+    path: str | Path,
+    row_count: int,
+    *,
+    encoding: str = AUTO_ENCODING,
+) -> DelimitedMetadata:
+    """Read and parse the physical lines preceding an imported table.
+
+    Raw lines are retained without their newline terminators. Parsing is
+    deliberately best-effort: vendor-specific records remain available in
+    ``raw_lines`` even when no reliable key/value split can be inferred.
+    """
+    file_path = _validated_tabular_path(path)
+    resolved_encoding = resolve_text_encoding(file_path, encoding)
+    requested_rows = max(int(row_count), 0)
+    raw_lines: list[str] = []
+    try:
+        with file_path.open("r", encoding=resolved_encoding, newline="") as stream:
+            for _index, line in zip(range(requested_rows), stream, strict=False):
+                raw_lines.append(line.rstrip("\r\n"))
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Could not decode the file with the selected {resolved_encoding} encoding."
+        ) from exc
+
+    fields = tuple(
+        parsed
+        for line in raw_lines
+        if (parsed := _parse_metadata_line(line)) is not None
+    )
+    return DelimitedMetadata(raw_lines=tuple(raw_lines), fields=fields)
 
 
 def inspect_excel_workbook(path: str | Path) -> ExcelWorkbookInspection:
@@ -244,7 +356,7 @@ def export_tabular_file(
 
 def infer_tabular_delimiter(
     path: str | Path,
-    encoding: str = "utf-8",
+    encoding: str = AUTO_ENCODING,
 ) -> str:
     """Infer a common delimiter from a bounded text sample.
 
@@ -253,18 +365,22 @@ def infer_tabular_delimiter(
     candidate set prevents letters or digits in single-column data being mistaken
     for separators.
     """
-    file_path = Path(path)
-    sample = _read_delimited_sample(file_path, encoding)
+    file_path = _validated_tabular_path(path)
+    sample = _read_delimited_sample(file_path, resolve_text_encoding(file_path, encoding))
+    inference_sample = _without_leading_comment_records(sample)
 
-    if not sample.strip():
+    if not inference_sample.strip():
         return ","
+    localized_delimiter = _delimiter_around_decimal_commas(inference_sample)
+    if localized_delimiter is not None:
+        return localized_delimiter
     try:
         dialect = csv.Sniffer().sniff(
-            sample,
+            inference_sample,
             delimiters=_INFERRED_DELIMITER_CANDIDATES,
         )
     except csv.Error:
-        lines = [line.strip() for line in sample.splitlines() if line.strip()]
+        lines = [line.strip() for line in inference_sample.splitlines() if line.strip()]
         whitespace_widths = [len(re.split(r"\s+", line)) for line in lines]
         if (
             len(whitespace_widths) >= 2
@@ -276,20 +392,56 @@ def infer_tabular_delimiter(
     return str(dialect.delimiter)
 
 
+def _delimiter_around_decimal_commas(sample: str) -> str | None:
+    """Prefer a structural separator when commas are localized decimals."""
+    lines = [line for line in sample.splitlines() if line.strip()][:50]
+    numeric_lines = [line for line in lines if re.search(r"\d,\d", line)]
+    if len(numeric_lines) < 2:
+        return None
+    for candidate in ("\t", ";", "|"):
+        counts = [line.count(candidate) for line in numeric_lines]
+        if counts and min(counts) > 0 and len(set(counts)) == 1:
+            comma_positions_are_decimal = all(
+                all(
+                    0 < match.start() < len(line) - 1
+                    and line[match.start() - 1].isdigit()
+                    and line[match.start() + 1].isdigit()
+                    for match in re.finditer(",", line)
+                )
+                for line in numeric_lines
+            )
+            if comma_positions_are_decimal:
+                return candidate
+    return None
+
+
 def inspect_delimited_file(
     path: str | Path,
     *,
     delimiter: str = AUTO_DELIMITER,
-    encoding: str = "utf-8",
+    encoding: str = AUTO_ENCODING,
     skip_rows: int | None = None,
+    data_kind: str = AUTO_DATA_KIND,
+    spectrometer: str = AUTO_SPECTROMETER,
 ) -> DelimitedFileInspection:
     """Infer separator, leading metadata rows, header presence, and a short preview."""
+    validate_import_profile(data_kind, spectrometer)
     file_path = _validated_tabular_path(path)
-    sample = _read_delimited_sample(file_path, encoding)
+    resolved_encoding = resolve_text_encoding(file_path, encoding)
+    sample = _read_delimited_sample(file_path, resolved_encoding)
     if not sample.strip():
         raise ValueError("The selected file did not contain any rows.")
+    if (
+        delimiter == AUTO_DELIMITER
+        and skip_rows is None
+        and data_kind in {AUTO_DATA_KIND, DATA_KIND_SPECTRUM}
+        and spectrometer == AUTO_SPECTROMETER
+    ):
+        bruker_inspection = _inspect_bruker_ir_export(file_path, sample)
+        if bruker_inspection is not None:
+            return replace(bruker_inspection, encoding=resolved_encoding)
     resolved_delimiter = (
-        infer_tabular_delimiter(file_path, encoding)
+        infer_tabular_delimiter(file_path, resolved_encoding)
         if delimiter == AUTO_DELIMITER
         else delimiter
     )
@@ -297,9 +449,42 @@ def inspect_delimited_file(
     if not parsed_rows:
         raise ValueError("The selected file did not contain any readable rows.")
 
+    minimum_line = max(int(skip_rows or 0), 0) if skip_rows is not None else 0
+    if (
+        data_kind in {AUTO_DATA_KIND, DATA_KIND_SPECTRAL_MAP}
+        and spectrometer in {AUTO_SPECTROMETER, SPECTROMETER_HORIBA}
+    ):
+        spectral_map_inspection = _inspect_spectral_map_matrix(
+            file_path,
+            parsed_rows,
+            resolved_delimiter,
+            minimum_line=minimum_line,
+        )
+        if spectral_map_inspection is not None:
+            return replace(spectral_map_inspection, encoding=resolved_encoding)
+        if data_kind == DATA_KIND_SPECTRAL_MAP:
+            raise ValueError(
+                "The selected Horiba spectroscopy-map profile did not match this file. "
+                "Expected a tabular header with X and Y coordinate cells followed by "
+                "numeric Raman-shift values."
+            )
+
     if skip_rows is None:
-        table_width = _dominant_table_width(parsed_rows)
-        base_position = _first_stable_width_position(parsed_rows, table_width)
+        first_candidate_line = _first_noncomment_line_number(sample)
+        first_candidate_position = next(
+            (
+                position
+                for position, (line_number, _row) in enumerate(parsed_rows)
+                if line_number >= first_candidate_line
+            ),
+            0,
+        )
+        candidate_rows = parsed_rows[first_candidate_position:]
+        table_width = _dominant_table_width(candidate_rows)
+        base_position = first_candidate_position + _first_stable_width_position(
+            candidate_rows,
+            table_width,
+        )
         table_position, has_header = _infer_table_start_and_header(
             parsed_rows,
             base_position,
@@ -344,7 +529,434 @@ def inspect_delimited_file(
         column_names=column_names,
         column_count=table_width,
         preview_rows=preview,
+        encoding=resolved_encoding,
     )
+
+
+def validate_import_profile(data_kind: str, spectrometer: str) -> None:
+    """Validate the supported data-kind and spectrometer combinations."""
+    if data_kind not in SUPPORTED_DATA_KINDS:
+        raise ValueError(f"Unsupported import data type: {data_kind!r}.")
+    if spectrometer not in SUPPORTED_SPECTROMETERS:
+        raise ValueError(f"Unsupported spectrometer profile: {spectrometer!r}.")
+    if data_kind == DATA_KIND_SPECTRAL_MAP and spectrometer == SPECTROMETER_BWTEK:
+        raise ValueError(
+            "B&W Tek map import is not supported yet. Select Single spectrum for B&W Tek "
+            "files, or Horiba LabSpec for spectroscopy maps."
+        )
+
+
+def validate_number_format(number_format: str) -> None:
+    """Validate a requested decimal/thousands-separator convention."""
+    if number_format not in SUPPORTED_NUMBER_FORMATS:
+        raise ValueError(f"Unsupported number format: {number_format!r}.")
+
+
+_X_COORDINATE_LABELS = {
+    "",
+    "x",
+    "xcoord",
+    "xcoordinate",
+    "xposition",
+    "xpos",
+    "mapx",
+}
+_Y_COORDINATE_LABELS = {
+    "",
+    "y",
+    "ycoord",
+    "ycoordinate",
+    "yposition",
+    "ypos",
+    "mapy",
+}
+
+
+def _inspect_spectral_map_matrix(
+    file_path: Path,
+    rows: list[tuple[int, tuple[str, ...]]],
+    delimiter: str,
+    *,
+    minimum_line: int = 0,
+) -> DelimitedFileInspection | None:
+    """Recognize a wide X/Y plus spectral-intensity matrix.
+
+    Horiba LabSpec maps may leave the first two header cells blank or label them
+    as X/Y coordinate columns. Every remaining header token is a Raman-shift
+    value and each following row contains one spatial pixel spectrum.
+    """
+    for position, (line_number, header_row) in enumerate(rows):
+        if line_number < minimum_line or len(header_row) < 4:
+            continue
+        x_label = _normalized_coordinate_label(header_row[0])
+        y_label = _normalized_coordinate_label(header_row[1])
+        if x_label not in _X_COORDINATE_LABELS or y_label not in _Y_COORDINATE_LABELS:
+            continue
+        if not all(_cell_kind(value) == "number" for value in header_row[2:]):
+            continue
+
+        data_rows = [
+            row
+            for _candidate_line, row in rows[position + 1 :]
+            if len(row) == len(header_row)
+        ][:5]
+        if len(data_rows) < 2:
+            continue
+        if not all(
+            all(_cell_kind(value) == "number" for value in row)
+            for row in data_rows
+        ):
+            continue
+
+        spectral_names = tuple(value.strip() for value in header_row[2:])
+        first_data_row = data_rows[0]
+        preview_rows = tuple(
+            (
+                first_data_row[0],
+                first_data_row[1],
+                spectral_name,
+                first_data_row[index + 2],
+            )
+            for index, spectral_name in enumerate(spectral_names[:5])
+        )
+        return DelimitedFileInspection(
+            path=file_path,
+            delimiter=delimiter,
+            metadata_rows=line_number,
+            has_header=True,
+            column_names=("X", "Y", "Raman Shift", "Intensity"),
+            column_count=4,
+            preview_rows=preview_rows,
+            format_name="spectral_map_matrix",
+            spectral_axis=spectral_names,
+        )
+    return None
+
+
+def _normalized_coordinate_label(value: str) -> str:
+    """Normalize common spatial-coordinate header variants for matching."""
+    return re.sub(r"[^a-z0-9]+", "", value.strip().casefold())
+
+
+def _read_spectral_map_matrix(
+    file_path: Path,
+    inspection: DelimitedFileInspection,
+    *,
+    encoding: str,
+    number_format: str,
+) -> pd.DataFrame:
+    """Normalize a wide spectral map into X/Y/shift/intensity rows."""
+    read_kwargs: dict[str, object] = {
+        "sep": inspection.delimiter,
+        "header": 0,
+        "encoding": encoding,
+        "skiprows": inspection.metadata_rows,
+        "dtype": "string",
+    }
+    if inspection.delimiter == " ":
+        read_kwargs.update({"sep": r"\s+", "engine": "python"})
+    try:
+        wide_frame = pd.read_csv(file_path, **read_kwargs)
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Could not decode the spectral map with the selected {encoding} encoding."
+        ) from exc
+    except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+        raise ValueError(f"Could not parse the spectral map matrix: {exc}") from exc
+
+    expected_columns = len(inspection.spectral_axis) + 2
+    if len(wide_frame.columns) != expected_columns:
+        raise ValueError(
+            "The spectral map header defines "
+            f"{len(inspection.spectral_axis)} Raman shifts, but the table contains "
+            f"{max(len(wide_frame.columns) - 2, 0)} intensity columns."
+        )
+    wide_frame.columns = ["X", "Y", *inspection.spectral_axis]
+    wide_frame = _convert_localized_numeric_columns(
+        wide_frame,
+        inspection.delimiter,
+        number_format=number_format,
+    )
+    if not all(pd.api.types.is_numeric_dtype(dtype) for dtype in wide_frame.dtypes):
+        raise ValueError("The spectral map contains non-numeric coordinate or intensity values.")
+
+    try:
+        resolved_axis_format = _resolved_number_format(
+            pd.Series(inspection.spectral_axis, dtype="string"),
+            delimiter=inspection.delimiter,
+            requested=number_format,
+        )
+        shifts = np.asarray(
+            [
+                _required_localized_number(value, resolved_axis_format)
+                for value in inspection.spectral_axis
+            ],
+            dtype="float64",
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("The spectral map header contains a non-numeric Raman shift.") from exc
+
+    pixel_count = len(wide_frame)
+    shift_count = len(shifts)
+    coordinates = wide_frame.iloc[:, :2].to_numpy(dtype="float64", copy=False)
+    intensities = wide_frame.iloc[:, 2:].to_numpy(dtype="float64", copy=False)
+    return pd.DataFrame({
+        "X": np.repeat(coordinates[:, 0], shift_count),
+        "Y": np.repeat(coordinates[:, 1], shift_count),
+        "Raman Shift": np.tile(shifts, pixel_count),
+        "Intensity": intensities.reshape(pixel_count * shift_count),
+    })
+
+
+def _inspect_bruker_ir_export(
+    file_path: Path,
+    sample: str,
+) -> DelimitedFileInspection | None:
+    """Recognize the legacy Bruker text layout used by the Raman application."""
+    lines = sample.splitlines()
+    coordinate_line = next(
+        (
+            (index, line)
+            for index, line in enumerate(lines)
+            if line.lstrip().lower().startswith("#c ")
+        ),
+        None,
+    )
+    if coordinate_line is None:
+        return None
+    coordinate_index, coordinate_text = coordinate_line
+    if not any(line.lstrip().lower().startswith("#d ") for line in lines[:coordinate_index]):
+        return None
+    try:
+        x_values = [float(token) for token in coordinate_text.lstrip()[2:].split()]
+    except ValueError:
+        return None
+    if len(x_values) < 2:
+        return None
+
+    y_values: list[float] = []
+    for line in lines[coordinate_index + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "$", "%")):
+            continue
+        try:
+            y_values.append(float(stripped.replace(",", ".")))
+        except ValueError:
+            return None
+        if len(y_values) >= 5:
+            break
+    if len(y_values) < 2:
+        return None
+
+    preview = tuple(
+        (f"{x_value:g}", f"{y_value:g}")
+        for x_value, y_value in zip(x_values, y_values, strict=False)
+    )
+    return DelimitedFileInspection(
+        path=file_path,
+        delimiter=" ",
+        metadata_rows=coordinate_index + 1,
+        has_header=False,
+        column_names=("Wavenumber", "Intensity"),
+        column_count=2,
+        preview_rows=preview,
+        format_name="bruker_ir",
+    )
+
+
+def _read_bruker_ir_export(file_path: Path, encoding: str) -> pd.DataFrame:
+    """Read a Bruker IR export whose X coordinates are stored in ``#c``."""
+    try:
+        lines = file_path.read_text(encoding=encoding).splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Could not decode the Bruker export with the selected {encoding} encoding."
+        ) from exc
+
+    coordinate_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.lstrip().lower().startswith("#c ")
+        ),
+        None,
+    )
+    if coordinate_index is None:
+        raise ValueError("The Bruker export does not contain a #c coordinate record.")
+    try:
+        x_values = [
+            float(token.replace(",", "."))
+            for token in lines[coordinate_index].lstrip()[2:].split()
+        ]
+        y_values = [
+            float(line.strip().replace(",", "."))
+            for line in lines[coordinate_index + 1 :]
+            if line.strip() and not line.lstrip().startswith(("#", "$", "%"))
+        ]
+    except ValueError as exc:
+        raise ValueError("The Bruker export contains non-numeric spectrum values.") from exc
+    if len(x_values) != len(y_values):
+        raise ValueError(
+            "The Bruker export contains "
+            f"{len(x_values)} X coordinates but {len(y_values)} intensity values."
+        )
+    if not x_values:
+        raise ValueError("The Bruker export does not contain spectrum values.")
+    return pd.DataFrame({"Wavenumber": x_values, "Intensity": y_values})
+
+
+_DOT_DECIMAL_NUMBER_PATTERN = re.compile(
+    r"^[+-]?(?:(?:\d{1,3}(?:[, '\u00a0\u202f’]\d{3})+|\d+)"
+    r"(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$"
+)
+_COMMA_DECIMAL_NUMBER_PATTERN = re.compile(
+    r"^[+-]?(?:(?:\d{1,3}(?:[. '\u00a0\u202f’]\d{3})+|\d+)"
+    r"(?:,\d*)?|,\d+)(?:[eE][+-]?\d+)?$"
+)
+_GROUPING_SPACES = " '\u00a0\u202f’"
+
+
+def _convert_localized_numeric_columns(
+    frame: pd.DataFrame,
+    delimiter: str,
+    *,
+    number_format: str = AUTO_NUMBER_FORMAT,
+) -> pd.DataFrame:
+    """Convert wholly numeric columns using safe locale-aware token parsing."""
+    validate_number_format(number_format)
+    frame_format = _infer_frame_number_format(frame, delimiter, number_format)
+    for column in frame.columns:
+        series = frame[column]
+        if pd.api.types.is_numeric_dtype(series.dtype):
+            continue
+        text = series.astype("string").str.strip()
+        meaningful = text.notna() & (text != "")
+        if not meaningful.any():
+            continue
+        tokens = text[meaningful]
+        resolved_format = (
+            number_format
+            if number_format != AUTO_NUMBER_FORMAT
+            else _infer_number_format(tokens) or frame_format
+        )
+        converted_values = [
+            _parse_localized_number(str(value), resolved_format)
+            for value in tokens
+        ]
+        if any(value is None for value in converted_values):
+            continue
+        numeric_series = pd.Series(float("nan"), index=series.index, dtype="float64")
+        numeric_series.loc[meaningful] = np.asarray(converted_values, dtype="float64")
+        frame[column] = numeric_series
+    return frame
+
+
+def _infer_frame_number_format(
+    frame: pd.DataFrame,
+    delimiter: str,
+    requested: str,
+) -> str:
+    """Infer one fallback convention from unambiguous tokens across a table."""
+    if requested != AUTO_NUMBER_FORMAT:
+        return requested
+    evidence: set[str] = set()
+    for column in frame.columns:
+        series = frame[column]
+        if pd.api.types.is_numeric_dtype(series.dtype):
+            continue
+        text = series.astype("string").str.strip()
+        tokens = text[text.notna() & (text != "")]
+        inferred = _infer_number_format(tokens)
+        if inferred is not None:
+            evidence.add(inferred)
+    if len(evidence) == 1:
+        return next(iter(evidence))
+    # A comma field delimiter strongly implies point-decimal values. Otherwise
+    # point decimal is the backward-compatible fallback for genuinely ambiguous
+    # tokens such as 1.234; users can select comma decimal explicitly.
+    return NUMBER_FORMAT_DOT_DECIMAL
+
+
+def _resolved_number_format(
+    tokens: pd.Series,
+    *,
+    delimiter: str,
+    requested: str,
+) -> str:
+    """Resolve a requested or inferred convention for one token series."""
+    validate_number_format(requested)
+    if requested != AUTO_NUMBER_FORMAT:
+        return requested
+    return _infer_number_format(tokens) or NUMBER_FORMAT_DOT_DECIMAL
+
+
+def _infer_number_format(tokens: pd.Series) -> str | None:
+    """Infer decimal convention only when at least one token is unambiguous."""
+    evidence: set[str] = set()
+    for value in tokens:
+        token = str(value).strip()
+        dot_value = _parse_localized_number(token, NUMBER_FORMAT_DOT_DECIMAL)
+        comma_value = _parse_localized_number(token, NUMBER_FORMAT_COMMA_DECIMAL)
+        if dot_value is not None and comma_value is None:
+            evidence.add(NUMBER_FORMAT_DOT_DECIMAL)
+        elif comma_value is not None and dot_value is None:
+            evidence.add(NUMBER_FORMAT_COMMA_DECIMAL)
+    return next(iter(evidence)) if len(evidence) == 1 else None
+
+
+def _parse_localized_number(value: str, number_format: str) -> float | None:
+    """Parse one localized number, validating grouping before removing it."""
+    token = value.strip()
+    if not token:
+        return None
+    if number_format == NUMBER_FORMAT_COMMA_DECIMAL:
+        if _COMMA_DECIMAL_NUMBER_PATTERN.fullmatch(token) is None:
+            return None
+        normalized = token
+        for separator in "." + _GROUPING_SPACES:
+            normalized = normalized.replace(separator, "")
+        normalized = normalized.replace(",", ".")
+    elif number_format == NUMBER_FORMAT_DOT_DECIMAL:
+        if _DOT_DECIMAL_NUMBER_PATTERN.fullmatch(token) is None:
+            return None
+        normalized = token
+        for separator in "," + _GROUPING_SPACES:
+            normalized = normalized.replace(separator, "")
+    else:
+        return None
+    try:
+        result = float(normalized)
+    except ValueError:
+        return None
+    return result if np.isfinite(result) else None
+
+
+def _required_localized_number(value: str, number_format: str) -> float:
+    """Parse one required number or raise a concise value error."""
+    parsed = _parse_localized_number(str(value), number_format)
+    if parsed is None:
+        raise ValueError(f"Invalid localized number: {value!r}")
+    return parsed
+
+
+def _parse_metadata_line(line: str) -> tuple[str, str] | None:
+    """Best-effort parse of common ``#``, ``$``, ``%`` and text records."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    content = stripped.lstrip("#$%").strip()
+    if not content:
+        return None
+    for separator in ("=", "\t", ";", ":"):
+        if separator not in content:
+            continue
+        key, value = content.split(separator, 1)
+        if key.strip():
+            return key.strip(), value.strip().strip("\t;")
+    if stripped[0] in "#$%" and " " in content:
+        key, value = content.split(None, 1)
+        return key.strip(), value.strip()
+    return None
 
 
 def _validated_tabular_path(path: str | Path) -> Path:
@@ -358,6 +970,37 @@ def _validated_tabular_path(path: str | Path) -> Path:
     return file_path
 
 
+def resolve_text_encoding(path: str | Path, requested: str = AUTO_ENCODING) -> str:
+    """Return an explicit encoding after bounded, lossless text detection.
+
+    UTF byte-order marks take priority. Without a mark, UTF-8 is attempted
+    strictly before the common Windows-1252 instrument-export encoding and the
+    byte-preserving Latin-1 fallback. No decoding errors are silently replaced.
+    """
+    file_path = _validated_tabular_path(path)
+    normalized = str(requested or AUTO_ENCODING).strip().lower()
+    if normalized not in SUPPORTED_TEXT_ENCODINGS:
+        raise ValueError(f"Unsupported text encoding: {requested!r}.")
+    if normalized != AUTO_ENCODING:
+        return normalized
+
+    sample = file_path.read_bytes()[:_DELIMITER_SAMPLE_SIZE]
+    if sample.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if sample.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    try:
+        sample.decode("utf-8", errors="strict")
+        return "utf-8"
+    except UnicodeDecodeError:
+        pass
+    try:
+        sample.decode("cp1252", errors="strict")
+        return "cp1252"
+    except UnicodeDecodeError:
+        return "latin-1"
+
+
 def _read_delimited_sample(file_path: Path, encoding: str) -> str:
     """Read the bounded text sample shared by delimiter and structure inference."""
     try:
@@ -365,7 +1008,7 @@ def _read_delimited_sample(file_path: Path, encoding: str) -> str:
             return stream.read(_DELIMITER_SAMPLE_SIZE)
     except UnicodeDecodeError as exc:
         raise ValueError(
-            "Could not decode the file as UTF-8. Save it as UTF-8 or add encoding selection later."
+            f"Could not decode the file with the selected {encoding} encoding."
         ) from exc
 
 
@@ -391,6 +1034,24 @@ def _sample_delimited_rows(
         if values:
             rows.append((line_number, values))
     return rows
+
+
+def _without_leading_comment_records(sample: str) -> str:
+    """Remove leading ``#``/``$``/``%`` records for delimiter inference."""
+    lines = sample.splitlines()
+    start = _first_noncomment_line_number(sample)
+    return "\n".join(lines[start:])
+
+
+def _first_noncomment_line_number(sample: str) -> int:
+    """Return the physical line where non-comment tabular content begins."""
+    lines = sample.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "$", "%")):
+            continue
+        return index
+    return 0
 
 
 def _dominant_table_width(rows: list[tuple[int, tuple[str, ...]]]) -> int:
@@ -419,12 +1080,12 @@ def _cell_kind(value: str) -> str:
     text = value.strip()
     if not text:
         return "blank"
-    normalized = text.replace(",", ".")
-    try:
-        float(normalized)
-    except ValueError:
-        return "text"
-    return "number"
+    if (
+        _parse_localized_number(text, NUMBER_FORMAT_DOT_DECIMAL) is not None
+        or _parse_localized_number(text, NUMBER_FORMAT_COMMA_DECIMAL) is not None
+    ):
+        return "number"
+    return "text"
 
 
 def _row_signature(row: tuple[str, ...]) -> tuple[str, ...]:
@@ -530,6 +1191,7 @@ def _build_read_csv_kwargs(
             "encoding": options.encoding,
             "engine": "python",
             "skiprows": max(int(resolved_skip_rows or 0), 0),
+            "dtype": "string",
         }
 
     return {
@@ -537,6 +1199,7 @@ def _build_read_csv_kwargs(
         "header": header,
         "encoding": options.encoding,
         "skiprows": max(int(resolved_skip_rows or 0), 0),
+        "dtype": "string",
     }
 
 

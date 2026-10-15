@@ -14,7 +14,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure
 from matplotlib.path import Path as MplPath
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QVBoxLayout, QWidget
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
 
 from core.workspace import COLUMN_NUMERIC_TYPES, Workspace, dataframe_column_metadata
@@ -27,7 +27,8 @@ except ImportError:
     SCIENCEPLOTS_AVAILABLE = False
 
 
-_SURFACE_PLOT_TYPES = {"heatmap", "contour", "contourf"}
+_SPECTRAL_PLOT_TYPES = {"spectra_heatmap", "spectra_contour", "spectra_contourf"}
+_SURFACE_PLOT_TYPES = {"heatmap", "contour", "contourf"} | _SPECTRAL_PLOT_TYPES
 _PIE_PLOT_TYPES = {"pie", "donut"}
 _VORONOI_PLOT_TYPES = {"voronoi"}
 _COMPOSITION_PLOT_TYPES = _PIE_PLOT_TYPES | _VORONOI_PLOT_TYPES
@@ -67,6 +68,11 @@ class PlotSeries:
     distribution_show_outliers: bool = True
     interpolation_method: str = "linear"
     grid_resolution: int = 120
+    color_map: str = "viridis"
+    colorbar_label: str = ""
+    spectral_column: str = ""
+    spectral_center: float = 0.0
+    spectral_sampling: str = "nearest"
     voronoi_shape: str = "circle"
     show_in_legend: bool = True
 
@@ -77,6 +83,11 @@ class PlotSeries:
             return self.custom_label
         if self.plot_type in _SURFACE_PLOT_TYPES:
             z_column = self.z_column or self.y_column
+            if self.plot_type in _SPECTRAL_PLOT_TYPES:
+                return (
+                    f"{self.z_dataset or self.y_dataset}: {z_column} at "
+                    f"{self.spectral_center:g} {self.spectral_column}"
+                )
             return f"{self.z_dataset or self.y_dataset}: {z_column}"
         if self.plot_type in {"box", "violin"}:
             columns = list(self.distribution_columns) or ([self.y_column] if self.y_column else [])
@@ -206,13 +217,23 @@ class PlotCanvas(QWidget):
         )
         self.canvas.mpl_connect("button_press_event", self._handle_canvas_button_press)
         self.toolbar = PlotNavigationToolbar(self)
+        self.canvas.mpl_connect("motion_notify_event", self._handle_canvas_motion)
         self.axes = self.figure.add_subplot(111)
         self.right_axes: Any | None = None
         self._series_artists: list[tuple[int, object]] = []
+        self._colorbar_labels: list[tuple[int, object]] = []
+        self._rendered_surface_grids: list[
+            tuple[_SurfaceValues, np.ndarray, np.ndarray, np.ma.MaskedArray]
+        ] = []
+        self.coordinate_readout = QLabel()
+        self.coordinate_readout.setObjectName("MutedLabel")
+        self.coordinate_readout.setMinimumHeight(20)
+        self.coordinate_readout.setVisible(False)
         self._draw_empty_state()
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.toolbar)
+        layout.addWidget(self.coordinate_readout)
         layout.addWidget(self.canvas)
 
     def set_export_size(self, width: float, height: float, size_mode: str) -> None:
@@ -305,6 +326,15 @@ class PlotCanvas(QWidget):
     def editable_element_at(self, pixel_x: float, pixel_y: float) -> tuple[str, object] | None:
         """Return the editable artist or axis region at display-pixel coordinates."""
         renderer = self.canvas.get_renderer()
+        for series_index, label_artist in self._colorbar_labels:
+            if self._artist_contains(
+                label_artist,
+                renderer,
+                pixel_x,
+                pixel_y,
+                padding=5.0,
+            ):
+                return "colorbar_label", series_index
         legend = self.axes.get_legend()
         if legend is not None and legend.get_visible():
             for text in legend.get_texts():
@@ -514,6 +544,10 @@ class PlotCanvas(QWidget):
         self.axes = self.figure.add_subplot(111)
         self.right_axes = None
         self._series_artists = []
+        self._colorbar_labels = []
+        self._rendered_surface_grids = []
+        self.coordinate_readout.clear()
+        self.coordinate_readout.setVisible(False)
 
         skipped_messages: list[str] = []
         located_points: list[LocatedPoint] = []
@@ -528,6 +562,9 @@ class PlotCanvas(QWidget):
 
         plotted_series_values: dict[int, tuple[pd.Series, pd.Series, PlotSeries]] = {}
         plotted_surface_values: dict[int, _SurfaceValues] = {}
+        rendered_surface_grids: list[
+            tuple[_SurfaceValues, np.ndarray, np.ndarray, np.ma.MaskedArray]
+        ] = []
 
         for series_index, series in enumerate(series_list):
             if uses_composition_plot and series.plot_type not in _COMPOSITION_PLOT_TYPES:
@@ -551,6 +588,7 @@ class PlotCanvas(QWidget):
                     grid_x, grid_y, grid_z = self._interpolated_surface_grid(surface_values)
                     self._draw_surface_by_type(
                         target_axes=self.axes,
+                        series_index=series_index,
                         series=series,
                         grid_x=grid_x,
                         grid_y=grid_y,
@@ -561,6 +599,9 @@ class PlotCanvas(QWidget):
                     continue
 
                 plotted_surface_values[series_index] = surface_values
+                rendered_surface_grids.append(
+                    (surface_values, grid_x, grid_y, grid_z)
+                )
                 self._register_series_artists(series_index, self.axes, previous_artist_ids)
                 x_axis_values.append(surface_values.x_values)
                 left_y_axis_values.append(surface_values.y_values)
@@ -720,6 +761,8 @@ class PlotCanvas(QWidget):
         skipped_messages.extend(locator_messages)
 
         self._draw_legend(legend_settings, series_list)
+        if rendered_surface_grids:
+            self._install_surface_coordinate_reader(rendered_surface_grids)
 
         self.canvas.draw()
         return PlotResult(
@@ -1139,6 +1182,19 @@ class PlotCanvas(QWidget):
             "y": self._numeric_column_values(workspace, series.y_dataset, series.y_column, "Y coordinate"),
             "z": self._numeric_column_values(workspace, z_dataset_name, series.z_column, "Z value"),
         }
+        if series.plot_type in _SPECTRAL_PLOT_TYPES:
+            if not series.spectral_column:
+                raise ValueError("choose a Raman shift/frequency column")
+            if series.spectral_column not in z_frame.columns:
+                raise ValueError(
+                    f"missing Raman shift/frequency column '{series.spectral_column}'"
+                )
+            columns["spectral"] = self._numeric_column_values(
+                workspace,
+                z_dataset_name,
+                series.spectral_column,
+                "Raman shift/frequency",
+            )
         point_count = min(len(column) for column in columns.values())
         if point_count == 0:
             raise ValueError("no numeric X/Y/Z points to plot")
@@ -1150,14 +1206,17 @@ class PlotCanvas(QWidget):
             }
         ).dropna()
 
+        if series.plot_type in _SPECTRAL_PLOT_TYPES:
+            points = self._spectral_slice_points(aligned, series)
+        else:
+            points = aligned.groupby(["x", "y"], as_index=False)["z"].mean()
         if x_scale == "log":
-            aligned = aligned[aligned["x"] > 0]
+            points = points[points["x"] > 0]
         if y_scale == "log":
-            aligned = aligned[aligned["y"] > 0]
-        if aligned.empty:
+            points = points[points["y"] > 0]
+        if points.empty:
             raise ValueError("no numeric X/Y/Z points remain after scale filtering")
 
-        points = aligned.groupby(["x", "y"], as_index=False)["z"].mean()
         if len(points) < 3:
             raise ValueError("2D interpolation needs at least three distinct X/Y points")
         if points["x"].nunique() < 2 or points["y"].nunique() < 2:
@@ -1169,6 +1228,53 @@ class PlotCanvas(QWidget):
             z_values=points["z"].to_numpy(dtype=float),
             series=series,
         )
+
+    @staticmethod
+    def _spectral_slice_points(aligned: pd.DataFrame, series: PlotSeries) -> pd.DataFrame:
+        """Return one sampled intensity value per spatial X/Y coordinate."""
+        center = float(series.spectral_center)
+        if not np.isfinite(center):
+            raise ValueError("Raman shift/frequency center must be finite")
+
+        sampling = str(series.spectral_sampling or "nearest").strip().lower()
+        if sampling == "nearest":
+            candidates = aligned.assign(
+                _distance=(aligned["spectral"] - center).abs()
+            )
+            nearest_rows = candidates.groupby(
+                ["x", "y"],
+                sort=False,
+            )["_distance"].idxmin()
+            return candidates.loc[nearest_rows, ["x", "y", "z"]].reset_index(
+                drop=True
+            )
+        if sampling != "linear":
+            raise ValueError(f"unknown spectral sampling method '{series.spectral_sampling}'")
+
+        sampled: list[tuple[float, float, float]] = []
+        for (x_value, y_value), pixel in aligned.groupby(["x", "y"], sort=False):
+            spectrum = (
+                pixel.groupby("spectral", as_index=False, sort=True)["z"]
+                .mean()
+                .dropna()
+            )
+            if spectrum.empty:
+                continue
+            shifts = spectrum["spectral"].to_numpy(dtype=float)
+            intensities = spectrum["z"].to_numpy(dtype=float)
+            if center < shifts[0] or center > shifts[-1]:
+                continue
+            sampled.append((
+                float(x_value),
+                float(y_value),
+                float(np.interp(center, shifts, intensities)),
+            ))
+
+        if not sampled:
+            raise ValueError(
+                "the selected Raman shift/frequency is outside every pixel spectrum"
+            )
+        return pd.DataFrame(sampled, columns=["x", "y", "z"])
 
     def _interpolated_surface_grid(
         self,
@@ -1706,6 +1812,7 @@ class PlotCanvas(QWidget):
     def _draw_surface_by_type(
         self,
         target_axes: Any,
+        series_index: int,
         series: PlotSeries,
         grid_x: np.ndarray,
         grid_y: np.ndarray,
@@ -1714,23 +1821,24 @@ class PlotCanvas(QWidget):
         """Draw an interpolated X/Y/Z surface using its explicit plot type."""
         if grid_z.count() == 0:
             raise ValueError("interpolation produced no plottable grid values")
+        color_map = series.color_map or "viridis"
 
-        if series.plot_type == "contour":
+        if series.plot_type in {"contour", "spectra_contour"}:
             mappable = target_axes.contour(
                 grid_x,
                 grid_y,
                 grid_z,
                 levels=12,
-                cmap="viridis",
+                cmap=color_map,
             )
             target_axes.clabel(mappable, inline=True, fontsize=8)
-        elif series.plot_type == "contourf":
+        elif series.plot_type in {"contourf", "spectra_contourf"}:
             mappable = target_axes.contourf(
                 grid_x,
                 grid_y,
                 grid_z,
                 levels=16,
-                cmap="viridis",
+                cmap=color_map,
             )
         else:
             mappable = target_axes.pcolormesh(
@@ -1738,11 +1846,141 @@ class PlotCanvas(QWidget):
                 grid_y,
                 grid_z,
                 shading="auto",
-                cmap="viridis",
+                cmap=color_map,
             )
 
         colorbar = self.figure.colorbar(mappable, ax=target_axes)
-        colorbar.set_label(series.z_column or series.label)
+        colorbar_label = series.colorbar_label or self.default_colorbar_label(series)
+        colorbar.set_label(colorbar_label)
+        self._colorbar_labels.append((series_index, colorbar.ax.yaxis.label))
+
+    @staticmethod
+    def default_colorbar_label(series: PlotSeries) -> str:
+        """Return the automatic colour-bar label for a surface series."""
+        colorbar_label = series.z_column or series.label
+        if series.plot_type in _SPECTRAL_PLOT_TYPES:
+            return (
+                f"{colorbar_label} at {series.spectral_column} = "
+                f"{series.spectral_center:g}"
+            )
+        return colorbar_label
+
+    def _install_surface_coordinate_reader(
+        self,
+        rendered_surfaces: list[
+            tuple[_SurfaceValues, np.ndarray, np.ndarray, np.ma.MaskedArray]
+        ],
+    ) -> None:
+        """Show interpolated map values in Matplotlib's live mouse-coordinate reader."""
+        self._rendered_surface_grids = list(rendered_surfaces)
+        self.coordinate_readout.setText("Move the mouse over the map to read X, Y, and intensity")
+        self.coordinate_readout.setVisible(True)
+        self.axes.format_coord = self._format_surface_coordinate
+
+    def _format_surface_coordinate(self, x_value: float, y_value: float) -> str:
+        """Return a stable X/Y/Z readout for the currently rendered surfaces."""
+        text = f"x={x_value:.6g}, y={y_value:.6g}"
+        readouts: list[str] = []
+        for surface, grid_x, grid_y, grid_z in self._rendered_surface_grids:
+            z_value = self._surface_grid_value(
+                grid_x,
+                grid_y,
+                grid_z,
+                x_value,
+                y_value,
+            )
+            if z_value is None:
+                z_value = self._nearest_surface_value(surface, x_value, y_value)
+            if z_value is None:
+                continue
+            value_label = surface.series.z_column or "Z"
+            if len(self._rendered_surface_grids) > 1:
+                value_label = f"{surface.series.label} {value_label}"
+            readouts.append(f"{value_label}={z_value:.6g}")
+        if readouts:
+            text += ", " + ", ".join(readouts)
+        return text
+
+    def _handle_canvas_motion(self, event: object) -> None:
+        """Keep the dedicated map readout visible even when toolbar space is narrow."""
+        if not self._rendered_surface_grids or getattr(event, "inaxes", None) is not self.axes:
+            return
+        x_value = getattr(event, "xdata", None)
+        y_value = getattr(event, "ydata", None)
+        if x_value is None or y_value is None:
+            return
+        text = self._format_surface_coordinate(float(x_value), float(y_value))
+        self.coordinate_readout.setText(text)
+        self.toolbar.set_message(text)
+
+    @staticmethod
+    def _nearest_surface_value(
+        surface: _SurfaceValues,
+        x_value: float,
+        y_value: float,
+    ) -> float | None:
+        """Return the nearest measured surface value when a grid cell is masked."""
+        if not np.isfinite(x_value) or not np.isfinite(y_value):
+            return None
+        distances = np.square(surface.x_values - x_value) + np.square(
+            surface.y_values - y_value
+        )
+        finite = np.isfinite(distances) & np.isfinite(surface.z_values)
+        if not finite.any():
+            return None
+        finite_indices = np.flatnonzero(finite)
+        nearest = finite_indices[int(np.argmin(distances[finite]))]
+        return float(surface.z_values[nearest])
+
+    @staticmethod
+    def _surface_grid_value(
+        grid_x: np.ndarray,
+        grid_y: np.ndarray,
+        grid_z: np.ma.MaskedArray,
+        x_value: float,
+        y_value: float,
+    ) -> float | None:
+        """Bilinearly sample a rendered regular surface grid at one cursor position."""
+        if not np.isfinite(x_value) or not np.isfinite(y_value):
+            return None
+        x_axis = np.asarray(grid_x[0, :], dtype=float)
+        y_axis = np.asarray(grid_y[:, 0], dtype=float)
+        if (
+            x_axis.size < 2
+            or y_axis.size < 2
+            or x_value < x_axis[0]
+            or x_value > x_axis[-1]
+            or y_value < y_axis[0]
+            or y_value > y_axis[-1]
+        ):
+            return None
+
+        x_index = int(np.clip(np.searchsorted(x_axis, x_value) - 1, 0, x_axis.size - 2))
+        y_index = int(np.clip(np.searchsorted(y_axis, y_value) - 1, 0, y_axis.size - 2))
+        x0, x1 = x_axis[x_index], x_axis[x_index + 1]
+        y0, y1 = y_axis[y_index], y_axis[y_index + 1]
+        x_fraction = 0.0 if x1 == x0 else float((x_value - x0) / (x1 - x0))
+        y_fraction = 0.0 if y1 == y0 else float((y_value - y0) / (y1 - y0))
+
+        cell = np.ma.asarray(
+            grid_z[y_index : y_index + 2, x_index : x_index + 2]
+        )
+        if cell.count() < 4:
+            nearest_x = x_index + int(x_fraction >= 0.5)
+            nearest_y = y_index + int(y_fraction >= 0.5)
+            nearest = np.ma.asarray(grid_z)[nearest_y, nearest_x]
+            if np.ma.is_masked(nearest) or not np.isfinite(float(nearest)):
+                return None
+            return float(nearest)
+
+        values = np.asarray(cell, dtype=float)
+        interpolated = (
+            values[0, 0] * (1.0 - x_fraction) * (1.0 - y_fraction)
+            + values[0, 1] * x_fraction * (1.0 - y_fraction)
+            + values[1, 0] * (1.0 - x_fraction) * y_fraction
+            + values[1, 1] * x_fraction * y_fraction
+        )
+        return float(interpolated) if np.isfinite(interpolated) else None
 
     def _distribution_values(
         self,
@@ -1906,6 +2144,10 @@ class PlotCanvas(QWidget):
     def _draw_empty_state(self, clear_axes: bool = True) -> None:
         """Show the placeholder plot when no series can be rendered."""
         self._series_artists = []
+        self._colorbar_labels = []
+        self._rendered_surface_grids = []
+        self.coordinate_readout.clear()
+        self.coordinate_readout.setVisible(False)
         self._remove_right_axes()
         if clear_axes:
             self.axes.clear()
@@ -1929,6 +2171,10 @@ class PlotCanvas(QWidget):
     def _draw_error_state(self, message: str) -> None:
         """Show a visible canvas explanation when every requested series fails."""
         self._series_artists = []
+        self._colorbar_labels = []
+        self._rendered_surface_grids = []
+        self.coordinate_readout.clear()
+        self.coordinate_readout.setVisible(False)
         self._remove_right_axes()
         self.axes.clear()
         self.axes.set_xscale("linear")

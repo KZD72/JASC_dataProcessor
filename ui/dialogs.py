@@ -56,16 +56,29 @@ from scipy import ndimage, signal
 
 from core.color_scale import ColorScaleCalibration
 from core.file_io import (
+    AUTO_DATA_KIND,
     AUTO_DELIMITER,
+    AUTO_ENCODING,
+    AUTO_NUMBER_FORMAT,
+    AUTO_SPECTROMETER,
+    DATA_KIND_SPECTRAL_MAP,
+    DATA_KIND_SPECTRUM,
+    DATA_KIND_TABLE,
     DelimitedFileInspection,
     ExcelWorkbookInspection,
     ImportOptions,
+    NUMBER_FORMAT_COMMA_DECIMAL,
+    NUMBER_FORMAT_DOT_DECIMAL,
+    SPECTROMETER_BWTEK,
+    SPECTROMETER_HORIBA,
+    validate_import_profile,
 )
 from core.workspace import (
     COLUMN_ROLE_OPTIONS,
     COLUMN_TYPE_OPTIONS,
     ColumnMetadata,
     FigureExtractionSession,
+    WorksheetMetadata,
     column_role_label,
     normalize_display_precision,
 )
@@ -85,6 +98,7 @@ from math_engine.smoothing import (
 from math_engine.statistics import STATISTIC_OPERATIONS
 from models.fit_functions import (
     CustomFitModel,
+    available_fit_categories,
     available_fit_models,
     create_custom_fit_model,
     get_fit_model,
@@ -987,6 +1001,31 @@ class BinningDialog(QDialog):
 class ImportOptionsDialog(QDialog):
     """Review inferred delimited-file structure and choose batch import rules."""
 
+    _DATA_KINDS: tuple[tuple[str, str], ...] = (
+        ("Auto (infer from file)", AUTO_DATA_KIND),
+        ("General table", DATA_KIND_TABLE),
+        ("Single spectrum", DATA_KIND_SPECTRUM),
+        ("Spectroscopy map", DATA_KIND_SPECTRAL_MAP),
+    )
+    _SPECTROMETERS: tuple[tuple[str, str], ...] = (
+        ("Auto / generic", AUTO_SPECTROMETER),
+        ("Horiba LabSpec", SPECTROMETER_HORIBA),
+        ("B&W Tek", SPECTROMETER_BWTEK),
+    )
+    _NUMBER_FORMATS: tuple[tuple[str, str], ...] = (
+        ("Auto (infer safely)", AUTO_NUMBER_FORMAT),
+        ("Decimal point: 1,234.56", NUMBER_FORMAT_DOT_DECIMAL),
+        ("Decimal comma: 1.234,56", NUMBER_FORMAT_COMMA_DECIMAL),
+    )
+    _ENCODINGS: tuple[tuple[str, str], ...] = (
+        ("Auto (UTF/BOM, Windows-1252, Latin-1)", AUTO_ENCODING),
+        ("UTF-8", "utf-8"),
+        ("UTF-8 with BOM", "utf-8-sig"),
+        ("UTF-16", "utf-16"),
+        ("Windows-1252 / ANSI", "cp1252"),
+        ("Latin-1 / ISO-8859-1", "latin-1"),
+    )
+
     _DELIMITERS: tuple[tuple[str, str], ...] = (
         ("Auto (infer from file)", AUTO_DELIMITER),
         ("Comma (,)", ","),
@@ -1002,9 +1041,9 @@ class ImportOptionsDialog(QDialog):
         ("No header row", "none"),
     )
     _METADATA_MODES: tuple[tuple[str, str], ...] = (
-        ("Auto (discard detected leading metadata)", "auto"),
-        ("Keep all leading rows", "none"),
-        ("Discard a fixed number of leading rows", "fixed"),
+        ("Auto (detect and preserve leading metadata)", "auto"),
+        ("Keep all leading rows as worksheet data", "none"),
+        ("Use a fixed number of leading metadata rows", "fixed"),
     )
 
     def __init__(
@@ -1020,6 +1059,22 @@ class ImportOptionsDialog(QDialog):
         self._inspections = tuple(inspections)
         if self._inspections:
             self.resize(980, 520)
+
+        self._data_kind_combo = QComboBox()
+        for label, data_kind in self._DATA_KINDS:
+            self._data_kind_combo.addItem(label, data_kind)
+
+        self._spectrometer_combo = QComboBox()
+        for label, spectrometer in self._SPECTROMETERS:
+            self._spectrometer_combo.addItem(label, spectrometer)
+
+        self._number_format_combo = QComboBox()
+        for label, number_format in self._NUMBER_FORMATS:
+            self._number_format_combo.addItem(label, number_format)
+
+        self._encoding_combo = QComboBox()
+        for label, encoding in self._ENCODINGS:
+            self._encoding_combo.addItem(label, encoding)
 
         self._delimiter_combo = QComboBox()
         for label, delimiter in self._DELIMITERS:
@@ -1039,6 +1094,10 @@ class ImportOptionsDialog(QDialog):
         self._metadata_combo.currentIndexChanged.connect(self._sync_metadata_controls)
 
         form = QFormLayout()
+        form.addRow("Data type", self._data_kind_combo)
+        form.addRow("Spectrometer", self._spectrometer_combo)
+        form.addRow("Number format", self._number_format_combo)
+        form.addRow("Text encoding", self._encoding_combo)
         form.addRow("Delimiter", self._delimiter_combo)
         form.addRow("Headers", self._header_combo)
         form.addRow("Leading metadata", self._metadata_combo)
@@ -1046,30 +1105,33 @@ class ImportOptionsDialog(QDialog):
 
         hint = QLabel(
             "Auto inspects each file independently. Detected leading preamble/metadata rows "
-            "are excluded before header detection. Review the table and use fixed rules when "
-            "the source format is known."
+            "are excluded from the numeric table but preserved in Worksheet Metadata. Review "
+            "the table and use fixed rules when the source format is known. Horiba LabSpec "
+            "single spectra and maps are supported; B&W Tek currently supports single spectra only. "
+            "For ambiguous values such as 1.234, choose the source's explicit number format."
         )
         hint.setWordWrap(True)
 
-        self._inspection_table = QTableWidget(len(self._inspections), 7)
+        self._inspection_table = QTableWidget(len(self._inspections), 8)
         self._inspection_table.setHorizontalHeaderLabels(
-            ["File", "Delimiter", "Metadata rows", "Header", "Columns", "Names", "Data preview"]
+            ["File", "Encoding", "Delimiter", "Metadata rows", "Header", "Columns", "Names", "Data preview"]
         )
         self._inspection_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._inspection_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._inspection_table.verticalHeader().setVisible(False)
         header = self._inspection_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        for column in (1, 2, 3, 4):
+        for column in (1, 2, 3, 4, 5):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.Stretch)
         header.setSectionResizeMode(6, QHeaderView.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.Stretch)
         for row, inspection in enumerate(self._inspections):
             preview = " | ".join(
                 ", ".join(values) for values in inspection.preview_rows[:2]
             )
             values = (
                 inspection.path.name,
+                inspection.encoding,
                 inspection.delimiter_label,
                 str(inspection.metadata_rows),
                 "Detected" if inspection.has_header else "Not detected",
@@ -1095,6 +1157,30 @@ class ImportOptionsDialog(QDialog):
         """Enable the fixed-row count only when that override is selected."""
         self._metadata_rows.setEnabled(self._metadata_combo.currentData() == "fixed")
 
+    def accept(self) -> None:
+        """Reject unsupported profile combinations before starting the import."""
+        if (
+            self._data_kind_combo.currentData() == DATA_KIND_SPECTRAL_MAP
+            and self._header_combo.currentData() == "none"
+        ):
+            QMessageBox.warning(
+                self,
+                "Spectral Axis Header Required",
+                "A spectroscopy map requires its first tabular row to contain the "
+                "Raman-shift or frequency axis. Choose Auto headers or select that "
+                "the first tabular row contains column names.",
+            )
+            return
+        try:
+            validate_import_profile(
+                str(self._data_kind_combo.currentData()),
+                str(self._spectrometer_combo.currentData()),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Unsupported Import Profile", str(exc))
+            return
+        super().accept()
+
     def options(self) -> ImportOptions:
         """Return the selected parser options."""
         header_mode = str(self._header_combo.currentData())
@@ -1112,8 +1198,70 @@ class ImportOptionsDialog(QDialog):
         return ImportOptions(
             delimiter=str(self._delimiter_combo.currentData()),
             has_header=has_header,
+            encoding=str(self._encoding_combo.currentData()),
             skip_rows=skip_rows,
+            data_kind=str(self._data_kind_combo.currentData()),
+            spectrometer=str(self._spectrometer_combo.currentData()),
+            number_format=str(self._number_format_combo.currentData()),
         )
+
+
+class WorksheetMetadataDialog(QDialog):
+    """Display source, parsed fields, and exact imported preamble text."""
+
+    def __init__(
+        self,
+        worksheet_name: str,
+        source_path: str,
+        metadata: WorksheetMetadata,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build a read-only metadata viewer for one worksheet."""
+        super().__init__(parent)
+        self.setWindowTitle(f"Worksheet Metadata - {worksheet_name}")
+        self.resize(760, 560)
+
+        tabs = QTabWidget()
+
+        overview = QWidget()
+        overview_layout = QVBoxLayout(overview)
+        overview_rows = [("Source file", source_path or "Not linked")]
+        overview_rows.extend(metadata.import_details.items())
+        overview_table = QTableWidget(len(overview_rows), 2)
+        overview_table.setHorizontalHeaderLabels(["Property", "Value"])
+        overview_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        overview_table.verticalHeader().setVisible(False)
+        overview_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        overview_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        for row, (name, value) in enumerate(overview_rows):
+            overview_table.setItem(row, 0, QTableWidgetItem(str(name)))
+            overview_table.setItem(row, 1, QTableWidgetItem(str(value)))
+        overview_layout.addWidget(overview_table)
+        tabs.addTab(overview, "Overview")
+
+        fields_table = QTableWidget(len(metadata.fields), 2)
+        fields_table.setHorizontalHeaderLabels(["Field", "Value"])
+        fields_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        fields_table.verticalHeader().setVisible(False)
+        fields_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        fields_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        for row, (name, value) in enumerate(metadata.fields):
+            fields_table.setItem(row, 0, QTableWidgetItem(name))
+            fields_table.setItem(row, 1, QTableWidgetItem(value))
+        tabs.addTab(fields_table, f"Fields ({len(metadata.fields)})")
+
+        raw_text = QPlainTextEdit()
+        raw_text.setReadOnly(True)
+        raw_text.setPlainText("\n".join(metadata.raw_lines))
+        raw_text.setPlaceholderText("No leading metadata records were detected.")
+        tabs.addTab(raw_text, f"Raw preamble ({len(metadata.raw_lines)})")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(tabs)
+        layout.addWidget(buttons)
 
 
 class ExcelImportDialog(QDialog):
@@ -7716,9 +7864,15 @@ class FitDialog(QDialog):
             "Select one or more response columns explicitly; none are selected automatically."
         )
 
+        self._model_category_combo = QComboBox()
+        self._model_category_combo.addItem("All models", None)
+        for category in available_fit_categories(self._custom_models):
+            self._model_category_combo.addItem(category, category)
+        if self._model_category_combo.count() > 1:
+            self._model_category_combo.setCurrentIndex(1)
+
         self._model_combo = QComboBox()
-        for model in available_fit_models(self._custom_models):
-            self._model_combo.addItem(model.name, model.key)
+        self._populate_model_combo()
 
         self._method_combo = QComboBox()
         for method_key, method_label in FIT_METHODS.items():
@@ -7803,6 +7957,7 @@ class FitDialog(QDialog):
 
         for combo in (
             self._x_column_combo,
+            self._model_category_combo,
             self._model_combo,
             self._method_combo,
             self._x_weight_column_combo,
@@ -7823,6 +7978,7 @@ class FitDialog(QDialog):
         model_layout = QVBoxLayout(model_group)
         model_form = QFormLayout()
         model_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        model_form.addRow("Category", self._model_category_combo)
         model_form.addRow("Model", self._model_combo)
         model_form.addRow("Method", self._method_combo)
         model_layout.addLayout(model_form)
@@ -7879,6 +8035,7 @@ class FitDialog(QDialog):
         layout.addWidget(options_tabs)
         layout.addWidget(buttons)
 
+        self._model_category_combo.currentIndexChanged.connect(self._populate_model_combo)
         self._model_combo.currentIndexChanged.connect(self._update_parameter_hint)
         self._confidence_checkbox.toggled.connect(self._confidence_spin.setEnabled)
         self._residual_sheet_checkbox.toggled.connect(self._residual_dataset_edit.setEnabled)
@@ -7922,6 +8079,11 @@ class FitDialog(QDialog):
     def model_key(self) -> str:
         """Return selected fit model key."""
         return str(self._model_combo.currentData())
+
+    def model_category(self) -> str | None:
+        """Return the selected model category, or None when all are shown."""
+        value = self._model_category_combo.currentData()
+        return str(value) if value else None
 
     def method(self) -> str:
         """Return selected optimizer method key."""
@@ -8034,10 +8196,15 @@ class FitDialog(QDialog):
 
     def _update_parameter_hint(self) -> None:
         """Refresh model equation help and rebuild the parameter table."""
+        if self._model_combo.currentIndex() < 0:
+            self._parameter_hint.clear()
+            self._parameter_table.setRowCount(0)
+            return
         model = get_fit_model(self.model_key(), self._custom_models)
         parameter_names = ", ".join(model.parameter_names)
         defaults = ", ".join(f"{value:g}" for value in model.default_initial)
         hint = (
+            f"<b>{escape(model.category)}:</b> {escape(model.description)}<br>"
             f"<b>Equation:</b> <code>{escape(model.equation)}</code><br>"
             f"<b>Parameter order:</b> <code>{escape(parameter_names)}</code><br>"
             f"Edit initial guesses and optional bounds. Blank bounds are unbounded. "
@@ -8046,6 +8213,22 @@ class FitDialog(QDialog):
         self._parameter_hint.setText(hint)
         self._parameter_hint.setToolTip(hint)
         self._populate_parameter_table()
+
+    def _populate_model_combo(self) -> None:
+        """Filter the model list by the selected scientific family."""
+        previous_key = self._model_combo.currentData() if hasattr(self, "_model_combo") else None
+        category = self.model_category() if hasattr(self, "_model_category_combo") else None
+        self._model_combo.blockSignals(True)
+        self._model_combo.clear()
+        for model in available_fit_models(self._custom_models, category):
+            self._model_combo.addItem(model.name, model.key)
+        if previous_key is not None:
+            previous_index = self._model_combo.findData(previous_key)
+            if previous_index >= 0:
+                self._model_combo.setCurrentIndex(previous_index)
+        self._model_combo.blockSignals(False)
+        if hasattr(self, "_parameter_hint"):
+            self._update_parameter_hint()
 
     def _populate_parameter_table(self) -> None:
         """Populate editable parameter rows for the selected model."""
@@ -8056,8 +8239,18 @@ class FitDialog(QDialog):
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
             self._parameter_table.setItem(row, 0, name_item)
             self._parameter_table.setItem(row, 1, QTableWidgetItem(f"{initial_value:g}"))
-            self._parameter_table.setItem(row, 2, QTableWidgetItem(""))
-            self._parameter_table.setItem(row, 3, QTableWidgetItem(""))
+            lower = model.default_lower[row] if model.default_lower else None
+            upper = model.default_upper[row] if model.default_upper else None
+            self._parameter_table.setItem(
+                row,
+                2,
+                QTableWidgetItem("" if lower is None else f"{lower:g}"),
+            )
+            self._parameter_table.setItem(
+                row,
+                3,
+                QTableWidgetItem("" if upper is None else f"{upper:g}"),
+            )
             fixed_item = QTableWidgetItem("")
             fixed_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             fixed_item.setCheckState(Qt.Unchecked)

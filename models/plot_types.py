@@ -95,6 +95,28 @@ PLOT_TYPES: dict[str, PlotType] = {
         label="Filled Contour",
         description="Interpolated filled contour map from X/Y/Z coordinate data.",
     ),
+    "spectra_heatmap": PlotType(
+        key="spectra_heatmap",
+        label="Spectral Heatmap",
+        description=(
+            "XY intensity map sampled at a selected Raman shift or frequency, "
+            "using the closest measurement or spectral interpolation."
+        ),
+    ),
+    "spectra_contour": PlotType(
+        key="spectra_contour",
+        label="Spectral Contour",
+        description=(
+            "Contour lines of XY intensity sampled at a selected Raman shift or frequency."
+        ),
+    ),
+    "spectra_contourf": PlotType(
+        key="spectra_contourf",
+        label="Filled Spectral Contour",
+        description=(
+            "Filled XY intensity contours sampled at a selected Raman shift or frequency."
+        ),
+    ),
 }
 
 

@@ -4,18 +4,18 @@
 
 ## Current Capability Baseline
 
-Reviewed on 2026-09-18 against the current repository state, session changelog, and automated test suite.
+Reviewed on 2026-09-24 against the current repository state, session changelog, and automated test suite.
 
 ### Implemented or Started
-- Workspace and project state: multiple Pandas DataFrames, persisted dataset backend labels, unique dataset names, independent dataset and saved-plot duplication, `.jasc` save/load, saved plots, project-scoped custom fit models, current project path tracking, close project, and lightweight per-column metadata including role, type, units, precision, long name, and comments.
-- Data ingestion and editing: single/multi-file CSV/DAT/TXT import with per-file delimiter, leading-metadata, header, names, and preview preflight; default Auto inference plus global explicit overrides and batch header-pattern conflict decisions; initial value-only `.xlsx`/`.xlsm` import with OOXML object warnings, worksheet-tab selection, hidden/chart-tab handling, and one dataset per selected sheet; XY-graph and 2D-colourplot raster digitization with immediate create-and-continue output, multiple curve/probe-set capture from one shared calibration, project-embedded resumable image/calibration sessions, and four-corner perspective correction; manual spreadsheet entry with Auto-typed blank columns; explicit arithmetic range fill plus selection-based Smart Fill for numeric linear/interleaved sequences, all day/month/year field orders with calendar/fixed-interval continuation, repeated categories, and user-entered ordered lists; editable Data Editor; positional odd/even/Every-N row and column subset extraction into new sheets; large file/dataset warnings; size-aware column auto-sizing; atomic worksheet row/column-count resizing; value-clearing Delete plus explicit structural deletion; formula metadata; operation provenance in column comments; column roles/types/units/precision/long names/comments; bounded undo/redo history; block, row, whole-column, and transposed clipboard operations; and right-click/double-click affordances across cells and headers.
+- Workspace and project state: multiple Pandas DataFrames, persisted dataset backend labels, unique dataset names, independent dataset/saved-plot/spectral-analysis results, open `.jasc` save/load with version 8 canonical JASC Package Seals covering member names/sizes/SHA-256 digests plus unique timestamp/UUID/nonce identity, readable CSV-backed spectral-analysis sessions, optional Ed25519 author signatures with password-encrypted private identities/shareable public identities/persistent trusted fingerprints, backward-compatible version 5 manifests and version 6/7 packages, optional password-encrypted/authenticated `.jascx` containers using Scrypt plus AES-256-GCM, atomic project replacement, saved plots, project-scoped custom fit models, current project path tracking, close project, and lightweight per-column metadata including role, type, units, precision, long name, and comments.
+- Data ingestion and editing: single/multi-file CSV/DAT/TXT import with per-file delimiter, retained leading metadata, header, names, and preview preflight; safe Auto number-format inference plus explicit `1,234.56`/`1.234,56` decimal/grouping overrides; explicit General table/Single spectrum/Spectroscopy map and Horiba/B&W Tek profiles, global overrides, and batch header-pattern conflict decisions; exact spectrometer preamble preservation with parsed `#`/`$`/`%` fields, Horiba spectrum/map and B&W Tek single-spectrum compatibility, reconstruction of legacy Bruker IR `#c` coordinate exports, Horiba spectral-map matrix recognition, worksheet-level metadata viewing, and `.jasc` persistence; initial value-only `.xlsx`/`.xlsm` import with OOXML object warnings, worksheet-tab selection, hidden/chart-tab handling, and one dataset per selected sheet; XY-graph and 2D-colourplot raster digitization with immediate create-and-continue output, multiple curve/probe-set capture from one shared calibration, project-embedded resumable image/calibration sessions, and four-corner perspective correction; manual spreadsheet entry with Auto-typed blank columns; explicit arithmetic range fill plus selection-based Smart Fill for numeric linear/interleaved sequences, all day/month/year field orders with calendar/fixed-interval continuation, repeated categories, and user-entered ordered lists; editable Data Editor; positional odd/even/Every-N row and column subset extraction into new sheets; large file/dataset warnings; size-aware column auto-sizing; atomic worksheet row/column-count resizing; value-clearing Delete plus explicit structural deletion; formula metadata; operation provenance in column comments; column roles/types/units/precision/long names/comments; bounded undo/redo history; block, row, whole-column, and transposed clipboard operations; and right-click/double-click affordances across cells and headers.
 - Formulas and transforms: constrained Python-like formula evaluator with curated NumPy/SciPy namespaces, direct/positional/exact column references, safe cross-worksheet `sheet("Worksheet", "Column")` references, explicit selected-cell or entire-column application, derivative/integral result columns, FFT/iFFT result sheets, and a first general interpolation workbench.
 - Statistics: descriptive summaries, quantiles, diagnostics, normality tests, outlier checks, z-score/cumulative series, correlations, regression, agreement metrics, paired tests, independent-sample tests, multi-column summaries/correlations/covariance/PCA, grouped one-way analyses, post-hoc comparisons, and optional companion plots.
-- Curve fitting: built-in analytical models, custom expression models, parameter guesses/bounds/fixed parameters, weighting/error columns, ODR for X/Y uncertainties, confidence bands, residual sheets, fit reports, and immediate fit overlay plots.
-- Plotting: Matplotlib canvas and toolbar, saved plot definitions and duplication, multi-series XY plots, right Y axis, axis ranges/scales, per-axis label/tick typography, live-canvas clipboard copy, locators, SciencePlots styles, family/subtype plot selection, line/scatter/line+markers/errorbar, bar/barh/area/histogram with categorical label support, box/violin, initial pie/donut/Voronoi composition charts, early interpolated 2D maps, export-only physical sizing, and direct double-click editing of rendered labels, legends, axes, and series appearance.
+- Curve fitting: 66 built-in analytical models organized into scientific families (including a broad symmetric/asymmetric peak library), custom expression models, parameter guesses/bounds/fixed parameters, weighting/error columns, ODR for X/Y uncertainties, confidence bands, residual sheets, fit reports, and immediate fit overlay plots.
+- Plotting: Matplotlib canvas and toolbar, saved plot definitions and duplication, multi-series XY plots, right Y axis, axis ranges/scales, per-axis label/tick typography, live-canvas clipboard copy, locators, SciencePlots styles, family/subtype plot selection, line/scatter/line+markers/errorbar, bar/barh/area/histogram with categorical label support, box/violin, initial pie/donut/Voronoi composition charts, interpolated 2D and spectral-slice maps with selectable palettes plus X/Y/intensity readout, export-only physical sizing, and direct double-click editing of rendered labels (including colour bars), legends, axes, and series appearance.
 - Interpolated 2D maps: X/Y/Z coordinate roles, heatmap/contour/filled contour rendering, linear/cubic-spline/piecewise-cubic interpolation, grid resolution, saved state, dataset rename support, and X/Y locator prediction of Z values.
 - Batch workflows: dialog-based multi-sheet execution, exact-name and column-position bindings, preflight tables, multi-column expansion, cancelable modal progress, per-source outputs, and cumulative summaries are implemented for formulas, calculus, smoothing, FFT/iFFT, interpolation, statistics, and curve fitting. Formula batches have an initial process-worker path; the remaining long operations are still executed synchronously from the UI workflow.
-- Verification and UI polish: 134 automated tests pass in the active Python environment, including Qt-offscreen workflow coverage. The interface has docked workspace/inspector panels, compact toolbar grouping, reset view, sidebar visibility controls, application icon, direct context actions, reliable cross-style numeric steppers, and theme-aware styling.
+- Verification and UI polish: 175 automated tests pass in the active Python environment, including Qt-offscreen workflow coverage. The interface has docked workspace/inspector panels, compact toolbar grouping, reset view, sidebar visibility controls, application icon, direct context actions, reliable cross-style numeric steppers, explicit project-security save modes, and theme-aware styling.
 
 ### Current Gaps
 - The automated suite exists and is runnable, but core import, formula, calculus, interpolation, statistics, fitting, project-persistence, and end-to-end batch paths need broader regression coverage. Verification commands, linting, and repeatable manual smoke scripts are not yet documented as a complete developer gate.
@@ -24,8 +24,9 @@ Reviewed on 2026-09-18 against the current repository state, session changelog, 
 - Import/export is narrow compared with current commercial tools.
 - Plotting is strong for core 2D scientific charts but lacks multi-panel/page layouts, annotation tools, many specialized graph families, and true 3D graphing. Reusable plot/analysis templates are deliberately deferred to the final roadmap stage.
 - Batch analysis exists but lacks semantic role binding, a uniform timestamped audit-log schema, true background execution for most operation families, and workspace-level undo for edits to non-visible sheets.
-- Fitting lacks global multi-dataset fitting, dynamic/robust initial-guess search, peak analysis, surface fitting, and advanced model comparison.
+- Fitting lacks global multi-dataset fitting, general dynamic/robust initial-guess search, surface fitting, and advanced model comparison; Fano components now have dedicated multistart initialization.
 - No PyInstaller specification or repeatable standalone Windows build exists yet.
+- JASC Package Seals provide normal-security forgery deterrence, `.jascx` provides authenticated encryption for sensitive packages, and optional Ed25519 signatures provide independently trustable author provenance through imported public-key fingerprints. Certificate-authority integration, revocation lists, hardware-token key storage, and trusted timestamp authorities remain optional future institutional-security extensions.
 
 ## Competitive Reference Points
 
@@ -71,7 +72,7 @@ The benchmark products emphasize:
 - Phase 4: add composition and categorical reporting plots: pie, donut, and Voronoi composition charts with label/value column roles, percentage labels, exploded slice or composition geometry controls, and saved-state persistence. (initial slice started: text/category X labels now work for bar/barh; the Plot Inspector now uses Plot family plus Subtype dropdowns; Pie/Donut render label/value composition charts; Voronoi Composition renders circular, rectangular, or polygonal value-weighted polygon partitions; percentage/exploded-slice, label-density, and more exact composition geometry controls remain)
 - Phase 5: add matrix and density visualization.
   - Interpolated irregular X/Y/Z heatmap, contour, filled contour, interpolation choices, grid resolution, and X/Y to Z locator prediction. (initial implementation complete)
-  - Follow-ups: regular-grid heatmaps, matrix heatmaps, correlation heatmaps, 2D histograms, hexbin plots, color-map controls, colorbar controls, contour-level controls, masking of invalid regions, and export-friendly legends.
+  - Follow-ups: regular-grid heatmaps, matrix heatmaps, correlation heatmaps, 2D histograms, hexbin plots, richer colour-bar range/tick controls, contour-level controls, masking of invalid regions, and export-friendly legends. Palette selection, editable colour-bar labels, and live X/Y/Z reading are complete.
 - Phase 6: add engineering/time-series specialty plots: candlestick/OHLC with time, open, high, low, close, volume, and style controls.
 - Phase 7: add multi-panel/subplot layouts so heterogeneous plot types can be arranged in one saved figure.
 - For every plot type phase, ensure GUI controls only show relevant options, saved plots persist the new state, invalid column-role selections fail with clear messages, and the Matplotlib output is manually tested.
@@ -101,17 +102,17 @@ The benchmark products emphasize:
 
 | Area | Current JASC Status | Gap Versus Origin/SigmaPlot-Level Tools |
 | --- | --- | --- |
-| Data model | Multiple DataFrames with formulas and lightweight column metadata | No full workbook/sheet hierarchy, matrix sheets, notes/reports, project folders, cell comments, dataset-level metadata, rich formatting, or protected data |
-| Import/connectors | Multi-file CSV/DAT/TXT with delimiter/metadata/header preflight, shared overrides, and mismatch decisions; CSV/TXT export; initial value-only `.xlsx`/`.xlsm` worksheet-tab import with unsupported-object preflight; XY/2D-colourplot digitization with precision zoom, ROI/color tracing, symbol matching, perspective correction, manual uncertainty, empirical colour-scale calibration, and multiple curve/probe-set capture per calibration | Missing Excel export, named/range-only mapping and metadata rows, legacy `.xls`, JSON/XML/HTML, HDF5/NetCDF/MATLAB, binary/instrument formats, ODBC/SQL, drag/drop, re-import/refresh, per-file batch parser overrides, plus digitizer point cleanup, overlap splitting, automatic multi-curve separation, discrete colour levels, automatic grid extraction, and OCR tick assistance |
+| Data model | Multiple DataFrames with formulas, lightweight column metadata, and persisted worksheet-level source/import metadata | No full workbook/sheet hierarchy, matrix sheets, notes/reports, project folders, cell comments, general editable dataset descriptions, rich formatting, or protected data |
+| Import/connectors | Multi-file CSV/DAT/TXT with delimiter/metadata/header preflight, retained raw/parsed preambles, shared overrides, mismatch decisions, explicit data-type plus initial Horiba/B&W Tek profiles, decimal-comma spectra, legacy Horiba/B&WTech/Bruker IR text compatibility, and Horiba wide-map recognition normalized to X/Y/Raman Shift/Intensity rows; CSV/TXT export; initial value-only `.xlsx`/`.xlsm` worksheet-tab import with unsupported-object preflight; XY/2D-colourplot digitization with precision zoom, ROI/color tracing, symbol matching, perspective correction, manual uncertainty, empirical colour-scale calibration, and multiple curve/probe-set capture per calibration | Missing stacked/multiple-channel/multi-acquisition spectrometer layouts, broader encoding/locale controls, additional fixture-driven vendor/map profiles, Excel export, named/range-only mapping and metadata rows, legacy `.xls`, JSON/XML/HTML, HDF5/NetCDF/MATLAB, binary/instrument formats, ODBC/SQL, drag/drop, re-import/refresh, per-file batch parser overrides, plus digitizer point cleanup, overlap splitting, automatic multi-curve separation, discrete colour levels, automatic grid extraction, and OCR tick assistance |
 | Data preparation | Formula columns, row/column operations, clipboard, filter/query, sort, duplicate removal, missing-value cleanup, binning, group/aggregate, merge/join, and reshape result sheets | Missing richer multi-condition filters, previews, type conversion, pivot tables, append/split tools, date/time parsing, resampling, and data reduction |
 | Graphing breadth | Core 2D, distribution plots, early 2D maps, initial pie/donut/Voronoi composition charts, SciencePlots styles | Missing density families, grouped/categorical chart variants, polar/radar/ternary, waterfall, 3D scatter/surface/mesh/bars, specialized scientific diagrams, map overlays, images, and graph object editing |
 | Graph layout | Single responsive canvas with saved/duplicable plots, right Y axis, direct element editing, and export-specific sizing | Missing page layout manager, multi-panel/multi-layer graph pages, linked axes, inset graphs, object manager, annotation tools, direct data labels, and graph galleries; reusable templates/themes are intentionally deferred |
-| Analysis | Calculus, FFT/iFFT, advanced smoothing including derivative reconstruction, 1D/2D/N-D interpolation, statistics workbench | Missing broader filters, baseline correction, peak detection/integration, convolution/correlation, STFT, wavelets, 2D FFT, resampling workflows, ROI/gadget-style analysis, and analysis chains |
+| Analysis | Calculus, FFT/iFFT, advanced smoothing including derivative reconstruction, 1D/2D/N-D interpolation, statistics workbench, baseline correction, physical-unit peak detection/review, registered composite peak fitting, sequential worksheet/Raman-map application, persistent spectral-analysis sessions, linked map/spectrum/residual/QC visualization, and opt-in worksheet export | Missing broader filters, advanced peak constraints/global fitting, convolution/correlation, STFT, wavelets, 2D FFT, resampling workflows, ROI/gadget-style analysis, and analysis chains |
 | Statistics | Useful first-pass reports, multi-column correlations/covariance/PCA summaries, grouped one-way analyses, post-hoc comparisons, and companion plots | Missing two-way/repeated-measures ANOVA, ANCOVA/MANOVA families, broader nonparametric families, clustering, survival/reliability, SPC/control charts, DOE, power/sample-size, ROC, probability/distribution fitting, and guided statistical advisor workflows |
 | Fitting | Nonlinear and batch fits, ODR, custom models, weights, residuals, confidence bands, per-source outputs, and cumulative summaries | Missing global fitting with shared/local parameters, dynamic initial-guess search, robust model ranking, arbitrary polynomial degree UI, prediction bands, peak deconvolution, surface fitting, implicit fitting UI, constraints by expression, and background execution |
 | Automation | Saved plots/projects, formula metadata, column roles, and initial dialog-based batch execution with previews and cumulative summaries | Missing role-aware binding, uniform audit logs, background workers, safe cross-sheet undo, operation history, recalculation, repeat-last-operation, scripting/API, and command log; reusable templates are deferred |
 | Reporting/export | Dataset export and Matplotlib toolbar save | Missing report editor, PDF/Word/PowerPoint export workflows, SVG/PDF/EPS/EMF export presets, journal export profiles, graph page export, HTML/web reports, and project-wide slideshow/export |
-| Performance/package | Pandas/Matplotlib desktop app with large-dataset warnings, sampled sizing, block clipboard updates, bounded snapshot history, streaming project reads, and an initial backend profile boundary | Missing background jobs with real cancellation, true large-data query/lazy loading, plot decimation, delta undo, autosave/recovery, installer/spec, sample projects, and CI fixtures |
+| Performance/package | Pandas/Matplotlib desktop app with large-dataset warnings, sampled sizing, block clipboard updates, bounded snapshot history, streaming project reads, sealed/signed open ZIP/CSV projects, and optional authenticated password encryption | Missing background jobs with real cancellation, true large-data query/lazy loading, plot decimation, delta undo, autosave/recovery, installer/spec, sample projects, CI fixtures, and optional institutional certificate/hardware-key integration |
 
 ## Step-by-Step Competitive Roadmap
 
@@ -232,6 +233,38 @@ Acceptance criteria:
 
 Purpose: close the most visible data-ingestion gap.
 
+#### Spectrometer Text Import Foundation
+
+The spectroscopy-analysis workbench depends on preserving acquisition context and
+loading numeric axes correctly before baseline or peak algorithms are introduced.
+
+Implemented foundation:
+- Retain every detected leading metadata/preamble line verbatim instead of discarding it.
+- Parse common `#`, `$`, `%`, plain `key=value`, `key: value`, tab, and semicolon records on a best-effort basis while always preserving the raw source text.
+- Store source/import details, parsed fields, and raw preamble records as worksheet-level metadata; show them from the Data workspace and persist them in `.jasc` projects.
+- Convert all-numeric localized decimal-comma columns after structural delimiter detection, including Horiba-style tab-separated spectra.
+- Recognize the legacy Bruker IR text layout where `#c` contains the complete X coordinate array and following scalar records contain Y, producing normal `Wavenumber`/`Intensity` columns.
+- Preserve broad B&WTech semicolon exports as full worksheets, including all raw-data and processed channels rather than reducing them to two columns.
+- Recognize wide hyperspectral map matrices used by Horiba LabSpec: the first raw row contains two blank or X/Y-labelled coordinate cells followed by numeric Raman shifts, and every later row contains one spatial-pixel spectrum. Normalize the worksheet to four numeric columns—`X`, `Y`, `Raman Shift`, and `Intensity`—with one row per pixel/shift pair, preserve source pixel and shift order, and record both source and worksheet layouts plus pixel/shift counts and range in worksheet metadata. Keep non-Horiba map profiles deferred until representative formats are supplied.
+- Apply conservative numeric type, X/Y role, and available Horiba axis-unit hints without overwriting the original metadata.
+- Detect BOM-marked UTF-8/UTF-16, strict UTF-8, Windows-1252/ANSI, and Latin-1 text without replacement-character data loss; expose an explicit encoding override and retain the resolved encoding in preflight/provenance.
+
+Required hardening before peak/map processing:
+- Build committed, anonymized fixtures for Horiba, B&WTech, Bruker/OPUS-style IR, Renishaw, WITec, Thermo, Ocean Insight, and generic Raman/IR/PL exports as samples become available.
+- Extend the new point/comma number-format controls to less-common locale conventions without allowing silent numeric corruption; add any vendor-specific legacy encodings only from representative fixtures.
+- Extend the initial wide-map recognition to multiple-Y, stacked-spectrum, long-form map, time-series, depth-profile, and repeated-acquisition layouts during preflight.
+- Add a mapping step for coordinate columns (`X`, `Y`, `Z/depth/time`), spectral axis, intensity channels, errors, and acquisition identifiers; retain the original source columns even when normalized views are created.
+- Keep the normalized four-column map representation compatible with grouping by X/Y pixel for baseline and peak jobs; evaluate a more compact backend representation later if very large maps make repeated Raman-shift values a memory bottleneck.
+- Add per-file parser overrides inside mixed batches, vendor-format diagnostics, and a safe generic fallback that never drops unrecognized records.
+- Move inspection/parsing to the shared background-job architecture with cancellation and staged UI-thread commits.
+- Define re-import provenance: source path, size/hash or timestamp, parser profile/version, delimiter/encoding/locale, header/data boundary, and user overrides.
+
+Acceptance criteria:
+- Importing a supported spectrometer text export produces numeric analysis-ready columns and preserves every preamble record.
+- Worksheet metadata survives duplication and `.jasc` save/load unchanged.
+- Unsupported or partially recognized vendor records remain visible as raw metadata and generate a warning rather than disappearing.
+- Representative single spectra and maps can be batch imported with deterministic coordinate/channel roles and no silent row loss.
+
 Tasks:
 - Harden the image/figure data extraction module for digitizing plots from screenshots, papers, and instrument images. The current implementation supports XY graphs and 2D colourplots, pointer-centered zoom and magnification, pan/mode feedback, four-point perspective correction, four-point linear/log X/Y calibration, manual points and uncertainty, ROI-restricted dark/selected-colour tracing, connected-symbol barycentres, sampled-template matching with shape priors, empirical linear/log colour-bar calibration, colour probes with ambiguity/confidence diagnostics, multiple named curve/probe-set snapshots from one preserved calibration, previews, provenance metadata, and separate normal workspace outputs.
 - Add editable extracted-point cleanup, stronger overlapping-symbol splitting, automatic multi-curve segmentation, axis de-skew/twist correction, OCR/tick-label assistance, explicit discrete/contour colour-level calibration, automatic colourplot grid sampling, richer uncertainty propagation, and repeatable manual smoke tests.
@@ -331,6 +364,109 @@ Tasks:
 - Add peak analyzer workflow: baseline, peak finding, multi-peak model selection, deconvolution, area reports, and batch peak fitting.
 - Add 2D/surface fitting for X/Y/Z data, including polynomial surfaces, 2D Gaussian peaks, residual surface plots, and contour overlays.
 
+#### Peak Analysis Integration Plan
+
+This work starts only after spectrometer and map imports reliably preserve metadata,
+numeric axes, coordinate/channel roles, and batch grouping. Reuse the workflow and
+fixtures from `Raman_Data_Processing`, but replace its UI-coupled/dense numerical
+implementations with tested, Qt-independent engines.
+
+Implementation status (2026-09-28): the single-spectrum foundation and first
+composite/batch/map slice are now in place. `math_engine/spectral.py`,
+`baseline.py`, `peak_detection.py`, and `composite_peak_fit.py` provide
+serializable contracts and central finite-segment/axis/polarity handling. The
+shared **Baseline Correction** / **Peak Analysis** workbench provides debounced,
+render-decimated previews, baseline diagnostics, physical-unit peak properties,
+manual add/remove/disable/reposition review, a switchable source worksheet, and
+per-peak registered-model selection. Its preview has Matplotlib home/history,
+pan, zoom, and image-save navigation. Versioned JSON analysis profiles preserve
+the complete range/baseline/detection/component/fit/matching configuration, while
+manual baselines accept either explicit X:Y points or reusable X-only anchors
+that resolve against every source spectrum independently. Normalized long-form
+maps are explicitly identified in Source & Range, one finite X/Y group is chosen
+for representative preview/review, and the accepted settings are then applied
+independently to every map pixel for baseline-only or full peak fitting. It fits one shared baseline plus additive
+components and writes curves, residuals, uncertainties, areas, metrics, and
+provenance. Reviewed components can be applied sequentially to selected
+worksheets or grouped X/Y map pixels using center-tolerance matching with
+cumulative coordinate-keyed parameter and status outputs. Map fitting stores
+one-row-per-X/Y peak intensity/area/position/FWHM/asymmetry, uncertainty,
+baseline, SNR/noise, and fit-quality columns inside a first-class persisted
+analysis session. The dedicated Raman Analysis viewer provides linked map/spectrum,
+component, residual, distribution, and QC views while keeping result tables out
+of the generic Data navigator until explicitly exported. Background execution,
+advanced component constraints/ties, and explicit missing/extra-peak policies
+remain the next slices.
+
+Architecture and contracts:
+- Use `math_engine/baseline.py`, `math_engine/peak_detection.py`, and `math_engine/composite_peak_fit.py` as Qt-independent numerical layers.
+- Define serializable `BaselineParameters`, `BaselineResult`, `PeakDetectionParameters`, `PeakRecord`, `PeakDetectionResult`, `PeakComponentSpec`, and `CompositeFitResult` contracts.
+- Include raw/corrected arrays, convergence diagnostics, warnings, complete parameters, software versions, and source/map coordinates in provenance.
+- Handle finite segments, descending X, irregular X, positive/negative/both polarities, and physical X units centrally rather than separately in each dialog.
+
+Baseline correction phase:
+- Add `pybaselines` as the preferred maintained numerical backend; begin with arPLS as the automatic default, plus AsLS, airPLS, SNIP, and rubber-band methods.
+- Preserve the legacy manual-anchor workflow with editable anchors and linear, PCHIP, or Akima interpolation; also expose constant, linear, and polynomial backgrounds.
+- For negative peaks, transform polarity explicitly and restore it after solving. Methods that assume one-sided positive peaks must warn rather than silently claim mixed-polarity support.
+- Return baseline, corrected signal, iterations/convergence, and method warnings. Never build the legacy dense identity/difference matrices for long spectra.
+- Create non-destructive `{Y}_baseline` and `{Y}_corrected` outputs or a user-selected result sheet.
+
+Peak detection phase:
+- Use `scipy.signal.find_peaks` as the fast default detector on corrected data, with optional existing Savitzky-Golay/moving-median smoothing.
+- Support prominence, height/SNR, minimum distance, minimum/maximum FWHM, plateau handling, and maximum-count ranking.
+- Express distance and width in X units. Convert to samples only for uniform axes; for irregular axes convert interpolated boundaries back to physical coordinates and prune by physical separation.
+- Estimate automatic thresholds from robust noise statistics such as MAD of first differences or raw-minus-smoothed residuals.
+- Run positive and negative detection explicitly and merge labeled candidates for mixed-polarity data.
+- Produce a tidy peak table with source sheet/channel/map coordinates, row/index, center, polarity, raw/corrected height, prominence, FWHM, left/right boundaries and bases, area, local SNR, plateau size, asymmetry, detector, and manual-edit status.
+- Preserve manual add/remove/disable/reposition controls through linked plot markers and an editable table.
+- Add continuous-wavelet detection later for noisy multiscale signals; do not make it the first/default detector.
+
+Peak Analysis UI:
+- Add one `Analysis > Peak Analysis...` workbench with tabs for **Source & Range**, **Baseline**, **Detection**, **Fit Components**, and **Output & Batch**.
+- Show raw+baseline and corrected+peak-marker previews. Debounce preview requests, cancel stale generations, and decimate only rendering—not numerical input.
+- Provide home/history, pan, zoom, and image-save navigation for detailed inspection of small peaks.
+- Make baseline controls reusable from a standalone Baseline Correction entry without creating divergent implementations.
+- Store reviewed/manual peak candidates separately from automatic candidates so recalculation can preserve deliberate user edits.
+- Save and load versioned portable analysis profiles containing every exposed range, baseline, anchor, detector, component-model, fit, and center-matching setting without binding the profile to worksheet/output names.
+- For normalized maps, expose an explicit spectrum/map layout choice and representative X/Y preview-pixel selector; never preview the complete repeated spectral axis as one spectrum.
+
+Composite peak fitting phase:
+- Extend `FitModel` metadata with semantic parameter roles (`center`, `width`, `height`, `area`, `shape`, `offset`, `slope`) and an `is_peak` flag.
+- Initialize registered Gaussian/Lorentzian/Voigt/pseudo-Voigt/Pearson/Fano/asymmetric components from detected centers, heights, and FWHM using model-correct conversions. Fano now uses extrema-aware resonance seeds, a positive physical scale, signed-q multistart fitting, and separately reports resonance/peak/dip quantities. (complete for current models)
+- Fit `one shared baseline + peak 1 + ... + peak N`; suppress individual component offsets so the baseline is never counted repeatedly.
+- Offer corrected-data mode with a fixed zero baseline and raw-data mode with one shared constant/linear/quadratic baseline. Prevent accidental double baseline subtraction.
+- Provide a per-peak component table for enable/model/center/height-or-area/width/shape, bounds, fixed values, and shared/tied parameters.
+- Fit separated overlap clusters independently for speed unless global/shared constraints require a joint fit.
+- Output total fit, individual components, residuals, parameter uncertainties/correlations, peak areas, model metrics, and reproducible report metadata.
+
+Batch spectra and map processing:
+- Carry baseline/detection/fitting settings through serializable templates only after the operation schemas are stable.
+- Match peaks across spectra by expected center plus tolerance and optional continuity constraints, never solely by prominence rank.
+- Define explicit policies for missing/extra peaks: skip/report, fit matched only, accept additional candidates, or stop for review.
+- For maps, process each pixel/acquisition as a grouped job; write long-form peak/fit results keyed by coordinates and generate parameter maps for center, width, height/area, baseline, SNR, and fit quality.
+- Parallelize across independent spectrum/map groups above a measured threshold using pickle-safe tasks; stage outputs and commit them on the UI thread.
+
+Validation and performance gates:
+- Generate synthetic constant/linear/quadratic/exponential/fluorescence baselines with positive, negative, mixed, isolated, overlapping, asymmetric, plateau, Fano, irregular-X, descending-X, missing-data, and varied-noise peaks.
+- Measure baseline RMSE, detection precision/recall, center/FWHM/area error, fit recovery, runtime, and peak memory.
+- Reuse anonymized silicon, double-peak, asymmetry, Fano, Horiba, B&WTech, and Bruker fixtures from the older application for behavioral regression, without requiring exact legacy numerical parity.
+- Add UI tests for preview generations, anchors, marker editing, cancellation, partial batch failure, provenance, project round trips, and map-result reconstruction.
+- Establish explicit performance budgets for approximately 100,000-point spectra and large spectrum maps before enabling automatic full-project processing.
+
+Delivery sequence:
+1. **Started/completed for the single-spectrum foundation:** engine contracts, alignment/polarity/X-unit helpers, synthetic fixtures, and initial validation metrics.
+2. **Completed for single spectra:** baseline engine and reusable preview UI.
+3. **Completed except cross-spectrum batch summaries:** fast prominence-based detection, peak properties, and marker/table review.
+4. **Completed for the first production slice:** composite multi-peak fitting connected to the existing categorized registry, one shared baseline, curve/parameter outputs, uncertainties, areas, and fit metrics.
+5. **Completed for sequential batch/map application and result viewing:** source switching, reviewed-model carry-over, center-tolerance matching, grouped X/Y jobs, first-class persisted analysis sessions, one-row-per-pixel metrics, linked parameter maps/spectra/components/residuals/distributions/QC, and explicit worksheet export. Advanced missing/extra policies, representative vendor-map fixture gates, and background/parallel execution remain.
+6. **Completed for reproducible setup reuse:** interactive preview navigation, X-only per-spectrum manual anchors, and versioned JSON save/load of all exposed Peak Analysis algorithm parameters.
+7. **Completed for map preview/application:** explicit map layout, representative X/Y pixel selection, and independent full-map baseline or peak jobs with coordinate-preserving outputs.
+8. CWT detection, advanced morphological baselines, automatic tuning, and measured optimization.
+
+The recommended first implementation slice is items 1-3. It establishes reliable
+corrected signals and reviewed peak candidates before the more failure-prone
+composite-fitting and map-automation layers are introduced.
+
 Acceptance criteria:
 - Users can fit multiple datasets with shared parameters and inspect per-dataset residuals.
 - Peak and surface fitting workflows produce reproducible reports and plots.
@@ -412,16 +548,16 @@ Acceptance criteria:
 ## Near-Term Recommended Order
 
 1. Close the small remaining Stage 0 gate: document verification commands, add missing core/batch smoke coverage, configure linting, define manual checks, and resolve dependency drift.
-2. Build the shared Stage 1 background-job controller with real progress, cooperative cancellation, safe shutdown, UI-thread result commits, and sequential fallback.
-3. Move long imports and the existing calculus, smoothing, FFT/iFFT, interpolation, statistics, and curve-fitting workflows off the Qt UI thread. This is the immediate development priority.
-4. Add workspace transactions/undo for background and non-visible-sheet edits, then test cancellation, partial failures, and project consistency.
-5. Complete semantic role binding and normalized timestamped audit logs across every batch-capable dialog.
-6. Harden Excel support with background parsing, previews, named/range-only selection, metadata-row mapping, and `.xlsx` export.
-7. Continue figure extraction with editable point cleanup, discrete/contour colour-level calibration, automatic colourplot grid sampling, overlap splitting, automatic multi-curve separation, and OCR-assisted calibration.
-8. Extend Data Prep with previews, multi-condition AND/OR filters, explicit output modes, type conversion, pivot tables, append rows, split columns, date/time parsing, resampling, rolling summaries, and batch application.
-9. Add the next signal-analysis family: digital filter design and response previews, baseline correction, peak detection/integration, convolution/correlation, Hilbert transform, STFT, wavelets, and 2D FFT.
-10. Extend statistics and fitting with two-way/repeated-measures ANOVA, ANCOVA/MANOVA planning, clustering, logistic/ROC, survival/reliability, distribution fitting, arbitrary-degree polynomial fitting, model comparison, global fitting, peak fitting, and surface fitting.
-11. Continue plotting with composition controls, regular/matrix/correlation heatmaps, 2D histograms, hexbin, colour/contour controls, engineering/time-series plots, annotations, and multi-panel page layouts. Reusable templates remain excluded from this stage.
+2. Harden the new spectrometer-import foundation with committed/anonymized vendor fixtures, additional locale controls and fixture-driven legacy encodings, stacked/long-form/multi-acquisition layouts, explicit coordinate/channel mapping, and lossless warnings for unrecognized records.
+3. Build the shared Stage 1 background-job controller with real progress, cooperative cancellation, safe shutdown, UI-thread result commits, and sequential fallback.
+4. Move long imports and the existing calculus, smoothing, FFT/iFFT, interpolation, statistics, and curve-fitting workflows off the Qt UI thread.
+5. Add workspace transactions/undo for background and non-visible-sheet edits, then test cancellation, partial failures, and project consistency.
+6. Complete semantic role binding and normalized timestamped audit logs across every batch-capable dialog.
+7. Harden Excel support with background parsing, previews, named/range-only selection, metadata-row mapping, and `.xlsx` export.
+8. Continue figure extraction and Data Prep with their listed cleanup, mapping, preview, date/time, reshape, and batch follow-ups.
+9. Harden the implemented Peak/Raman Analysis composite and sequential batch/map slice with representative vendor-map fixtures, advanced bounds/fixed/tied parameters, explicit missing/extra-peak policies, and shared background/parallel execution.
+10. Add the remaining signal-analysis family: digital filter design and response previews, convolution/correlation, Hilbert transform, STFT, wavelets, and 2D FFT.
+11. Extend statistics, general/global fitting, plotting families, annotations, and multi-panel page layouts. Reusable templates remain excluded from this stage.
 12. After the main workflows are responsive and tested, continue DuckDB/PyArrow large-data mode, decimated plotting, delta undo, autosave/recovery, PyInstaller packaging, reporting, and plugin extension points.
 
 Reusable graph/analysis templates are intentionally deferred to Competitive Stage 12 and must not displace the priorities above.

@@ -18,6 +18,7 @@ from PySide6.QtCore import (
     QItemSelectionModel,
     QModelIndex,
     QMimeData,
+    QSettings,
     Qt,
 )
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPalette, QShortcut
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -76,13 +78,17 @@ from core.data_prep import (
     sort_dataframe,
 )
 from core.file_io import (
+    AUTO_DATA_KIND,
     AUTO_DELIMITER,
+    AUTO_ENCODING,
+    AUTO_SPECTROMETER,
     DelimitedFileInspection,
     ImportOptions,
     SUPPORTED_EXCEL_EXTENSIONS,
     export_tabular_file,
     inspect_delimited_file,
     inspect_excel_workbook,
+    read_leading_metadata,
     read_excel_sheets,
     read_tabular_file,
 )
@@ -92,10 +98,12 @@ from core.operations import (
     apply_column_expression,
     referenced_worksheet_names,
 )
+from core.spectral_analysis import SpectralAnalysisSession
 from core.workspace import (
     COLUMN_NUMERIC_TYPES,
     ColumnMetadata,
     Dataset,
+    WorksheetMetadata,
     column_type_label,
     Workspace,
     set_column_operation_comment,
@@ -112,7 +120,16 @@ from math_engine.calculus import (
     integral_column,
     validate_numeric_column_metadata,
 )
+from math_engine.baseline import BaselineParameters, correct_baseline
+from math_engine.composite_peak_fit import (
+    CompositeFitParameters,
+    CompositeFitResult,
+    PeakComponentSpec,
+    build_peak_component_spec,
+    fit_composite_peaks,
+)
 from math_engine.curve_fitting import FIT_METHODS, FitResult, fit_curve
+from math_engine.peak_detection import PeakDetectionParameters, PeakRecord, detect_peaks
 from math_engine.interpolation import (
     INTERPOLATION_METHODS,
     generated_query_points,
@@ -133,6 +150,7 @@ from math_engine.smoothing import (
 )
 from ui.data_table import RangeFillDialog, SmartFillDialog, TableSizeDialog
 from ui.dataframe_model import DataFrameTableModel
+from ui.peak_analysis_dialog import PeakAnalysisDialog
 from ui.dialogs import (
     BATCH_COLUMN_BINDING_NAME,
     BATCH_COLUMN_BINDING_POSITION,
@@ -164,9 +182,11 @@ from ui.dialogs import (
     DataSortDialog,
     StatisticsDialog,
     SmoothingDialog,
+    WorksheetMetadataDialog,
 )
 from ui.plot_canvas import PlotSeries
 from ui.plot_tab import PlotTab
+from ui.spectral_analysis_viewer import SpectralAnalysisExportDialog, SpectralAnalysisViewer
 
 
 _DATASET_COLUMNS_MIME = "application/x-jasc-dataframe-columns"
@@ -180,6 +200,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._workspace = Workspace()
         self._project_path: Path | None = None
+        self._project_password: str | None = None
+        self._project_signing_identity: project_io.SigningPrivateIdentity | None = None
+        self._project_signature_fingerprint: str | None = None
+        self._trusted_signers = self._load_trusted_signers()
         self._large_dataset_warning_names: set[str] = set()
         self._applying_visual_style = False
         self._active_plot_name: str | None = None
@@ -203,6 +227,11 @@ class MainWindow(QMainWindow):
         self._plot_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self._plot_list.customContextMenuRequested.connect(self._show_plot_context_menu)
 
+        self._analysis_list = QListWidget()
+        self._analysis_list.itemDoubleClicked.connect(
+            lambda _item: self._load_selected_spectral_analysis()
+        )
+
         self._dataset_model = DataFrameTableModel(self)
         self._dataset_model.history_changed.connect(self._handle_dataset_history_changed)
         self._dataset_model.history_warning.connect(self.statusBar().showMessage)
@@ -221,6 +250,8 @@ class MainWindow(QMainWindow):
         self._install_dataset_clipboard_shortcuts()
         self._install_dataset_context_menu()
         self._dataset_summary = QLabel("No dataset selected")
+        self._worksheet_metadata_button = QPushButton("Worksheet Metadata")
+        self._worksheet_metadata_button.clicked.connect(self._show_worksheet_metadata)
 
         # Plot state moved to PlotTab
 
@@ -238,12 +269,17 @@ class MainWindow(QMainWindow):
         self._plot_tab_widget.remove_plot_requested.connect(self._delete_selected_plot)
         self._plot_tab_widget.options_visibility_changed.connect(self._handle_plot_options_visibility_changed)
         self._tabs.addTab(self._plot_tab_widget, "Plot")
+        self._spectral_analysis_viewer = SpectralAnalysisViewer(self)
+        self._spectral_analysis_viewer.export_requested.connect(
+            self._export_spectral_analysis
+        )
 
         self.setCentralWidget(self._tabs)
         self._build_workspace_dock()
         self._build_inspector_dock()
         self._create_actions()
         self._refresh_plot_list()
+        self._refresh_spectral_analysis_list()
         self._apply_visual_style()
         self._sync_inspector_to_current_tab()
         self._update_dataset_summary()
@@ -294,6 +330,19 @@ class MainWindow(QMainWindow):
 
         self._workspace_nav_tabs.addTab(dataset_page, "Datasets")
         self._workspace_nav_tabs.addTab(plot_page, "Plots")
+        analysis_page = QWidget()
+        self._analysis_nav_page = analysis_page
+        analysis_layout = QVBoxLayout(analysis_page)
+        analysis_layout.addWidget(self._analysis_list)
+        open_analysis_button = QPushButton("Open Analysis")
+        open_analysis_button.clicked.connect(self._load_selected_spectral_analysis)
+        duplicate_analysis_button = QPushButton("Duplicate")
+        duplicate_analysis_button.clicked.connect(self._duplicate_selected_spectral_analysis)
+        remove_analysis_button = QPushButton("Remove")
+        remove_analysis_button.clicked.connect(self._remove_selected_spectral_analysis)
+        analysis_layout.addWidget(open_analysis_button)
+        analysis_layout.addLayout(self._button_row(duplicate_analysis_button, remove_analysis_button))
+        self._workspace_nav_tabs.addTab(analysis_page, "Analyses")
         dock.setWidget(self._workspace_nav_tabs)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self._workspace_dock = dock
@@ -441,6 +490,12 @@ class MainWindow(QMainWindow):
         ifft_button.clicked.connect(self._run_ifft)
         statistics_button = QPushButton("Statistics")
         statistics_button.clicked.connect(self._run_statistics)
+        baseline_button = QPushButton("Baseline Correction")
+        baseline_button.clicked.connect(self._run_baseline_correction)
+        peak_analysis_button = QPushButton("Peak Analysis")
+        peak_analysis_button.clicked.connect(self._run_peak_analysis)
+        raman_analysis_button = QPushButton("Raman Analysis")
+        raman_analysis_button.clicked.connect(self._run_raman_analysis)
         fit_button = QPushButton("Curve Fit")
         fit_button.clicked.connect(self._run_curve_fit)
         custom_models_button = QPushButton("Custom Fit Models")
@@ -454,6 +509,9 @@ class MainWindow(QMainWindow):
             fft_button,
             ifft_button,
             statistics_button,
+            baseline_button,
+            peak_analysis_button,
+            raman_analysis_button,
             fit_button,
         ]
 
@@ -465,6 +523,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Signal"))
         layout.addLayout(self._button_row(fft_button, ifft_button))
         layout.addWidget(QLabel("Statistics and Fitting"))
+        layout.addLayout(self._button_row(baseline_button, peak_analysis_button))
+        layout.addWidget(raman_analysis_button)
         layout.addWidget(statistics_button)
         layout.addWidget(fit_button)
         layout.addWidget(custom_models_button)
@@ -518,7 +578,10 @@ class MainWindow(QMainWindow):
         editor = QWidget()
 
         layout = QVBoxLayout(editor)
-        layout.addWidget(self._dataset_summary)
+        header = QHBoxLayout()
+        header.addWidget(self._dataset_summary, 1)
+        header.addWidget(self._worksheet_metadata_button)
+        layout.addLayout(header)
         layout.addWidget(self._dataset_table)
         return editor
 
@@ -1078,9 +1141,41 @@ class MainWindow(QMainWindow):
         save_project_action.setShortcut("Ctrl+S")
         save_project_action.triggered.connect(self._save_project)
 
-        save_project_as_action = file_menu.addAction("Save Project &As...")
+        save_project_as_action = file_menu.addAction("Save &Open Project As...")
         save_project_as_action.setShortcut("Ctrl+Shift+S")
-        save_project_as_action.triggered.connect(self._save_project_as)
+        save_project_as_action.triggered.connect(
+            lambda _checked=False: self._save_project_as(force_encrypt=False)
+        )
+
+        save_encrypted_project_as_action = file_menu.addAction(
+            "Save &Encrypted Project As..."
+        )
+        save_encrypted_project_as_action.triggered.connect(
+            lambda _checked=False: self._save_project_as(force_encrypt=True)
+        )
+
+        save_signed_project_as_action = file_menu.addAction(
+            "Save S&igned Open Project As..."
+        )
+        save_signed_project_as_action.triggered.connect(
+            lambda _checked=False: self._save_signed_project_as(force_encrypt=False)
+        )
+
+        save_signed_encrypted_action = file_menu.addAction(
+            "Save Signed + Encr&ypted Project As..."
+        )
+        save_signed_encrypted_action.triggered.connect(
+            lambda _checked=False: self._save_signed_project_as(force_encrypt=True)
+        )
+
+        file_menu.addSeparator()
+
+        signing_menu = file_menu.addMenu("Signing &Identities")
+        create_signing_identity_action = signing_menu.addAction("Create Signing &Identity...")
+        create_signing_identity_action.triggered.connect(self._create_signing_identity)
+
+        trust_public_identity_action = signing_menu.addAction("Trust Public Signing &Key...")
+        trust_public_identity_action.triggered.connect(self._trust_public_identity)
 
         file_menu.addSeparator()
 
@@ -1244,6 +1339,9 @@ class MainWindow(QMainWindow):
 
         data_menu.addSeparator()
 
+        worksheet_metadata_action = data_menu.addAction("Worksheet &Metadata...")
+        worksheet_metadata_action.triggered.connect(self._show_worksheet_metadata)
+
         column_metadata_action = data_menu.addAction("Column &Metadata...")
         column_metadata_action.triggered.connect(self._edit_column_metadata)
 
@@ -1272,6 +1370,15 @@ class MainWindow(QMainWindow):
 
         statistics_action = analysis_menu.addAction("&Statistics...")
         statistics_action.triggered.connect(self._run_statistics)
+
+        baseline_action = analysis_menu.addAction("&Baseline Correction...")
+        baseline_action.triggered.connect(self._run_baseline_correction)
+
+        peak_analysis_action = analysis_menu.addAction("&Peak Analysis...")
+        peak_analysis_action.triggered.connect(self._run_peak_analysis)
+
+        raman_analysis_action = analysis_menu.addAction("&Raman Analysis...")
+        raman_analysis_action.triggered.connect(self._run_raman_analysis)
 
         custom_models_action = analysis_menu.addAction("Custom Fit &Models...")
         custom_models_action.triggered.connect(self._manage_custom_fit_models)
@@ -1339,6 +1446,7 @@ class MainWindow(QMainWindow):
         self._insert_column_action = insert_column_action
         self._fill_range_action = fill_range_action
         self._smart_fill_action = smart_fill_action
+        self._worksheet_metadata_action = worksheet_metadata_action
         self._column_metadata_action = column_metadata_action
         self._remove_duplicates_action = remove_duplicates_action
         self._apply_formula_action = apply_formula_action
@@ -1349,6 +1457,9 @@ class MainWindow(QMainWindow):
         self._fft_action = fft_action
         self._ifft_action = ifft_action
         self._statistics_action = statistics_action
+        self._baseline_action = baseline_action
+        self._peak_analysis_action = peak_analysis_action
+        self._raman_analysis_action = raman_analysis_action
         self._custom_models_action = custom_models_action
         self._fit_action = fit_action
         self._close_project_action = close_project_action
@@ -1944,18 +2055,22 @@ class MainWindow(QMainWindow):
 
         effective_inspections = inspections
         try:
-            if options.delimiter != AUTO_DELIMITER:
+            if (
+                options.delimiter != AUTO_DELIMITER
+                or options.encoding != AUTO_ENCODING
+                or options.skip_rows is not None
+                or options.data_kind != AUTO_DATA_KIND
+                or options.spectrometer != AUTO_SPECTROMETER
+            ):
                 effective_inspections = [
                     inspect_delimited_file(
                         path,
                         delimiter=options.delimiter,
+                        encoding=options.encoding,
                         skip_rows=options.skip_rows,
+                        data_kind=options.data_kind,
+                        spectrometer=options.spectrometer,
                     )
-                    for path in paths
-                ]
-            elif options.skip_rows is not None:
-                effective_inspections = [
-                    inspect_delimited_file(path, skip_rows=options.skip_rows)
                     for path in paths
                 ]
         except Exception as exc:
@@ -1973,7 +2088,15 @@ class MainWindow(QMainWindow):
         imported: list[Dataset] = []
         import_errors: list[str] = []
         for path, inspection in zip(paths, effective_inspections, strict=True):
-            file_options = options
+            file_options = ImportOptions(
+                delimiter=options.delimiter,
+                has_header=options.has_header,
+                encoding=inspection.encoding,
+                skip_rows=options.skip_rows,
+                data_kind=options.data_kind,
+                spectrometer=options.spectrometer,
+                number_format=options.number_format,
+            )
             if pattern_choice == "generic":
                 metadata_rows = (
                     inspection.metadata_rows
@@ -1983,8 +2106,11 @@ class MainWindow(QMainWindow):
                 file_options = ImportOptions(
                     delimiter=inspection.delimiter,
                     has_header=False,
-                    encoding=options.encoding,
+                    encoding=inspection.encoding,
                     skip_rows=metadata_rows + (1 if inspection.has_header else 0),
+                    data_kind=options.data_kind,
+                    spectrometer=options.spectrometer,
+                    number_format=options.number_format,
                 )
             try:
                 frame = read_tabular_file(path, file_options)
@@ -1995,14 +2121,73 @@ class MainWindow(QMainWindow):
                 ):
                     import_errors.append(f"{path.name}: skipped after large-dataset warning")
                     continue
-                imported.append(
-                    self._workspace.add_dataset(
-                        path.stem,
-                        frame,
-                        source_path=path,
-                        copy_frame=False,
-                    )
+                dataset = self._workspace.add_dataset(
+                    path.stem,
+                    frame,
+                    source_path=path,
+                    copy_frame=False,
                 )
+                preamble = read_leading_metadata(
+                    path,
+                    inspection.metadata_rows,
+                    encoding=inspection.encoding,
+                )
+                dataset.worksheet_metadata = WorksheetMetadata(
+                    fields=list(preamble.fields),
+                    raw_lines=list(preamble.raw_lines),
+                    import_details={
+                        "Requested data type": {
+                            "auto": "Auto",
+                            "table": "General table",
+                            "spectrum": "Single spectrum",
+                            "spectral_map": "Spectroscopy map",
+                        }.get(options.data_kind, options.data_kind),
+                        "Spectrometer profile": {
+                            "auto": "Auto / generic",
+                            "horiba": "Horiba LabSpec",
+                            "bwtek": "B&W Tek",
+                        }.get(options.spectrometer, options.spectrometer),
+                        "Number format": {
+                            "auto": "Auto",
+                            "dot_decimal": "Decimal point (1,234.56)",
+                            "comma_decimal": "Decimal comma (1.234,56)",
+                        }.get(options.number_format, options.number_format),
+                        "Format": (
+                            "Bruker IR text export"
+                            if inspection.format_name == "bruker_ir"
+                            else (
+                                "Spectral map matrix"
+                                if inspection.format_name == "spectral_map_matrix"
+                                else "Delimited text"
+                            )
+                        ),
+                        "Delimiter": inspection.delimiter_label,
+                        "Header": "Present" if inspection.has_header else "Not present",
+                        "Encoding": inspection.encoding,
+                        "Leading metadata rows": str(inspection.metadata_rows),
+                    },
+                )
+                if inspection.format_name == "spectral_map_matrix":
+                    spectral_columns = list(inspection.spectral_axis)
+                    pixel_count = (
+                        len(frame) // len(spectral_columns)
+                        if spectral_columns
+                        else 0
+                    )
+                    dataset.worksheet_metadata.import_details.update({
+                        "Source layout": "Wide matrix: one spatial pixel per row",
+                        "Worksheet layout": "Long form: X, Y, Raman Shift, Intensity",
+                        "Spatial coordinate columns": "X, Y",
+                        "Spatial pixels": str(pixel_count),
+                        "Raman shifts per pixel": str(len(spectral_columns)),
+                        "Spectral axis unit": "cm^-1",
+                    })
+                    if spectral_columns:
+                        dataset.worksheet_metadata.import_details["Spectral axis range"] = (
+                            f"{spectral_columns[0]} to {spectral_columns[-1]} cm^-1"
+                        )
+                self._apply_imported_column_hints(dataset, inspection)
+                imported.append(dataset)
             except Exception as exc:
                 import_errors.append(f"{path.name}: {exc}")
 
@@ -2115,14 +2300,21 @@ class MainWindow(QMainWindow):
             ):
                 skipped.append(f"{sheet_name}: skipped after large-dataset warning")
                 continue
-            imported.append(
-                self._workspace.add_dataset(
-                    f"{path.stem} - {sheet_name}",
-                    frame,
-                    source_path=path,
-                    copy_frame=False,
-                )
+            dataset = self._workspace.add_dataset(
+                f"{path.stem} - {sheet_name}",
+                frame,
+                source_path=path,
+                copy_frame=False,
             )
+            dataset.worksheet_metadata = WorksheetMetadata(
+                import_details={
+                    "Format": "Excel workbook",
+                    "Worksheet tab": sheet_name,
+                    "Header": "Present" if dialog.has_header() else "Not present",
+                }
+            )
+            self._apply_imported_column_hints(dataset)
+            imported.append(dataset)
 
         skipped.extend(f"{name}: {message}" for name, message in result.errors.items())
         if not imported:
@@ -2555,6 +2747,111 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Inserted column '{final_name}' in {dataset.name}"
         )
+
+    def _show_worksheet_metadata(self) -> None:
+        """Open the source and instrument metadata retained for this worksheet."""
+        dataset = self._current_dataset()
+        if dataset is None:
+            QMessageBox.information(
+                self,
+                "Worksheet Metadata",
+                "Select a dataset before viewing worksheet metadata.",
+            )
+            return
+        dialog = WorksheetMetadataDialog(
+            dataset.name,
+            str(dataset.source_path) if dataset.source_path else "",
+            dataset.worksheet_metadata,
+            self,
+        )
+        dialog.exec()
+
+    @staticmethod
+    def _apply_imported_column_hints(
+        dataset: Dataset,
+        inspection: DelimitedFileInspection | None = None,
+    ) -> None:
+        """Apply conservative numeric, X/Y, and spectroscopy-unit hints."""
+        if inspection is not None and inspection.format_name == "spectral_map_matrix":
+            columns = [str(column) for column in dataset.frame.columns]
+            if columns:
+                x_metadata = dataset.metadata_for_column(columns[0])
+                x_metadata.role = "x"
+                x_metadata.value_type = "numeric"
+                x_metadata.long_name = "Map X coordinate"
+            if len(columns) >= 2:
+                y_metadata = dataset.metadata_for_column(columns[1])
+                y_metadata.role = "y"
+                y_metadata.value_type = "numeric"
+                y_metadata.long_name = "Map Y coordinate"
+            if "Raman Shift" in columns:
+                shift_metadata = dataset.metadata_for_column("Raman Shift")
+                shift_metadata.value_type = "numeric"
+                shift_metadata.unit = "cm^-1"
+                shift_metadata.long_name = "Raman shift"
+            if "Intensity" in columns:
+                intensity_metadata = dataset.metadata_for_column("Intensity")
+                intensity_metadata.value_type = "numeric"
+                intensity_metadata.long_name = "Raman intensity"
+            dataset.prune_column_metadata()
+            return
+
+        x_terms = (
+            "wavenumber",
+            "wave number",
+            "wavelength",
+            "raman shift",
+            "frequency",
+            "time",
+        )
+        y_terms = (
+            "intensity",
+            "signal",
+            "count",
+            "absorbance",
+            "transmittance",
+            "dark subtracted",
+        )
+        numeric_columns: list[str] = []
+        assigned_x = False
+        assigned_y = False
+        for column in dataset.frame.columns:
+            column_name = str(column)
+            if not pd.api.types.is_numeric_dtype(dataset.frame[column].dtype):
+                continue
+            numeric_columns.append(column_name)
+            entry = dataset.metadata_for_column(column_name)
+            entry.value_type = "numeric"
+            normalized_name = column_name.casefold()
+            if not assigned_x and any(term in normalized_name for term in x_terms):
+                entry.role = "x"
+                assigned_x = True
+            elif not assigned_y and any(term in normalized_name for term in y_terms):
+                entry.role = "y"
+                assigned_y = True
+
+        if numeric_columns and not assigned_x:
+            dataset.metadata_for_column(numeric_columns[0]).role = "x"
+            assigned_x = True
+        if len(numeric_columns) >= 2 and not assigned_y:
+            y_column = next(
+                (column for column in numeric_columns if dataset.metadata_for_column(column).role != "x"),
+                numeric_columns[1],
+            )
+            dataset.metadata_for_column(y_column).role = "y"
+
+        metadata_fields = {
+            name.strip().casefold(): value.strip()
+            for name, value in dataset.worksheet_metadata.fields
+        }
+        if len(numeric_columns) >= 2:
+            x_unit = metadata_fields.get("axisunit[1]", "")
+            y_unit = metadata_fields.get("axisunit[0]", "")
+            if x_unit:
+                dataset.metadata_for_column(numeric_columns[0]).unit = x_unit
+            if y_unit:
+                dataset.metadata_for_column(numeric_columns[1]).unit = y_unit
+        dataset.prune_column_metadata()
 
     def _edit_column_metadata(self, focus_column: str | int | None = None) -> None:
         """Open the column metadata editor for the selected dataset."""
@@ -7599,6 +7896,863 @@ class MainWindow(QMainWindow):
             f"Custom fit models updated ({len(self._workspace.list_custom_fit_models())})"
         )
 
+    def _run_baseline_correction(self) -> None:
+        """Open the reusable baseline-only view of the peak-analysis workbench."""
+        self._run_peak_analysis_workbench(baseline_only=True)
+
+    def _run_peak_analysis(self) -> None:
+        """Open baseline correction, peak detection, and candidate review."""
+        self._run_peak_analysis_workbench(baseline_only=False)
+
+    def _run_raman_analysis(self) -> None:
+        """Open the spectral workflow whose results live in Raman Analysis."""
+        self._run_peak_analysis_workbench(baseline_only=False, raman_mode=True)
+
+    def _run_peak_analysis_workbench(
+        self,
+        *,
+        baseline_only: bool,
+        raman_mode: bool = False,
+    ) -> None:
+        """Run the shared baseline/peak workbench for a spectrum or normalized map."""
+        dataset = self._current_dataset()
+        title = (
+            "Baseline Correction"
+            if baseline_only else ("Raman Analysis" if raman_mode else "Peak Analysis")
+        )
+        if dataset is None:
+            QMessageBox.information(self, title, "Select a dataset before starting analysis.")
+            return
+        column_names = [str(column) for column in dataset.frame.columns]
+        default_x = next(
+            (
+                column
+                for column in column_names
+                if column.casefold() in {"raman shift", "wavenumber", "wavelength", "frequency"}
+            ),
+            self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
+        )
+        dialog = PeakAnalysisDialog(
+            dataset.frame,
+            dataset.name,
+            default_x_column=default_x,
+            default_y_column=None,
+            baseline_only=baseline_only,
+            raman_mode=raman_mode,
+            datasets={
+                candidate.name: candidate.frame
+                for candidate in self._workspace.list_datasets()
+                if len(candidate.frame.columns) > 0
+            },
+            parent=self,
+        )
+        if dialog.exec() != PeakAnalysisDialog.Accepted:
+            return
+
+        dataset = self._workspace.get_dataset(dialog.source_dataset_name())
+        baseline_result = dialog.baseline_result()
+        baseline_parameters = baseline_result.parameters.to_dict()
+        operation_name = "Baseline Correction" if baseline_only else "Peak Analysis"
+        source_layout = dialog.source_layout() if hasattr(dialog, "source_layout") else "spectrum"
+        preview_coordinates = (
+            dialog.preview_coordinates() if hasattr(dialog, "preview_coordinates") else {}
+        )
+        detail = {
+            "Operation": operation_name,
+            "Source worksheet": dataset.name,
+            "Source layout": source_layout,
+            "X column": dialog.x_column(),
+            "Y column": dialog.y_column(),
+            "Baseline parameters": json.dumps(baseline_parameters, sort_keys=True),
+            "Baseline iterations": str(baseline_result.iterations),
+            "Baseline converged": str(baseline_result.converged),
+            "Baseline warnings": " | ".join(baseline_result.warnings),
+            "Software versions": json.dumps(baseline_result.software_versions, sort_keys=True),
+        }
+        for coordinate_name, coordinate_value in preview_coordinates.items():
+            detail[f"Preview {coordinate_name}"] = f"{coordinate_value:.12g}"
+        peak_result = dialog.peak_result()
+        if peak_result is not None:
+            detail.update({
+                "Peak detection parameters": json.dumps(
+                    peak_result.parameters.to_dict(), sort_keys=True
+                ),
+                "Noise estimate": f"{peak_result.noise_estimate:.12g}",
+                "Detection warnings": " | ".join(peak_result.warnings),
+            })
+        composite_result = dialog.composite_result()
+        if composite_result is not None:
+            detail.update({
+                "Composite fit parameters": json.dumps(
+                    composite_result.parameters.to_dict(), sort_keys=True
+                ),
+                "Composite R squared": f"{composite_result.r_squared:.12g}",
+                "Composite RMSE": f"{composite_result.rmse:.12g}",
+                "Composite AIC": f"{composite_result.aic:.12g}",
+                "Composite BIC": f"{composite_result.bic:.12g}",
+                "Composite warnings": " | ".join(composite_result.warnings),
+            })
+
+        if baseline_only and dialog.application_scope() == "map":
+            self._run_baseline_map(dataset, dialog, detail)
+            return
+        if not baseline_only and dialog.application_scope() != "single":
+            self._run_peak_analysis_batch_or_map(dataset, dialog, detail)
+            return
+
+        spectral_analysis: SpectralAnalysisSession | None = None
+        if not baseline_only and composite_result is not None and peak_result is not None:
+            common = {"source_sheet": dataset.name, **preview_coordinates}
+            curve_frame = composite_result.fit_frame.rename(
+                columns={"baseline": "fit_baseline"}
+            ).copy()
+            preprocessing = pd.DataFrame({
+                "x": baseline_result.x,
+                "raw": baseline_result.raw,
+                "preprocessing_baseline": baseline_result.baseline,
+                "corrected": baseline_result.corrected,
+            })
+            curve_frame = preprocessing.merge(curve_frame, on="x", how="inner", sort=False)
+            for name, value in reversed(list(common.items())):
+                curve_frame.insert(0, name, value)
+            parameter_frame = composite_result.parameter_frame.copy()
+            for name, value in common.items():
+                parameter_frame[name] = value
+            peak_frame = dialog.reviewed_peak_frame()
+            for name, value in common.items():
+                if name not in peak_frame:
+                    peak_frame[name] = value
+            metrics = pd.DataFrame([
+                self._peak_fit_map_row(
+                    composite_result,
+                    source_name=dataset.name,
+                    coordinates=preview_coordinates,
+                    noise_estimate=peak_result.noise_estimate,
+                    detected_peak_count=len(peak_result.peaks),
+                    matched_peak_count=len(composite_result.components),
+                )
+            ])
+            spectral_analysis = self._workspace.add_spectral_analysis(
+                SpectralAnalysisSession(
+                    name=dialog.analysis_name(),
+                    source_dataset=dataset.name,
+                    analysis_kind="raman_pixel" if preview_coordinates else "spectrum",
+                    x_column=dialog.x_column(),
+                    y_column=dialog.y_column(),
+                    coordinate_columns=tuple(preview_coordinates),
+                    profile={"settings": dialog.analysis_profile(), "provenance": detail},
+                    metrics_frame=metrics,
+                    curves_frame=curve_frame,
+                    parameters_frame=parameter_frame,
+                    peaks_frame=peak_frame,
+                )
+            )
+
+        created_names: list[str] = []
+        selected_name: str | None = None
+        if dialog.create_signal_output():
+            y_column = dialog.y_column()
+            baseline_column = f"{y_column}_baseline"
+            corrected_column = f"{y_column}_corrected"
+            signal_frame = pd.DataFrame({
+                dialog.x_column(): baseline_result.x,
+                y_column: baseline_result.raw,
+                baseline_column: baseline_result.baseline,
+                corrected_column: baseline_result.corrected,
+            })
+            for coordinate_name, coordinate_value in reversed(list(preview_coordinates.items())):
+                signal_frame.insert(0, coordinate_name, coordinate_value)
+            signal_dataset = self._workspace.add_dataset(
+                dialog.result_sheet_name(), signal_frame, copy_frame=False
+            )
+            signal_dataset.worksheet_metadata.import_details.update(detail)
+            source_x_metadata = dataset.column_metadata.get(dialog.x_column())
+            source_y_metadata = dataset.column_metadata.get(y_column)
+            signal_dataset.column_metadata[dialog.x_column()] = ColumnMetadata(
+                role="x",
+                unit=source_x_metadata.unit if source_x_metadata else "",
+                long_name=source_x_metadata.long_name if source_x_metadata else "",
+                value_type="numeric",
+            )
+            for column_name, long_name in (
+                (y_column, source_y_metadata.long_name if source_y_metadata else "Raw signal"),
+                (baseline_column, "Estimated baseline"),
+                (corrected_column, "Baseline-corrected signal"),
+            ):
+                signal_dataset.column_metadata[column_name] = ColumnMetadata(
+                    role="y",
+                    unit=source_y_metadata.unit if source_y_metadata else "",
+                    long_name=long_name,
+                    value_type="numeric",
+                )
+            signal_dataset.sync_column_metadata_attrs()
+            set_dataset_operation_comments(
+                signal_dataset,
+                f"{operation_name}: source={dataset.name}; x={dialog.x_column()}; "
+                f"y={y_column}; baseline={baseline_result.parameters.method}",
+            )
+            selected_name = signal_dataset.name
+            created_names.append(signal_dataset.name)
+
+        if dialog.create_peak_output():
+            peak_frame = dialog.reviewed_peak_frame()
+            peak_dataset = self._workspace.add_dataset(
+                dialog.peak_sheet_name(), peak_frame, copy_frame=False
+            )
+            peak_dataset.worksheet_metadata.import_details.update(detail)
+            peak_dataset.worksheet_metadata.import_details["Reviewed peak count"] = str(
+                int(peak_frame["enabled"].sum()) if "enabled" in peak_frame else 0
+            )
+            for column_name in peak_frame.columns:
+                metadata = peak_dataset.metadata_for_column(str(column_name))
+                metadata.value_type = "text" if str(column_name) in {
+                    "source_sheet", "channel", "polarity", "detector", "manual_status"
+                } else "numeric"
+                if str(column_name) == "center":
+                    metadata.role = "x"
+                    source_x_metadata = dataset.column_metadata.get(dialog.x_column())
+                    metadata.unit = source_x_metadata.unit if source_x_metadata else ""
+                elif str(column_name) in {"raw_height", "corrected_height", "prominence", "area"}:
+                    metadata.role = "y"
+            peak_dataset.sync_column_metadata_attrs()
+            set_dataset_operation_comments(
+                peak_dataset,
+                f"Peak Detection: source={dataset.name}; x={dialog.x_column()}; "
+                f"y={dialog.y_column()}; reviewed candidates",
+            )
+            selected_name = peak_dataset.name
+            created_names.append(peak_dataset.name)
+
+        if dialog.create_fit_output() and composite_result is not None:
+            fit_dataset = self._workspace.add_dataset(
+                dialog.fit_sheet_name(), composite_result.fit_frame, copy_frame=False
+            )
+            fit_dataset.worksheet_metadata.import_details.update(detail)
+            set_dataset_operation_comments(
+                fit_dataset,
+                f"Composite Peak Fit: source={dataset.name}; x={dialog.x_column()}; "
+                f"y={dialog.y_column()}; components={len(composite_result.components)}",
+            )
+            parameter_dataset = self._workspace.add_dataset(
+                dialog.fit_parameter_sheet_name(),
+                composite_result.parameter_frame,
+                copy_frame=False,
+            )
+            parameter_dataset.worksheet_metadata.import_details.update(detail)
+            set_dataset_operation_comments(
+                parameter_dataset,
+                f"Composite Peak Fit parameters: source={dataset.name}",
+            )
+            selected_name = parameter_dataset.name
+            created_names.extend((fit_dataset.name, parameter_dataset.name))
+
+        self._refresh_dataset_list(selected_name)
+        if spectral_analysis is not None:
+            self._refresh_spectral_analysis_list(spectral_analysis.name)
+            self._show_spectral_analysis(spectral_analysis)
+        self.statusBar().showMessage(
+            (
+                f"{operation_name} saved analysis '{spectral_analysis.name}' and "
+                if spectral_analysis is not None else f"{operation_name} "
+            )
+            + f"created {len(created_names)} optional worksheet(s)"
+            + (f": {', '.join(created_names)}" if created_names else "")
+        )
+
+    def _run_baseline_map(
+        self,
+        source_dataset: Dataset,
+        dialog: PeakAnalysisDialog,
+        detail: dict[str, str],
+    ) -> None:
+        """Apply one reviewed baseline setup independently to every X/Y pixel."""
+        frame = source_dataset.frame
+        if not {"X", "Y"}.issubset({str(column) for column in frame.columns}):
+            QMessageBox.warning(
+                self,
+                "Baseline Correction Map",
+                "Map processing requires normalized X and Y coordinate columns.",
+            )
+            return
+        x_column = dialog.x_column()
+        y_column = dialog.y_column()
+        if x_column not in frame or y_column not in frame:
+            QMessageBox.warning(
+                self,
+                "Baseline Correction Map",
+                f"Required columns '{x_column}' and '{y_column}' were not found.",
+            )
+            return
+        jobs = list(frame.groupby(["X", "Y"], sort=False, dropna=False))
+        if not jobs:
+            QMessageBox.warning(self, "Baseline Correction Map", "No X/Y pixel groups were found.")
+            return
+
+        parameters = dialog.baseline_parameters()
+        analysis_range = dialog.analysis_range()
+        output_frames: list[pd.DataFrame] = []
+        failure_messages: list[str] = []
+        progress = self._batch_progress_dialog("Raman Map Baseline Correction", len(jobs))
+        for job_index, (coordinates, group) in enumerate(jobs, start=1):
+            x_coordinate, y_coordinate = coordinates
+            label = f"X={x_coordinate}, Y={y_coordinate}"
+            if self._batch_progress_canceled(
+                progress,
+                job_index - 1,
+                f"Baseline correction: {label}",
+            ):
+                break
+            try:
+                x_values = pd.to_numeric(group[x_column], errors="coerce").to_numpy(dtype=float)
+                y_values = pd.to_numeric(group[y_column], errors="coerce").to_numpy(dtype=float)
+                if analysis_range is not None:
+                    lower, upper = analysis_range
+                    outside = (x_values < lower) | (x_values > upper)
+                    x_values = x_values.copy()
+                    y_values = y_values.copy()
+                    x_values[outside] = np.nan
+                    y_values[outside] = np.nan
+                result = correct_baseline(
+                    x_values,
+                    y_values,
+                    parameters,
+                    provenance={
+                        "source_sheet": source_dataset.name,
+                        "X": float(x_coordinate),
+                        "Y": float(y_coordinate),
+                    },
+                )
+                output_frames.append(pd.DataFrame({
+                    "X": float(x_coordinate),
+                    "Y": float(y_coordinate),
+                    x_column: result.x,
+                    y_column: result.raw,
+                    f"{y_column}_baseline": result.baseline,
+                    f"{y_column}_corrected": result.corrected,
+                }))
+            except Exception as exc:
+                failure_messages.append(f"{label}: {exc}")
+        if progress is not None:
+            progress.setValue(len(jobs))
+
+        if not output_frames:
+            message = "No map pixels were corrected successfully."
+            if failure_messages:
+                message += f" First error: {failure_messages[0]}"
+            QMessageBox.warning(self, "Baseline Correction Map", message)
+            return
+        output = self._workspace.add_dataset(
+            dialog.result_sheet_name(),
+            pd.concat(output_frames, ignore_index=True),
+            copy_frame=False,
+        )
+        map_detail = dict(detail)
+        map_detail.update({
+            "Application scope": "Raman map",
+            "Requested pixels": str(len(jobs)),
+            "Successful pixels": str(len(output_frames)),
+            "Failed pixels": str(len(failure_messages)),
+            "Map errors": " | ".join(failure_messages),
+        })
+        output.worksheet_metadata.import_details.update(map_detail)
+        set_dataset_operation_comments(
+            output,
+            f"Baseline Correction map: source={source_dataset.name}; "
+            f"x={x_column}; y={y_column}; baseline={parameters.method}",
+        )
+        self._refresh_dataset_list(output.name)
+        self.statusBar().showMessage(
+            f"Baseline map correction created {output.name}: "
+            f"{len(output_frames)} succeeded, {len(failure_messages)} failed"
+        )
+
+    def _run_peak_analysis_batch_or_map(
+        self,
+        preview_dataset: Dataset,
+        dialog: PeakAnalysisDialog,
+        detail: dict[str, str],
+    ) -> None:
+        """Apply reviewed component models across worksheets or X/Y map groups."""
+        scope = dialog.application_scope()
+        jobs: list[tuple[str, pd.DataFrame, dict[str, float]]] = []
+        if scope == "batch":
+            for name in dialog.batch_dataset_names():
+                try:
+                    candidate = self._workspace.get_dataset(name)
+                except KeyError:
+                    continue
+                jobs.append((name, candidate.frame, {}))
+        else:
+            frame = preview_dataset.frame
+            if not {"X", "Y"}.issubset({str(column) for column in frame.columns}):
+                QMessageBox.warning(
+                    self,
+                    "Peak Analysis Map",
+                    "Map fitting requires normalized X and Y coordinate columns.",
+                )
+                return
+            for coordinates, group in frame.groupby(["X", "Y"], sort=False, dropna=False):
+                x_coordinate, y_coordinate = coordinates
+                label = f"{preview_dataset.name} [X={x_coordinate}, Y={y_coordinate}]"
+                jobs.append((
+                    label,
+                    group.reset_index(drop=True),
+                    {"X": float(x_coordinate), "Y": float(y_coordinate)},
+                ))
+
+        if not jobs:
+            QMessageBox.warning(self, "Peak Analysis", "No compatible batch or map jobs were selected.")
+            return
+
+        template_specs = [spec for spec in dialog.component_specs() if spec.enabled]
+        if not template_specs:
+            QMessageBox.warning(self, "Peak Analysis", "Enable at least one fit component.")
+            return
+        baseline_parameters = dialog.baseline_parameters()
+        detection_parameters = dialog.detection_parameters()
+        fit_parameters = dialog.composite_parameters()
+        analysis_range = dialog.analysis_range()
+        x_column = dialog.x_column()
+        y_column = dialog.y_column()
+        tolerance = dialog.center_tolerance()
+
+        signal_frames: list[pd.DataFrame] = []
+        peak_frames: list[pd.DataFrame] = []
+        fit_frames: list[pd.DataFrame] = []
+        parameter_frames: list[pd.DataFrame] = []
+        analysis_curve_frames: list[pd.DataFrame] = []
+        analysis_peak_frames: list[pd.DataFrame] = []
+        analysis_parameter_frames: list[pd.DataFrame] = []
+        map_parameter_rows: list[dict[str, object]] = []
+        summary_rows: list[dict[str, object]] = []
+        progress = self._batch_progress_dialog(
+            "Raman Map Peak Fit" if scope == "map" else "Peak Fit Batch",
+            len(jobs),
+        )
+        for job_index, (source_name, frame, coordinates) in enumerate(jobs, start=1):
+            if self._batch_progress_canceled(
+                progress,
+                job_index - 1,
+                f"Peak fit: {source_name}",
+            ):
+                break
+            started = time.perf_counter()
+            try:
+                if x_column not in frame or y_column not in frame:
+                    raise MathOperationError(
+                        f"Required columns '{x_column}' and '{y_column}' were not found."
+                    )
+                x_values = pd.to_numeric(frame[x_column], errors="coerce").to_numpy(dtype=float)
+                y_values = pd.to_numeric(frame[y_column], errors="coerce").to_numpy(dtype=float)
+                if analysis_range is not None:
+                    lower, upper = analysis_range
+                    outside = (x_values < lower) | (x_values > upper)
+                    x_values = x_values.copy()
+                    y_values = y_values.copy()
+                    x_values[outside] = np.nan
+                    y_values[outside] = np.nan
+                baseline = correct_baseline(
+                    x_values,
+                    y_values,
+                    baseline_parameters,
+                    provenance={"source_sheet": source_name, **coordinates},
+                )
+                detection = detect_peaks(
+                    baseline.x,
+                    baseline.raw,
+                    baseline.corrected,
+                    detection_parameters,
+                    source_sheet=source_name,
+                    channel=y_column,
+                    map_coordinates=coordinates,
+                )
+                matched = self._match_peak_components(
+                    template_specs,
+                    list(detection.peaks),
+                    baseline.x,
+                    tolerance,
+                )
+                fit = fit_composite_peaks(
+                    baseline.x,
+                    baseline.raw,
+                    baseline.corrected,
+                    matched,
+                    fit_parameters,
+                    provenance={"source_sheet": source_name, **coordinates},
+                )
+                common = {"source_sheet": source_name, **coordinates}
+                analysis_curve = fit.fit_frame.rename(
+                    columns={"baseline": "fit_baseline"}
+                ).copy()
+                preprocessing = pd.DataFrame({
+                    "x": baseline.x,
+                    "raw": baseline.raw,
+                    "preprocessing_baseline": baseline.baseline,
+                    "corrected": baseline.corrected,
+                })
+                analysis_curve = preprocessing.merge(
+                    analysis_curve,
+                    on="x",
+                    how="inner",
+                    sort=False,
+                )
+                for name, value in reversed(list(common.items())):
+                    analysis_curve.insert(0, name, value)
+                analysis_curve_frames.append(analysis_curve)
+
+                analysis_peak_frame = detection.peak_frame()
+                for name, value in common.items():
+                    if name not in analysis_peak_frame:
+                        analysis_peak_frame[name] = value
+                analysis_peak_frames.append(analysis_peak_frame)
+
+                analysis_parameter_frame = fit.parameter_frame.copy()
+                for name, value in common.items():
+                    analysis_parameter_frame[name] = value
+                analysis_parameter_frame["r_squared"] = fit.r_squared
+                analysis_parameter_frame["rmse"] = fit.rmse
+                analysis_parameter_frame["aic"] = fit.aic
+                analysis_parameter_frame["bic"] = fit.bic
+                analysis_parameter_frame["status"] = "success"
+                analysis_parameter_frame["error"] = ""
+                analysis_parameter_frame["warnings"] = " | ".join(fit.warnings)
+                analysis_parameter_frames.append(analysis_parameter_frame)
+                if dialog.create_signal_output():
+                    signal_frame = pd.DataFrame({
+                        x_column: baseline.x,
+                        y_column: baseline.raw,
+                        f"{y_column}_baseline": baseline.baseline,
+                        f"{y_column}_corrected": baseline.corrected,
+                    })
+                    for name, value in reversed(list(common.items())):
+                        signal_frame.insert(0, name, value)
+                    signal_frames.append(signal_frame)
+                if dialog.create_peak_output():
+                    peak_frames.append(analysis_peak_frame.copy())
+                if dialog.create_fit_output():
+                    fit_frame = fit.fit_frame.copy()
+                    for name, value in reversed(list(common.items())):
+                        fit_frame.insert(0, name, value)
+                    fit_frames.append(fit_frame)
+                    parameter_frames.append(analysis_parameter_frame.copy())
+                map_parameter_rows.append(
+                    self._peak_fit_map_row(
+                        fit,
+                        source_name=source_name,
+                        coordinates=coordinates,
+                        noise_estimate=detection.noise_estimate,
+                        detected_peak_count=len(detection.peaks),
+                        matched_peak_count=len(matched),
+                    )
+                )
+                summary_rows.append({
+                    **common,
+                    "status": "success",
+                    "detected_peaks": len(detection.peaks),
+                    "matched_peaks": len(matched),
+                    "r_squared": fit.r_squared,
+                    "rmse": fit.rmse,
+                    "aic": fit.aic,
+                    "bic": fit.bic,
+                    "elapsed_seconds": time.perf_counter() - started,
+                    "error": "",
+                })
+            except Exception as exc:
+                map_parameter_rows.append({
+                    "source_sheet": source_name,
+                    **coordinates,
+                    "fit_success": 0.0,
+                    "fit_converged": 0.0,
+                    "status": "failed",
+                    "error": str(exc),
+                })
+                summary_rows.append({
+                    "source_sheet": source_name,
+                    **coordinates,
+                    "status": "failed",
+                    "detected_peaks": 0,
+                    "matched_peaks": 0,
+                    "r_squared": np.nan,
+                    "rmse": np.nan,
+                    "aic": np.nan,
+                    "bic": np.nan,
+                    "elapsed_seconds": time.perf_counter() - started,
+                    "error": str(exc),
+                })
+        if progress is not None:
+            progress.setValue(len(jobs))
+
+        created: list[str] = []
+        selected_name: str | None = None
+        detail = dict(detail)
+        detail.update({
+            "Application scope": "Raman map" if scope == "map" else "Worksheet batch",
+            "Requested jobs": str(len(jobs)),
+            "Peak center matching tolerance": f"{tolerance:g}",
+        })
+        analysis_name = (
+            dialog.analysis_name()
+            if hasattr(dialog, "analysis_name")
+            else f"{preview_dataset.name} Raman Analysis"
+        )
+        profile = (
+            dialog.analysis_profile()
+            if hasattr(dialog, "analysis_profile")
+            else {}
+        )
+        analysis = self._workspace.add_spectral_analysis(SpectralAnalysisSession(
+            name=analysis_name,
+            source_dataset=preview_dataset.name,
+            analysis_kind="raman_map" if scope == "map" else "spectrum_batch",
+            x_column=x_column,
+            y_column=y_column,
+            coordinate_columns=("X", "Y") if scope == "map" else (),
+            profile={"settings": profile, "provenance": detail},
+            metrics_frame=pd.DataFrame(map_parameter_rows),
+            curves_frame=(
+                pd.concat(analysis_curve_frames, ignore_index=True)
+                if analysis_curve_frames else pd.DataFrame()
+            ),
+            parameters_frame=(
+                pd.concat(analysis_parameter_frames, ignore_index=True)
+                if analysis_parameter_frames else pd.DataFrame()
+            ),
+            peaks_frame=(
+                pd.concat(analysis_peak_frames, ignore_index=True)
+                if analysis_peak_frames else pd.DataFrame()
+            ),
+        ))
+        if dialog.create_signal_output() and signal_frames:
+            output = self._workspace.add_dataset(
+                dialog.result_sheet_name(), pd.concat(signal_frames, ignore_index=True), copy_frame=False
+            )
+            output.worksheet_metadata.import_details.update(detail)
+            set_dataset_operation_comments(output, f"Peak Analysis {scope} corrected signals")
+            created.append(output.name)
+            selected_name = output.name
+        if dialog.create_peak_output() and peak_frames:
+            output = self._workspace.add_dataset(
+                dialog.peak_sheet_name(), pd.concat(peak_frames, ignore_index=True), copy_frame=False
+            )
+            output.worksheet_metadata.import_details.update(detail)
+            set_dataset_operation_comments(output, f"Peak Analysis {scope} detected peaks")
+            created.append(output.name)
+            selected_name = output.name
+        if dialog.create_fit_output():
+            if fit_frames:
+                output = self._workspace.add_dataset(
+                    dialog.fit_sheet_name(), pd.concat(fit_frames, ignore_index=True), copy_frame=False
+                )
+                output.worksheet_metadata.import_details.update(detail)
+                set_dataset_operation_comments(output, f"Composite Peak Fit {scope} curves")
+                created.append(output.name)
+                selected_name = output.name
+            combined_parameters = (
+                pd.concat(parameter_frames, ignore_index=True)
+                if parameter_frames
+                else pd.DataFrame()
+            )
+            if summary_rows:
+                summary_frame = pd.DataFrame(summary_rows)
+                summary_frame["record_type"] = "fit_summary"
+                if combined_parameters.empty:
+                    combined_parameters = summary_frame
+                else:
+                    combined_parameters["record_type"] = "parameter"
+                    combined_parameters = pd.concat(
+                        [combined_parameters, summary_frame], ignore_index=True, sort=False
+                    )
+            output = self._workspace.add_dataset(
+                dialog.fit_parameter_sheet_name(), combined_parameters, copy_frame=False
+            )
+            output.worksheet_metadata.import_details.update(detail)
+            set_dataset_operation_comments(output, f"Composite Peak Fit {scope} parameters and summary")
+            created.append(output.name)
+            selected_name = output.name
+            if scope == "map" and map_parameter_rows:
+                map_frame = pd.DataFrame(map_parameter_rows)
+                coordinate_columns = [name for name in ("X", "Y") if name in map_frame]
+                leading_columns = [
+                    name for name in ("source_sheet", *coordinate_columns)
+                    if name in map_frame
+                ]
+                map_frame = map_frame[
+                    leading_columns
+                    + [name for name in map_frame.columns if name not in leading_columns]
+                ]
+                map_output = self._workspace.add_dataset(
+                    f"{dialog.fit_parameter_sheet_name()}_maps",
+                    map_frame,
+                    copy_frame=False,
+                )
+                map_output.worksheet_metadata.import_details.update(detail)
+                map_output.worksheet_metadata.import_details.update({
+                    "Worksheet layout": "One row per X/Y pixel; numeric columns are heatmap-ready Z values",
+                    "Recommended plot family": "2D Maps",
+                })
+                for coordinate_name, role in (("X", "x"), ("Y", "y")):
+                    if coordinate_name in map_frame:
+                        metadata = map_output.metadata_for_column(coordinate_name)
+                        metadata.role = role
+                        metadata.value_type = "numeric"
+                for column_name in map_frame.columns:
+                    if column_name in {"source_sheet", "status", "error"} or column_name.endswith("_model"):
+                        map_output.metadata_for_column(str(column_name)).value_type = "text"
+                    elif column_name not in {"X", "Y"}:
+                        map_output.metadata_for_column(str(column_name)).value_type = "numeric"
+                map_output.sync_column_metadata_attrs()
+                set_dataset_operation_comments(
+                    map_output,
+                    "Composite Peak Fit heatmap-ready parameter maps: one row per X/Y pixel",
+                )
+                created.append(map_output.name)
+                selected_name = map_output.name
+
+        self._refresh_dataset_list(selected_name)
+        self._refresh_spectral_analysis_list(analysis.name)
+        self._show_spectral_analysis(analysis)
+        successes = sum(row["status"] == "success" for row in summary_rows)
+        failures = sum(row["status"] == "failed" for row in summary_rows)
+        self.statusBar().showMessage(
+            f"Peak fit {scope}: {successes} succeeded, {failures} failed; "
+            f"saved analysis '{analysis.name}'; "
+            f"created {', '.join(created) if created else 'no optional worksheets'}"
+        )
+
+    @staticmethod
+    def _peak_fit_map_row(
+        fit: CompositeFitResult,
+        *,
+        source_name: str,
+        coordinates: dict[str, float],
+        noise_estimate: float,
+        detected_peak_count: int,
+        matched_peak_count: int,
+    ) -> dict[str, object]:
+        """Flatten one fit into heatmap-ready metrics for exactly one X/Y pixel."""
+        fit_frame = fit.fit_frame
+        baseline_values = pd.to_numeric(fit_frame["baseline"], errors="coerce").to_numpy(
+            dtype=float
+        )
+        finite_baseline = baseline_values[np.isfinite(baseline_values)]
+        row: dict[str, object] = {
+            "source_sheet": source_name,
+            **coordinates,
+            "fit_success": 1.0,
+            "fit_converged": 1.0 if fit.converged else 0.0,
+            "fit_r_squared": fit.r_squared,
+            "fit_rmse": fit.rmse,
+            "fit_mae": fit.mae,
+            "fit_aic": fit.aic,
+            "fit_bic": fit.bic,
+            "fit_evaluations": float(fit.evaluations),
+            "noise_estimate": float(noise_estimate),
+            "detected_peak_count": float(detected_peak_count),
+            "matched_peak_count": float(matched_peak_count),
+            "baseline_mean": (
+                float(np.mean(finite_baseline)) if finite_baseline.size else float("nan")
+            ),
+            "baseline_minimum": (
+                float(np.min(finite_baseline)) if finite_baseline.size else float("nan")
+            ),
+            "baseline_maximum": (
+                float(np.max(finite_baseline)) if finite_baseline.size else float("nan")
+            ),
+            "status": "success",
+            "error": "",
+            "warnings": " | ".join(fit.warnings),
+        }
+
+        baseline_parameters = fit.parameter_frame[
+            fit.parameter_frame["component"] == "baseline"
+        ]
+        for parameter in baseline_parameters.itertuples(index=False):
+            name = str(parameter.parameter)
+            row[f"baseline_parameter_{name}"] = float(parameter.value)
+            row[f"baseline_parameter_{name}_standard_error"] = float(
+                parameter.standard_error
+            )
+
+        aliases = {
+            "integrated_area": "area",
+            "fitted_position": "position",
+            "fitted_intensity": "intensity",
+            "fitted_fwhm": "fwhm",
+            "fitted_asymmetry": "asymmetry",
+            "natural_linewidth": "natural_linewidth",
+            "fano_peak_position": "fano_peak_position",
+            "fano_dip_position": "fano_dip_position",
+            "fano_peak_contrast": "fano_peak_contrast",
+            "fano_dip_contrast": "fano_dip_contrast",
+        }
+        peak_parameters = fit.parameter_frame[
+            fit.parameter_frame["component_index"] > 0
+        ]
+        for component_index, parameters in peak_parameters.groupby(
+            "component_index", sort=True
+        ):
+            index = int(component_index)
+            prefix = f"peak_{index}"
+            first = parameters.iloc[0]
+            row[f"{prefix}_model"] = str(first["model"])
+            if index <= len(fit.components):
+                detected_peak = fit.components[index - 1].peak
+                row[f"{prefix}_snr"] = float(detected_peak.local_snr)
+                row[f"{prefix}_detected_position"] = float(detected_peak.center)
+            for parameter in parameters.itertuples(index=False):
+                name = str(parameter.parameter)
+                value = float(parameter.value)
+                standard_error = float(parameter.standard_error)
+                row[f"{prefix}_parameter_{name}"] = value
+                row[f"{prefix}_parameter_{name}_standard_error"] = standard_error
+                if str(parameter.role) == "center" and f"{prefix}_position" not in row:
+                    row[f"{prefix}_position"] = value
+                    row[f"{prefix}_position_standard_error"] = standard_error
+                alias = aliases.get(name)
+                if alias is not None:
+                    row[f"{prefix}_{alias}"] = value
+                    row[f"{prefix}_{alias}_standard_error"] = standard_error
+            intensity = row.get(f"{prefix}_intensity")
+            intensity_error = row.get(f"{prefix}_intensity_standard_error")
+            if isinstance(intensity, float) and isinstance(intensity_error, float):
+                row[f"{prefix}_intensity_relative_standard_error"] = (
+                    abs(intensity_error / intensity)
+                    if np.isfinite(intensity)
+                    and np.isfinite(intensity_error)
+                    and intensity != 0.0
+                    else float("nan")
+                )
+        return row
+
+    @staticmethod
+    def _match_peak_components(
+        templates: list[PeakComponentSpec],
+        candidates: list[PeakRecord],
+        x_values: np.ndarray,
+        tolerance: float,
+    ) -> list[PeakComponentSpec]:
+        """Match batch/map peaks by expected physical center, never prominence rank."""
+        remaining = list(candidates)
+        matched: list[PeakComponentSpec] = []
+        for template in templates:
+            compatible = [
+                peak for peak in remaining if peak.polarity == template.peak.polarity
+            ] or remaining
+            if not compatible:
+                raise MathOperationError(
+                    f"No detected candidate is available near {template.peak.center:g}."
+                )
+            candidate = min(compatible, key=lambda peak: abs(peak.center - template.peak.center))
+            separation = abs(candidate.center - template.peak.center)
+            if separation > tolerance:
+                raise MathOperationError(
+                    f"Expected peak near {template.peak.center:g}, but the closest candidate "
+                    f"at {candidate.center:g} is outside tolerance {tolerance:g}."
+                )
+            remaining.remove(candidate)
+            matched.append(build_peak_component_spec(candidate, template.model_key, x_values))
+        return matched
+
     def _run_curve_fit(self) -> None:
         """Run the curve-fitting workflow and plot/save fit outputs."""
         dataset = self._current_dataset()
@@ -8771,6 +9925,9 @@ class MainWindow(QMainWindow):
             ("FFT...", self._run_fft),
             ("Inverse FFT...", self._run_ifft),
             ("Statistics...", self._run_statistics),
+            ("Baseline Correction...", self._run_baseline_correction),
+            ("Peak Analysis...", self._run_peak_analysis),
+            ("Raman Analysis...", self._run_raman_analysis),
             ("Curve Fit...", self._run_curve_fit),
         )
         for label, callback in analysis_actions:
@@ -9233,6 +10390,7 @@ class MainWindow(QMainWindow):
 
         if not has_dataset:
             self._dataset_summary.setText("No dataset selected")
+            self._worksheet_metadata_button.setText("Worksheet Metadata")
         else:
             dataset.prune_column_metadata()
             formula_count = len(dataset.formulas)
@@ -9247,11 +10405,21 @@ class MainWindow(QMainWindow):
             metadata_text = f", {', '.join(metadata_bits)}" if metadata_bits else ""
             backend_text = f", backend={dataset.backend}" if dataset.backend != PANDAS_BACKEND else ""
             figure_text = ", resumable figure session" if dataset.figure_session is not None else ""
+            worksheet_metadata_count = len(dataset.worksheet_metadata.raw_lines)
+            worksheet_metadata_text = (
+                f", {worksheet_metadata_count} source metadata row(s)"
+                if worksheet_metadata_count
+                else ""
+            )
             self._dataset_summary.setText(
                 f"{dataset.name}: {len(dataset.frame)} rows, "
                 f"{len(dataset.frame.columns)} columns{formula_text}{metadata_text}"
-                f"{backend_text}{figure_text}"
+                f"{worksheet_metadata_text}{backend_text}{figure_text}"
             )
+            button_suffix = (
+                f" ({worksheet_metadata_count})" if worksheet_metadata_count else ""
+            )
+            self._worksheet_metadata_button.setText(f"Worksheet Metadata{button_suffix}")
 
         self._export_action.setEnabled(has_dataset)
         self._delete_cells_action.setEnabled(has_dataset)
@@ -9269,7 +10437,9 @@ class MainWindow(QMainWindow):
         self._insert_column_action.setEnabled(has_dataset)
         self._fill_range_action.setEnabled(has_dataset)
         self._smart_fill_action.setEnabled(has_dataset)
+        self._worksheet_metadata_action.setEnabled(has_dataset)
         self._column_metadata_action.setEnabled(has_dataset)
+        self._worksheet_metadata_button.setEnabled(has_dataset)
         self._insert_row_action.setEnabled(has_dataset)
         self._resize_sheet_action.setEnabled(has_dataset)
         self._apply_formula_action.setEnabled(has_dataset)
@@ -9280,6 +10450,9 @@ class MainWindow(QMainWindow):
         self._fft_action.setEnabled(has_dataset)
         self._ifft_action.setEnabled(has_dataset)
         self._statistics_action.setEnabled(has_dataset)
+        self._baseline_action.setEnabled(has_dataset)
+        self._peak_analysis_action.setEnabled(has_dataset)
+        self._raman_analysis_action.setEnabled(has_dataset)
         self._fit_action.setEnabled(has_dataset)
         self._rename_dataset_button.setEnabled(has_dataset)
         self._duplicate_dataset_button.setEnabled(has_dataset)
@@ -9573,6 +10746,7 @@ class MainWindow(QMainWindow):
             self._workspace.dataset_names()
             or self._workspace.plot_names()
             or self._workspace.custom_fit_model_names()
+            or self._workspace.spectral_analysis_names()
         )
 
     def _set_project_window_title(self) -> None:
@@ -9583,7 +10757,7 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"JASC Data Processor - {self._project_path.name}")
 
     def _open_project(self) -> None:
-        """Open a `.jasc` project, replacing the current workspace."""
+        """Open a plain or encrypted JASC project, replacing the workspace."""
         if self._has_project_content():
             reply = QMessageBox.question(
                 self, "Open Project",
@@ -9593,24 +10767,83 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 return
         
-        file_name, _ = QFileDialog.getOpenFileName(self, "Open Project", "", "JASC Projects (*.jasc);;All Files (*)")
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            "",
+            "JASC Projects (*.jasc *.jascx);;Open JASC Projects (*.jasc);;"
+            "Encrypted JASC Projects (*.jascx);;All Files (*)",
+        )
         if not file_name:
             return
-            
+
+        password: str | None = None
         try:
-            self._workspace = project_io.load_project(file_name)
-            self._project_path = Path(file_name)
-            self._large_dataset_warning_names.clear()
-            self._active_plot_name = None
-            self._active_plot_baseline = None
-            self._plot_tab_widget.set_workspace(self._workspace)
-            self._refresh_dataset_list()
-            self._refresh_plot_list()
-            self._set_project_window_title()
-            self._warn_about_large_workspace_datasets(Path(file_name).name)
-            self.statusBar().showMessage(f"Opened project {Path(file_name).name}")
+            try:
+                loaded_workspace = project_io.load_project(file_name)
+            except project_io.ProjectPasswordRequiredError:
+                password = self._request_hidden_password(
+                    title="Open Encrypted Project",
+                    prompt="Encryption password:",
+                    confirm=False,
+                )
+                if password is None:
+                    self.statusBar().showMessage("Encrypted project opening cancelled")
+                    return
+                loaded_workspace = project_io.load_project(
+                    file_name,
+                    password=password,
+                )
+        except project_io.ProjectIntegrityError as exc:
+            reply = QMessageBox.warning(
+                self,
+                "Project Integrity Warning",
+                "The data package may have been forged or damaged.\n\n"
+                f"{exc}\n\nOpen it anyway only if you trust its source.",
+                QMessageBox.Open | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if reply != QMessageBox.Open:
+                self.statusBar().showMessage("Project opening cancelled after integrity warning")
+                return
+            try:
+                loaded_workspace = project_io.load_project(
+                    file_name,
+                    allow_integrity_mismatch=True,
+                    password=password,
+                )
+            except Exception as load_exc:
+                QMessageBox.critical(self, "Open Failed", str(load_exc))
+                return
+        except project_io.ProjectDecryptionError as exc:
+            QMessageBox.critical(self, "Could Not Decrypt Project", str(exc))
+            return
         except Exception as exc:
             QMessageBox.critical(self, "Open Failed", str(exc))
+            return
+
+        self._workspace = loaded_workspace
+        self._project_path = Path(file_name)
+        self._project_password = password
+        self._project_signing_identity = None
+        self._project_signature_fingerprint = (
+            loaded_workspace.project_signer_fingerprint
+        )
+        self._large_dataset_warning_names.clear()
+        self._active_plot_name = None
+        self._active_plot_baseline = None
+        self._plot_tab_widget.set_workspace(self._workspace)
+        self._refresh_dataset_list()
+        self._refresh_plot_list()
+        self._refresh_spectral_analysis_list()
+        self._hide_spectral_analysis_tab()
+        self._set_project_window_title()
+        self._warn_about_large_workspace_datasets(Path(file_name).name)
+        self.statusBar().showMessage(
+            f"Opened project {Path(file_name).name}"
+            f"{self._project_signature_status_suffix()}"
+        )
+        self._show_opened_project_signature()
 
     def _save_project(self) -> None:
         """Save the current workspace to its project path, or prompt for one."""
@@ -9619,37 +10852,432 @@ class MainWindow(QMainWindow):
             return
 
         if self._project_path is None:
-            self._save_project_as()
+            self._save_project_as(force_encrypt=False)
             return
 
+        password: str | None = None
+        if self._project_path_uses_encryption():
+            password = self._project_password
+            if password is None:
+                password = self._request_hidden_password(
+                    title="Save Encrypted Project",
+                    prompt="Encryption password:",
+                    confirm=True,
+                )
+                if password is None:
+                    self.statusBar().showMessage("Encrypted project save cancelled")
+                    return
+        signing_identity: project_io.SigningPrivateIdentity | None = None
+        if self._project_signature_fingerprint is not None:
+            signing_identity = self._project_signing_identity
+            if (
+                signing_identity is None
+                or signing_identity.fingerprint != self._project_signature_fingerprint
+            ):
+                signing_identity = self._request_signing_identity(
+                    expected_fingerprint=self._project_signature_fingerprint,
+                )
+                if signing_identity is None:
+                    self.statusBar().showMessage("Signed project save cancelled")
+                    return
         try:
-            project_io.save_project(self._workspace, self._project_path)
-            self.statusBar().showMessage(f"Saved project {self._project_path.name}")
+            project_io.save_project(
+                self._workspace,
+                self._project_path,
+                password=password,
+                signing_identity=signing_identity,
+            )
+            self._project_password = password
+            self._project_signing_identity = signing_identity
+            if signing_identity is not None:
+                self._project_signature_fingerprint = signing_identity.fingerprint
+                self._workspace.project_signature_status = "valid"
+                self._workspace.project_signer_fingerprint = signing_identity.fingerprint
+                self._workspace.project_signer_name = signing_identity.name
+            self.statusBar().showMessage(
+                f"Saved project {self._project_path.name}"
+                f"{self._project_signature_status_suffix()}"
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
 
-    def _save_project_as(self) -> None:
+    def _save_project_as(self, *, force_encrypt: bool | None = None) -> None:
         """Prompt for a project path and save the current workspace there."""
         if not self._has_project_content():
             QMessageBox.information(self, "Save Project", "The workspace is empty.")
             return
 
         default_name = str(self._project_path) if self._project_path else "workspace.jasc"
-        file_name, _ = QFileDialog.getSaveFileName(self, "Save Project", default_name, "JASC Projects (*.jasc)")
+        if force_encrypt is True:
+            dialog_title = "Save Encrypted Project"
+            file_filter = "Encrypted JASC Project (*.jascx)"
+        elif force_encrypt is False:
+            dialog_title = "Save Open Project"
+            file_filter = "Open JASC Project (*.jasc)"
+        else:
+            dialog_title = "Save Project"
+            file_filter = "Open JASC Project (*.jasc);;Encrypted JASC Project (*.jascx)"
+        file_name, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            dialog_title,
+            default_name,
+            file_filter,
+        )
         if not file_name:
             return
 
         path = Path(file_name)
-        if not path.suffix:
-            path = path.with_suffix(project_io.PROJECT_EXTENSION)
+        encrypt = force_encrypt
+        if encrypt is None:
+            encrypt = (
+                "Encrypted" in selected_filter
+                if selected_filter
+                else path.suffix.casefold() == project_io.ENCRYPTED_PROJECT_EXTENSION
+            )
+        if encrypt:
+            path = path.with_suffix(project_io.ENCRYPTED_PROJECT_EXTENSION)
+            password = self._request_hidden_password(
+                title="Encrypt Project",
+                prompt="Encryption password:",
+                confirm=True,
+            )
+            if password is None:
+                self.statusBar().showMessage("Encrypted project save cancelled")
+                return
+        else:
+            password = None
+            if path.suffix.casefold() == project_io.ENCRYPTED_PROJECT_EXTENSION:
+                path = path.with_suffix(project_io.PROJECT_EXTENSION)
+            elif not path.suffix:
+                path = path.with_suffix(project_io.PROJECT_EXTENSION)
 
         try:
-            project_io.save_project(self._workspace, path)
+            project_io.save_project(self._workspace, path, password=password)
             self._project_path = path
+            self._project_password = password
+            self._project_signing_identity = None
+            self._project_signature_fingerprint = None
+            self._workspace.project_signature_status = "unsigned"
+            self._workspace.project_signer_fingerprint = None
+            self._workspace.project_signer_name = None
             self._set_project_window_title()
             self.statusBar().showMessage(f"Saved project {path.name}")
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
+
+    def _save_signed_project_as(self, *, force_encrypt: bool | None = None) -> None:
+        """Save a project with an Ed25519 author signature, optionally encrypted."""
+        if not self._has_project_content():
+            QMessageBox.information(self, "Save Signed Project", "The workspace is empty.")
+            return
+        signing_identity = self._request_signing_identity()
+        if signing_identity is None:
+            return
+
+        default_name = str(self._project_path) if self._project_path else "workspace.jasc"
+        if force_encrypt is True:
+            dialog_title = "Save Signed + Encrypted Project"
+            file_filter = "Signed Encrypted JASC Project (*.jascx)"
+        elif force_encrypt is False:
+            dialog_title = "Save Signed Open Project"
+            file_filter = "Signed Open JASC Project (*.jasc)"
+        else:
+            dialog_title = "Save Signed Project"
+            file_filter = (
+                "Signed Open JASC Project (*.jasc);;"
+                "Signed Encrypted JASC Project (*.jascx)"
+            )
+        file_name, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            dialog_title,
+            default_name,
+            file_filter,
+        )
+        if not file_name:
+            return
+        path = Path(file_name)
+        encrypt = force_encrypt
+        if encrypt is None:
+            encrypt = (
+                "Encrypted" in selected_filter
+                if selected_filter
+                else path.suffix.casefold() == project_io.ENCRYPTED_PROJECT_EXTENSION
+            )
+        if encrypt:
+            path = path.with_suffix(project_io.ENCRYPTED_PROJECT_EXTENSION)
+            password = self._request_hidden_password(
+                title="Encrypt Signed Project",
+                prompt="Encryption password:",
+                confirm=True,
+            )
+            if password is None:
+                self.statusBar().showMessage("Signed encrypted project save cancelled")
+                return
+        else:
+            password = None
+            path = path.with_suffix(project_io.PROJECT_EXTENSION)
+
+        try:
+            project_io.save_project(
+                self._workspace,
+                path,
+                password=password,
+                signing_identity=signing_identity,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Signed Save Failed", str(exc))
+            return
+
+        self._project_path = path
+        self._project_password = password
+        self._project_signing_identity = signing_identity
+        self._project_signature_fingerprint = signing_identity.fingerprint
+        self._workspace.project_signature_status = "valid"
+        self._workspace.project_signer_fingerprint = signing_identity.fingerprint
+        self._workspace.project_signer_name = signing_identity.name
+        self._set_project_window_title()
+        self.statusBar().showMessage(
+            f"Saved signed project {path.name}{self._project_signature_status_suffix()}"
+        )
+
+    def _create_signing_identity(self) -> None:
+        """Create an encrypted Ed25519 private key and shareable public key."""
+        file_name, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Create Signing Identity",
+            "jasc-signing-identity.jasc-key",
+            "JASC Private Signing Key (*.jasc-key)",
+        )
+        if not file_name:
+            return
+        path = Path(file_name)
+        if path.suffix.casefold() != project_io.PRIVATE_KEY_EXTENSION:
+            path = path.with_suffix(project_io.PRIVATE_KEY_EXTENSION)
+        name, accepted = QInputDialog.getText(
+            self,
+            "Create Signing Identity",
+            "Researcher or organization name:",
+            text=path.stem,
+        )
+        if not accepted:
+            return
+        password = self._request_hidden_password(
+            title="Protect Signing Identity",
+            prompt="Private-key password:",
+            confirmation_prompt="Confirm private-key password:",
+            confirm=True,
+        )
+        if password is None:
+            return
+        try:
+            identity, public_path = project_io.create_signing_identity(
+                path,
+                name=name,
+                password=password,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Identity Creation Failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Signing Identity Created",
+            "Keep the private key and its password secret. Share the public key "
+            "through an independent trusted channel.\n\n"
+            f"Private key: {path}\n"
+            f"Public key: {public_path}\n"
+            f"Fingerprint: {identity.fingerprint}",
+        )
+
+    def _request_signing_identity(
+        self,
+        *,
+        expected_fingerprint: str | None = None,
+    ) -> project_io.SigningPrivateIdentity | None:
+        """Ask for and unlock an Ed25519 private signing identity."""
+        file_name, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Select Private Signing Key",
+            "",
+            "JASC Private Signing Keys (*.jasc-key);;All Files (*)",
+        )
+        if not file_name:
+            return None
+        password, accepted = QInputDialog.getText(
+            self,
+            "Unlock Signing Identity",
+            "Private-key password:",
+            QLineEdit.Password,
+        )
+        if not accepted:
+            return None
+        try:
+            identity = project_io.load_signing_identity(
+                file_name,
+                password=password,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Signing Key Failed", str(exc))
+            return None
+        if expected_fingerprint is not None and identity.fingerprint != expected_fingerprint:
+            QMessageBox.critical(
+                self,
+                "Wrong Signing Identity",
+                "This project was signed by a different key.\n\n"
+                f"Expected: {expected_fingerprint}\n"
+                f"Selected: {identity.fingerprint}",
+            )
+            return None
+        return identity
+
+    def _trust_public_identity(self) -> None:
+        """Import a public identity fingerprint into the local trust store."""
+        file_name, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Trust Public Signing Key",
+            "",
+            "JASC Public Signing Keys (*.jasc-pub);;All Files (*)",
+        )
+        if not file_name:
+            return
+        try:
+            identity = project_io.load_public_identity(file_name)
+        except Exception as exc:
+            QMessageBox.critical(self, "Public Key Failed", str(exc))
+            return
+        reply = QMessageBox.question(
+            self,
+            "Trust Public Signing Key",
+            "Trust this signer only after comparing the fingerprint through an "
+            "independent channel.\n\n"
+            f"Name: {identity.name}\n"
+            f"Fingerprint: {identity.fingerprint}\n\n"
+            "Add this key to the trusted signer list?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._trusted_signers[identity.fingerprint] = identity.name
+        self._save_trusted_signers()
+        QMessageBox.information(
+            self,
+            "Public Key Trusted",
+            f"Trusted {identity.name}\n{identity.fingerprint}",
+        )
+
+    @staticmethod
+    def _load_trusted_signers() -> dict[str, str]:
+        """Load the persistent fingerprint-to-name trust mapping."""
+        raw = QSettings("JASC", "JASC Data Processor").value(
+            "security/trusted_signers",
+            "{}",
+        )
+        try:
+            parsed = json.loads(str(raw))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(fingerprint): str(name)
+            for fingerprint, name in parsed.items()
+            if str(fingerprint).startswith("SHA256:")
+        }
+
+    def _save_trusted_signers(self) -> None:
+        """Persist the local signer-fingerprint trust mapping."""
+        QSettings("JASC", "JASC Data Processor").setValue(
+            "security/trusted_signers",
+            json.dumps(self._trusted_signers, sort_keys=True),
+        )
+
+    def _project_signature_status_suffix(self) -> str:
+        """Return a concise status suffix for the current project signature."""
+        status = self._workspace.project_signature_status
+        fingerprint = self._workspace.project_signer_fingerprint
+        if status == "valid" and fingerprint in self._trusted_signers:
+            return " [signed and trusted]"
+        if status == "valid":
+            return " [signature valid; signer not trusted]"
+        if status == "invalid":
+            return " [INVALID SIGNATURE]"
+        return " [unsigned]"
+
+    def _show_opened_project_signature(self) -> None:
+        """Explain the verified signature/trust state after a project opens."""
+        status = self._workspace.project_signature_status
+        fingerprint = self._workspace.project_signer_fingerprint
+        signer_name = self._workspace.project_signer_name or "Unnamed signer"
+        if status == "valid" and fingerprint in self._trusted_signers:
+            QMessageBox.information(
+                self,
+                "Project Signature: Trusted",
+                f"The digital signature is valid and the signer is trusted.\n\n"
+                f"Signer: {signer_name}\nFingerprint: {fingerprint}",
+            )
+        elif status == "valid":
+            QMessageBox.warning(
+                self,
+                "Project Signature: Signer Unknown",
+                "The digital signature is mathematically valid, but this public key "
+                "is not in your trusted signer list. Verify its fingerprint through "
+                "an independent channel before trusting the claimed identity.\n\n"
+                f"Claimed signer: {signer_name}\nFingerprint: {fingerprint}",
+            )
+
+    def _project_path_uses_encryption(self) -> bool:
+        """Return whether Save should preserve encryption for the current path."""
+        if self._project_path is None:
+            return False
+        if self._project_path.suffix.casefold() == project_io.ENCRYPTED_PROJECT_EXTENSION:
+            return True
+        try:
+            return project_io.is_encrypted_project(self._project_path)
+        except OSError:
+            return False
+
+    def _request_hidden_password(
+        self,
+        *,
+        title: str,
+        prompt: str,
+        confirm: bool,
+        confirmation_prompt: str = "Confirm encryption password:",
+    ) -> str | None:
+        """Request a purpose-labelled hidden password with optional confirmation."""
+        while True:
+            password, accepted = QInputDialog.getText(
+                self,
+                title,
+                prompt,
+                QLineEdit.Password,
+            )
+            if not accepted:
+                return None
+            if not password:
+                QMessageBox.warning(
+                    self,
+                    title,
+                    "The password cannot be empty.",
+                )
+                continue
+            if not confirm:
+                return password
+            repeated, repeated_ok = QInputDialog.getText(
+                self,
+                title,
+                confirmation_prompt,
+                QLineEdit.Password,
+            )
+            if not repeated_ok:
+                return None
+            if password == repeated:
+                return password
+            QMessageBox.warning(
+                self,
+                title,
+                "The passwords do not match. Try again.",
+            )
 
     def _close_project(self) -> None:
         """Clear the current project without closing the application."""
@@ -9669,12 +11297,17 @@ class MainWindow(QMainWindow):
 
         self._workspace = Workspace()
         self._project_path = None
+        self._project_password = None
+        self._project_signing_identity = None
+        self._project_signature_fingerprint = None
         self._large_dataset_warning_names.clear()
         self._active_plot_name = None
         self._active_plot_baseline = None
         self._plot_tab_widget.set_workspace(self._workspace)
         self._refresh_dataset_list()
         self._refresh_plot_list()
+        self._refresh_spectral_analysis_list()
+        self._hide_spectral_analysis_tab()
         self._tabs.setCurrentIndex(0)
         self._set_project_window_title()
         self.statusBar().showMessage("Closed project")
@@ -9767,6 +11400,152 @@ class MainWindow(QMainWindow):
             self._plot_list.setCurrentItem(empty_item)
         self._plot_list.blockSignals(False)
         self._update_plot_action_state()
+
+    def _ensure_spectral_analysis_tab(self) -> int:
+        """Create the contextual Raman-results tab only when a result is opened."""
+        index = self._tabs.indexOf(self._spectral_analysis_viewer)
+        if index < 0:
+            index = self._tabs.addTab(self._spectral_analysis_viewer, "Raman Results")
+        return index
+
+    def _show_spectral_analysis(self, analysis: SpectralAnalysisSession) -> None:
+        """Open one persisted spectral result in its contextual central tab."""
+        self._ensure_spectral_analysis_tab()
+        self._spectral_analysis_viewer.set_analysis(analysis)
+        self._tabs.setCurrentWidget(self._spectral_analysis_viewer)
+        analysis_index = self._workspace_nav_tabs.indexOf(self._analysis_nav_page)
+        if analysis_index >= 0 and self._workspace_nav_tabs.isTabVisible(analysis_index):
+            self._workspace_nav_tabs.setCurrentWidget(self._analysis_nav_page)
+
+    def _hide_spectral_analysis_tab(self) -> None:
+        """Remove the contextual result tab when no analysis is being viewed."""
+        index = self._tabs.indexOf(self._spectral_analysis_viewer)
+        if index < 0:
+            self._spectral_analysis_viewer.set_analysis(None)
+            return
+        if self._tabs.currentWidget() is self._spectral_analysis_viewer:
+            self._tabs.setCurrentWidget(self._data_tab_widget)
+        self._tabs.removeTab(index)
+        self._spectral_analysis_viewer.set_analysis(None)
+
+    def _refresh_spectral_analysis_list(self, selected_name: str | None = None) -> None:
+        """Refresh first-class Raman/spectral analysis navigation."""
+        names = self._workspace.spectral_analysis_names()
+        target = selected_name if selected_name in names else None
+        self._analysis_list.blockSignals(True)
+        try:
+            self._analysis_list.clear()
+            self._analysis_list.addItems(names)
+            if target:
+                matches = self._analysis_list.findItems(target, Qt.MatchExactly)
+                if matches:
+                    self._analysis_list.setCurrentItem(matches[0])
+        finally:
+            self._analysis_list.blockSignals(False)
+        analysis_index = self._workspace_nav_tabs.indexOf(self._analysis_nav_page)
+        if analysis_index >= 0:
+            if not names and self._workspace_nav_tabs.currentWidget() is self._analysis_nav_page:
+                self._workspace_nav_tabs.setCurrentWidget(self._dataset_nav_page)
+            self._workspace_nav_tabs.setTabVisible(analysis_index, bool(names))
+
+    def _selected_spectral_analysis_name(self) -> str | None:
+        """Return the analysis selected in the Workspace navigator."""
+        item = self._analysis_list.currentItem()
+        return item.text() if item is not None else None
+
+    def _load_selected_spectral_analysis(self) -> None:
+        """Open the selected analysis in the linked Raman result viewer."""
+        name = self._selected_spectral_analysis_name()
+        if not name:
+            QMessageBox.information(self, "Raman Analysis", "Select an analysis first.")
+            return
+        try:
+            analysis = self._workspace.get_spectral_analysis(name)
+        except KeyError:
+            self._refresh_spectral_analysis_list()
+            return
+        self._show_spectral_analysis(analysis)
+        self.statusBar().showMessage(f"Opened spectral analysis '{name}'")
+
+    def _duplicate_selected_spectral_analysis(self) -> None:
+        """Duplicate the selected analysis without publishing worksheets."""
+        name = self._selected_spectral_analysis_name()
+        if not name:
+            return
+        duplicate = self._workspace.duplicate_spectral_analysis(name)
+        self._refresh_spectral_analysis_list(duplicate.name)
+        self._show_spectral_analysis(duplicate)
+        self._update_dataset_summary()
+
+    def _remove_selected_spectral_analysis(self) -> None:
+        """Remove the selected result session while preserving its source data."""
+        name = self._selected_spectral_analysis_name()
+        if not name:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Remove Analysis",
+            f"Remove analysis '{name}'? Its source worksheet will not be changed.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        current = self._spectral_analysis_viewer.analysis
+        self._workspace.remove_spectral_analysis(name)
+        if current is not None and current.name == name:
+            self._hide_spectral_analysis_tab()
+        self._refresh_spectral_analysis_list()
+        self._update_dataset_summary()
+
+    def _export_spectral_analysis(self, name: str) -> None:
+        """Publish selected internal result tables as ordinary worksheets."""
+        try:
+            analysis = self._workspace.get_spectral_analysis(name)
+        except KeyError:
+            QMessageBox.warning(self, "Export Analysis", "The selected analysis no longer exists.")
+            return
+        dialog = SpectralAnalysisExportDialog(analysis, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selected = dialog.selected_frames()
+        if not selected:
+            QMessageBox.information(self, "Export Analysis", "Select at least one result table.")
+            return
+        frames = {
+            "metrics": (analysis.metrics_frame, "maps"),
+            "curves": (analysis.curves_frame, "curves"),
+            "parameters": (analysis.parameters_frame, "parameters"),
+            "peaks": (analysis.peaks_frame, "peaks"),
+        }
+        created: list[str] = []
+        for key in selected:
+            frame, suffix = frames[key]
+            output = self._workspace.add_dataset(
+                f"{dialog.prefix()}_{suffix}",
+                frame.copy(deep=True),
+                copy_frame=False,
+            )
+            output.worksheet_metadata.import_details.update({
+                "Operation": "Spectral Analysis Export",
+                "Analysis": analysis.name,
+                "Source worksheet": analysis.source_dataset,
+                "Internal result": key,
+            })
+            for coordinate, role in zip(analysis.coordinate_columns, ("x", "y")):
+                if coordinate in output.frame:
+                    output.metadata_for_column(coordinate).role = role
+                    output.metadata_for_column(coordinate).value_type = "numeric"
+            output.sync_column_metadata_attrs()
+            set_dataset_operation_comments(
+                output,
+                f"Exported from spectral analysis {analysis.name}; source={analysis.source_dataset}",
+            )
+            created.append(output.name)
+        self._refresh_dataset_list(created[-1])
+        self.statusBar().showMessage(
+            f"Exported {len(created)} analysis worksheet(s): {', '.join(created)}"
+        )
 
     def _current_plot_name(self) -> str | None:
         """Return the saved plot currently loaded in the editor, if any."""

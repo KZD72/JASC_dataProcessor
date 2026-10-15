@@ -727,6 +727,208 @@ class PlotAppearanceGuiTests(unittest.TestCase):
         self.assertTrue(canvas.axes.texts[0].get_text())
         canvas.deleteLater()
 
+    def test_2d_map_palette_and_mouse_reader_include_z_value(self) -> None:
+        mapped = self.workspace.add_dataset(
+            "mapped",
+            pd.DataFrame({
+                "x": [0.0, 0.0, 1.0, 1.0],
+                "y": [0.0, 1.0, 0.0, 1.0],
+                "z": [0.0, 2.0, 1.0, 3.0],
+            }),
+        )
+        canvas = PlotCanvas()
+        result = canvas.plot_series(
+            self.workspace,
+            [PlotSeries(
+                mapped.name,
+                "x",
+                mapped.name,
+                "y",
+                z_dataset=mapped.name,
+                z_column="z",
+                plot_type="heatmap",
+                color_map="coolwarm",
+            )],
+        )
+
+        self.assertEqual(result.plotted_count, 1)
+        self.assertEqual(canvas.axes.collections[0].get_cmap().name, "coolwarm")
+        coordinate_text = canvas.axes.format_coord(0.5, 0.5)
+        self.assertIn("x=0.5", coordinate_text)
+        self.assertIn("y=0.5", coordinate_text)
+        self.assertIn("z=1.5", coordinate_text)
+        canvas.canvas.draw()
+        label_artist = canvas._colorbar_labels[0][1]
+        label_bounds = label_artist.get_window_extent(canvas.canvas.get_renderer())
+        self.assertEqual(
+            canvas.editable_element_at(
+                (label_bounds.x0 + label_bounds.x1) / 2.0,
+                (label_bounds.y0 + label_bounds.y1) / 2.0,
+            ),
+            ("colorbar_label", 0),
+        )
+        canvas.deleteLater()
+
+    def test_double_click_colour_bar_label_updates_surface_series(self) -> None:
+        mapped = self.workspace.add_dataset(
+            "editable_map",
+            pd.DataFrame({
+                "x": [0.0, 0.0, 1.0, 1.0],
+                "y": [0.0, 1.0, 0.0, 1.0],
+                "z": [0.0, 2.0, 1.0, 3.0],
+            }),
+        )
+        tab = PlotTab(self.workspace, external_options=False)
+        tab.queue_plot_series(
+            [PlotSeries(
+                mapped.name,
+                "x",
+                mapped.name,
+                "y",
+                z_dataset=mapped.name,
+                z_column="z",
+                plot_type="heatmap",
+            )],
+            title="Map",
+            selected_dataset_name=mapped.name,
+        )
+
+        class FakeColourBarDialog:
+            def __init__(self, *_args: object) -> None:
+                pass
+
+            @staticmethod
+            def exec() -> int:
+                return QDialog.Accepted
+
+            @staticmethod
+            def text_value() -> str:
+                return "Intensity (counts)"
+
+        with patch("ui.plot_tab.PlotTextEditDialog", FakeColourBarDialog):
+            tab._edit_rendered_plot_element("colorbar_label", 0)
+
+        self.assertEqual(tab._plot_series[0].colorbar_label, "Intensity (counts)")
+        self.assertEqual(tab._colorbar_label_edit.text(), "Intensity (counts)")
+        self.assertEqual(
+            tab._plot_canvas._colorbar_labels[0][1].get_text(),
+            "Intensity (counts)",
+        )
+        tab.deleteLater()
+
+    def test_spectral_map_samples_nearest_or_interpolated_intensity(self) -> None:
+        spectral = self.workspace.add_dataset(
+            "raman_map",
+            pd.DataFrame({
+                "X": np.repeat([0.0, 0.0, 1.0, 1.0], 2),
+                "Y": np.repeat([0.0, 1.0, 0.0, 1.0], 2),
+                "Raman Shift": np.tile([100.0, 200.0], 4),
+                "Intensity": [0.0, 100.0, 1.0, 101.0, 10.0, 110.0, 11.0, 111.0],
+            }),
+        )
+        canvas = PlotCanvas()
+        common = dict(
+            x_dataset=spectral.name,
+            x_column="X",
+            y_dataset=spectral.name,
+            y_column="Y",
+            z_dataset=spectral.name,
+            z_column="Intensity",
+            spectral_column="Raman Shift",
+            spectral_center=160.0,
+            plot_type="spectra_heatmap",
+            color_map="plasma",
+        )
+
+        nearest = canvas._surface_values(
+            self.workspace,
+            PlotSeries(**common, spectral_sampling="nearest"),
+            x_scale="linear",
+            y_scale="linear",
+        )
+        interpolated = canvas._surface_values(
+            self.workspace,
+            PlotSeries(**common, spectral_sampling="linear"),
+            x_scale="linear",
+            y_scale="linear",
+        )
+
+        np.testing.assert_allclose(np.sort(nearest.z_values), [100.0, 101.0, 110.0, 111.0])
+        np.testing.assert_allclose(np.sort(interpolated.z_values), [60.0, 61.0, 70.0, 71.0])
+        for subtype in ("spectra_heatmap", "spectra_contour", "spectra_contourf"):
+            with self.subTest(subtype=subtype):
+                result = canvas.plot_series(
+                    self.workspace,
+                    [PlotSeries(**{**common, "plot_type": subtype}, spectral_sampling="linear")],
+                )
+                self.assertEqual(result.plotted_count, 1)
+                self.assertFalse(result.skipped_messages)
+                self.assertIn("Intensity=", canvas.axes.format_coord(0.5, 0.5))
+                self.assertEqual(canvas.axes.collections[0].get_cmap().name, "plasma")
+                canvas._handle_canvas_motion(
+                    SimpleNamespace(inaxes=canvas.axes, xdata=0.5, ydata=0.5)
+                )
+                self.assertFalse(canvas.coordinate_readout.isHidden())
+                self.assertIn("x=0.5", canvas.coordinate_readout.text())
+                self.assertIn("y=0.5", canvas.coordinate_readout.text())
+                self.assertIn("Intensity=", canvas.coordinate_readout.text())
+        canvas.deleteLater()
+
+    def test_spectra_plot_family_auto_maps_columns_and_persists_sampling(self) -> None:
+        spectral = self.workspace.add_dataset(
+            "spectral_map",
+            pd.DataFrame({
+                "X": np.repeat([0.0, 0.0, 1.0, 1.0], 2),
+                "Y": np.repeat([0.0, 1.0, 0.0, 1.0], 2),
+                "Raman Shift": np.tile([100.0, 200.0], 4),
+                "Intensity": np.arange(8, dtype=float),
+            }),
+        )
+        tab = PlotTab(self.workspace, external_options=False)
+        tab._set_combo_data(tab._plot_family_combo, "spectra")
+        tab._spectral_dataset_combo.setCurrentText(spectral.name)
+
+        self.assertEqual(tab._x_column_combo.currentText(), "X")
+        self.assertEqual(tab._y_column_combo.currentText(), "Y")
+        self.assertEqual(tab._spectral_column_combo.currentText(), "Raman Shift")
+        self.assertEqual(tab._z_column_combo.currentText(), "Intensity")
+        self.assertFalse(tab._surface_options_panel.isAncestorOf(tab._color_map_combo))
+
+        tab._spectral_center_spin.setValue(150.0)
+        tab._set_combo_data(tab._spectral_sampling_combo, "linear")
+        tab._set_combo_data(tab._color_map_combo, "magma")
+        tab._colorbar_label_edit.setText("Raman intensity (counts)")
+        tab._commit_series_editor()
+
+        self.assertEqual(len(tab._plot_series), 1)
+        series = tab._plot_series[0]
+        self.assertEqual(series.plot_type, "spectra_heatmap")
+        self.assertEqual(series.spectral_column, "Raman Shift")
+        self.assertEqual(series.spectral_center, 150.0)
+        self.assertEqual(series.spectral_sampling, "linear")
+        self.assertEqual(series.color_map, "magma")
+        self.assertEqual(series.colorbar_label, "Raman intensity (counts)")
+        state = tab.current_plot_state()
+        self.assertEqual(state["series"][0]["spectral_sampling"], "linear")
+        self.assertEqual(state["series"][0]["color_map"], "magma")
+        self.assertEqual(state["series"][0]["colorbar_label"], "Raman intensity (counts)")
+        self.assertGreater(len(tab._plot_canvas.axes.collections), 0)
+
+        restored = PlotTab(self.workspace, external_options=False)
+        restored.load_plot_state(state)
+        restored_series = restored._plot_series[0]
+        self.assertEqual(restored_series.spectral_column, "Raman Shift")
+        self.assertEqual(restored_series.spectral_center, 150.0)
+        self.assertEqual(restored_series.spectral_sampling, "linear")
+        self.assertEqual(restored_series.color_map, "magma")
+        self.assertEqual(restored_series.colorbar_label, "Raman intensity (counts)")
+        self.assertEqual(
+            restored._spectral_column_combo.currentText(),
+            "Raman Shift",
+        )
+        restored.deleteLater()
+        tab.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()
