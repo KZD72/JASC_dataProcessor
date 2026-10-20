@@ -502,62 +502,81 @@ class DataFrameTableModel(QAbstractTableModel):
             return []
 
         insert_position = max(0, min(position, len(self._dataset.frame.columns)))
+        target_row_count = max(len(self._dataset.frame), len(block))
+        used_names = {str(column) for column in self._dataset.frame.columns}
+        prepared_columns: list[tuple[str, pd.Series, ColumnMetadata]] = []
+        for column_offset in range(column_count):
+            requested_name = (
+                str(column_names[column_offset]).strip()
+                if column_offset < len(column_names)
+                else ""
+            )
+            base_name = requested_name or f"Pasted Column {column_offset + 1}"
+            column_name = base_name
+            suffix = 2
+            while column_name in used_names:
+                column_name = f"{base_name} ({suffix})"
+                suffix += 1
+            used_names.add(column_name)
+
+            values = (
+                block.iloc[:, column_offset].reindex(range(target_row_count))
+                if column_offset < len(block.columns)
+                else pd.Series(pd.NA, index=range(target_row_count), dtype="object")
+            )
+            metadata_entry = (
+                column_metadata[column_offset]
+                if column_metadata is not None and column_offset < len(column_metadata)
+                else None
+            )
+            if isinstance(metadata_entry, ColumnMetadata):
+                metadata = ColumnMetadata(
+                    role=metadata_entry.role,
+                    unit=metadata_entry.unit,
+                    long_name=metadata_entry.long_name,
+                    comment=metadata_entry.comment,
+                    value_type=metadata_entry.value_type,
+                    display_precision=metadata_entry.display_precision,
+                )
+            else:
+                metadata = ColumnMetadata.from_metadata(metadata_entry)
+            target = pd.Series(pd.NA, index=range(target_row_count), name=column_name)
+            series = self._normalize_pasted_series(target, values, metadata)
+            prepared_columns.append((column_name, series, metadata))
 
         self.capture_undo_state()
         self.beginResetModel()
         try:
-            frame = self._dataset.frame
-            target_row_count = max(len(frame), len(block))
+            frame = self._dataset.frame.copy()
+            formulas = dict(self._dataset.formulas)
+            metadata_by_column = dict(self._dataset.column_metadata)
             if len(frame) < target_row_count:
                 frame = frame.reset_index(drop=True).reindex(range(target_row_count))
 
             inserted_names: list[str] = []
-            for column_offset in range(column_count):
-                requested_name = (
-                    str(column_names[column_offset]).strip()
-                    if column_offset < len(column_names)
-                    else ""
-                )
-                base_name = requested_name or f"Pasted Column {column_offset + 1}"
-                column_name = self._make_unique_column_name(base_name)
-                values = (
-                    block.iloc[:, column_offset].reindex(range(target_row_count))
-                    if column_offset < len(block.columns)
-                    else pd.Series(pd.NA, index=range(target_row_count), dtype="object")
-                )
-                series = self._series_from_pasted_values(values)
+            for column_offset, (column_name, series, metadata) in enumerate(prepared_columns):
+                series = series.copy()
                 series.index = frame.index
                 frame.insert(
                     insert_position + column_offset,
                     column_name,
                     series,
                 )
-                self._dataset.formulas.pop(column_name, None)
-                metadata_entry = (
-                    column_metadata[column_offset]
-                    if column_metadata is not None and column_offset < len(column_metadata)
-                    else None
-                )
-                if isinstance(metadata_entry, ColumnMetadata):
-                    metadata = ColumnMetadata(
-                        role=metadata_entry.role,
-                        unit=metadata_entry.unit,
-                        long_name=metadata_entry.long_name,
-                        comment=metadata_entry.comment,
-                        value_type=metadata_entry.value_type,
-                        display_precision=metadata_entry.display_precision,
-                    )
-                else:
-                    metadata = ColumnMetadata.from_metadata(metadata_entry)
+                formulas.pop(column_name, None)
                 if metadata.is_empty():
-                    self._dataset.column_metadata.pop(column_name, None)
+                    metadata_by_column.pop(column_name, None)
                 else:
-                    self._dataset.column_metadata[column_name] = metadata
+                    metadata_by_column[column_name] = metadata
                 inserted_names.append(column_name)
 
             self._dataset.frame = frame
+            self._dataset.formulas = formulas
+            self._dataset.column_metadata = metadata_by_column
             self._dataset.sync_column_metadata_attrs()
             return inserted_names
+        except Exception:
+            self.discard_latest_undo_state()
+            raise
         finally:
             self.endResetModel()
             self.history_changed.emit()
@@ -626,37 +645,54 @@ class DataFrameTableModel(QAbstractTableModel):
         clean_name = target_column.strip() or "x"
         start_index = max(0, start_row - 1)
         end_index = start_index + count
+        source_frame = self._dataset.frame
+        target_exists = clean_name in source_frame.columns
+        candidate_length = max(len(source_frame), end_index)
+        if target_exists:
+            candidate = (
+                source_frame[clean_name]
+                .reset_index(drop=True)
+                .reindex(range(candidate_length))
+                .astype("object")
+            )
+        else:
+            candidate = pd.Series(float("nan"), index=range(candidate_length), dtype="float64")
+
+        values = pd.Series(range(count), dtype="float64").mul(step).add(start_value)
+        candidate.iloc[start_index:end_index] = values.to_numpy()
+        numeric_candidate = pd.to_numeric(candidate, errors="coerce")
+        meaningful = candidate.notna() & candidate.astype(str).str.strip().ne("")
+        invalid = meaningful & numeric_candidate.isna()
+        if invalid.any():
+            first_invalid_row = int(invalid.to_numpy().nonzero()[0][0]) + 1
+            raise ValueError(
+                f"Column '{clean_name}' contains a non-numeric value at row "
+                f"{first_invalid_row}, outside the numeric fill. Replace that value or "
+                "choose 'Create a new column'."
+            )
+        numeric_candidate = numeric_candidate.astype("float64")
 
         self.capture_undo_state()
         self.beginResetModel()
         try:
-            frame = self._dataset.frame
-            if clean_name in frame.columns:
+            frame = source_frame
+            if target_exists:
                 column_name = clean_name
             else:
                 column_name = self._make_unique_column_name(clean_name)
-                frame[column_name] = pd.Series(
-                    [float("nan")] * len(frame),
-                    index=frame.index,
-                    dtype="float64",
-                )
                 self._dataset.formulas.pop(column_name, None)
                 self._dataset.column_metadata.pop(column_name, None)
 
             if len(frame) < end_index:
                 frame = frame.reset_index(drop=True).reindex(range(end_index))
 
-            if is_numeric_dtype(frame[column_name]):
-                frame[column_name] = pd.to_numeric(
-                    frame[column_name],
-                    errors="coerce",
-                ).astype("float64")
-
-            values = pd.Series(range(count), dtype="float64").mul(step).add(start_value)
-            column_position = list(frame.columns).index(column_name)
-            frame.iloc[start_index:end_index, column_position] = values.to_numpy()
+            frame[column_name] = numeric_candidate.to_numpy()
             self._dataset.frame = frame
             self._dataset.formulas.pop(column_name, None)
+            metadata = self._dataset.metadata_for_column(str(column_name))
+            metadata.value_type = "numeric"
+            if not metadata.role and str(column_name).strip().casefold() in {"x", "time", "t"}:
+                metadata.role = "x"
             set_column_operation_comment(
                 self._dataset,
                 str(column_name),

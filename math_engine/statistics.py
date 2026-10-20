@@ -1117,7 +1117,16 @@ def _numeric_series(series: pd.Series | None, label: str, minimum_points: int) -
     """Coerce a source series to numeric values while preserving row indexes."""
     if series is None:
         raise MathOperationError(f"Choose a data column for {label}.")
+    meaningful = series.notna() & series.astype(str).str.strip().ne("")
     values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    invalid = meaningful & values.isna()
+    if invalid.any():
+        row_position = int(np.flatnonzero(invalid.to_numpy())[0]) + 1
+        example = str(series.loc[invalid].iloc[0])
+        raise MathOperationError(
+            f"{label} contains non-numeric text at row {row_position}, such as '{example}'. "
+            "Statistics do not silently discard text values."
+        )
     if values.notna().sum() < minimum_points:
         raise MathOperationError(f"{label} needs at least {minimum_points} numeric value(s).")
     return values

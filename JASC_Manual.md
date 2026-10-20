@@ -98,6 +98,8 @@ At first launch, JASC opens an empty workspace. Create a sheet, import data, or 
 
 JASC automatically follows the operating-system light or dark palette and reapplies theme-aware table, input, dock, and dialog styling when the Qt palette changes.
 
+Window dimensions are calculated in Qt logical pixels from the active monitor's available work area, so operating-system scaling and taskbar space are respected. Resizing or moving the window between monitors triggers a debounced dock rebalance. Inspector forms wrap long rows and keep their editors usable; Plot actions that do not fit move into the toolbar overflow menu. In a very narrow Plot layout, JASC temporarily collapses the Workspace Navigator to protect the plot canvas. Selecting **View > Show Workspace Navigator** explicitly restores it even at that width.
+
 ### View controls
 
 The **View** menu can independently show or hide:
@@ -322,16 +324,17 @@ Choose **File > New Blank Sheet** (`Ctrl+N`), the toolbar action, or **New Sheet
 
 The sheet is immediately editable in the Data tab. Use Data menu commands to add or insert rows and columns.
 
-### Fill an arithmetic range
+### Fill or create a numeric column
 
-Choose **Data > Fill Range...** to populate a sequence. Configure:
+Choose **Data > Fill Range...** to populate values. The dialog now makes the destination explicit:
 
-- **Target column**: an existing or new column.
+- **Target action**: update a selected existing column, or create a separately named new column.
+- **Fill pattern**: an arithmetic sequence, or one constant value repeated deliberately.
 - **Start row**: one-based worksheet row.
 - **Count**: number of values.
 - **Start value** and **Step**.
 
-JASC grows the worksheet if required and writes `start + offset * step`. It marks the output Numeric, assigns the X role when the name is `x`, `time`, or `t`, removes a stale formula from the overwritten column, and records provenance in the column comment.
+The **Result** line previews the action, target, affected row interval, and generated values before the operation runs. Launching Fill Range from a selected column defaults to updating that column; without a column selection it defaults to creating a new column. JASC rejects a new-column name that already exists instead of silently changing the operation. For a sequence it writes `start + offset * step`; Constant value is the same operation with an explicit zero step. JASC grows the worksheet if required and converts a blank/object-backed destination to a real numeric column, so it can immediately be used by formulas such as `sin(col1)`. Existing text outside the replaced rows is rejected before any write; replace it or create a separate numeric column. JASC marks the output Numeric, assigns the X role when the name is `x`, `time`, or `t`, removes a stale formula from an overwritten column, and records provenance in the column comment.
 
 ### Smart Fill from existing cell values
 
@@ -341,7 +344,7 @@ Use **Data > Smart Fill Selection...**, the **Smart Fill** inspector button, or 
 2. Select one contiguous rectangle containing the seeds and blank destination cells. A Custom List may instead fill a completely blank selection.
 3. Open Smart Fill and select **Auto**, **Numeric**, **Date-Time**, **Category Cycle**, or **Custom List**.
 
-Smart Fill treats every existing value as an anchor and writes only blank selected cells. It handles:
+Smart Fill reports the existing-anchor count for each selected column, treats every existing value as an anchor, and writes only blank selected cells. It handles:
 
 - **Auto** chooses Numeric when every anchor is a finite number, Date-Time for datetime values or recognizable date/time strings, and Category Cycle for other text. A column explicitly marked Text remains categorical in Auto even if its labels look numeric.
 - **Numeric** repeats one seed or applies linear interpolation/extrapolation to two or more anchors using visible worksheet row positions. For example, `1, 2, blank, blank` becomes `1, 2, 3, 4`; `1, blank, 2` becomes `1, 1.5, 2`. Numeric pattern controls can also detect or explicitly select two through eight interleaved linear sequences: `1, 10, 2, 20, blank, blank` becomes `1, 10, 2, 20, 3, 30`.
@@ -488,6 +491,9 @@ The current colour workflow supports continuous empirical colour bars and clicke
 - Double-click a cell, enter a value, and press Enter to commit.
 - Blank input is stored as a missing value.
 - Numeric/Scientific metadata rejects non-numeric text. Text columns preserve entered text.
+- Numerical operations also inspect Auto columns: blanks may be treated as missing where
+  supported, but nonblank text is never silently discarded. The error identifies the
+  first visible row and an example value so the worksheet can be corrected before retrying.
 - Select complete rows or columns using their headers; use Ctrl/Shift selection where supported by the platform.
 
 ### Add, insert, and delete structure
@@ -523,6 +529,10 @@ Right-click selected columns and choose **Copy Column(s)**. In another JASC work
 - Column roles, types, precision, units, long names, and comments.
 
 Pasted columns are inserted before the destination and renamed automatically if their names collide. The metadata-preserving payload is available only while the clipboard still contains the JASC column data; plain-text applications receive the tabular values.
+
+JASC validates every metadata-preserving pasted column before inserting any of them. If
+a Numeric/Scientific column contains nonnumeric text, the whole paste is rejected and the
+worksheet remains unchanged.
 
 ### Undo and redo
 
@@ -586,6 +596,11 @@ Choose one dataset, one column, one condition, and an output sheet. Supported co
 
 Numeric comparison text must parse as a number. The current dialog applies one condition at a time; multi-condition query building and in-place filtering are not implemented.
 
+Mean/median/interpolation cleanup, numeric filters, grouping, and binning reject nonblank
+nonnumeric source cells instead of treating them as missing. **Fill with value** also
+refuses a text replacement for a numeric or safely inferred numeric column; mark an
+intentional category column Text when textual missing-value labels are required.
+
 ### Sort
 
 Select one or more columns, Ascending or Descending, and an output name. Multiple keys are applied in their worksheet order using a stable sort.
@@ -643,8 +658,8 @@ Choose **Data > Apply Formula...** (`Ctrl+Shift+F`) to calculate a new column or
 
 ### Basic workflow
 
-1. Select or type a **Target column**.
-2. Choose what happens if the target exists:
+1. Select or type a **Target column**. When the dialog was launched from one selected existing column, that column is preselected as an update target.
+2. Choose the explicit **Output action**:
    - Create a unique new column.
    - Stop and warn.
    - Overwrite/update the existing column.
@@ -703,8 +718,14 @@ The Help panel inside Apply Formula lists the allowed functions and examples for
 
 - Use `**` for powers. JASC rejects `^` because Python interprets it as bitwise XOR.
 - File access, imports, Python builtins, private attributes, assignments, comprehensions, and arbitrary object access are blocked.
-- A scalar result is repeated across the sheet. A vector result must match the worksheet length.
-- Numeric/Scientific metadata is validated before downstream math operations.
+- A scalar result such as `5` or `np.mean(x)` is deliberately repeated across the destination rows. Reference a column, such as `x * 2`, for row-by-row results. A vector result must match the worksheet length.
+- Wholly numeric object/string columns are promoted before formula evaluation, so imported
+  values such as `"1"`, `"2"` work numerically. Mixed number/text columns cannot silently
+  perform string repetition during numerical expressions; correct the source data or use
+  an explicit text expression.
+- Numeric/Scientific formula targets reject textual results before assignment. Explicit
+  Text targets receive string values, and Numeric/Scientific metadata is also validated
+  before every downstream math operation.
 - Entire-column application stores the expression in project metadata and records it in the target column comment. Selected-cell application records cell-scoped provenance but removes any whole-column formula marker because the complete column no longer represents one formula.
 
 ---

@@ -19,6 +19,7 @@ from PySide6.QtCore import (
     QModelIndex,
     QMimeData,
     QSettings,
+    QTimer,
     Qt,
 )
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPalette, QShortcut
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QTabWidget,
     QTableView,
@@ -96,6 +98,7 @@ from core.operations import (
     ExpressionError,
     ExpressionResult,
     apply_column_expression,
+    coerce_expression_values_for_target,
     referenced_worksheet_names,
 )
 from core.spectral_analysis import SpectralAnalysisSession
@@ -209,13 +212,20 @@ class MainWindow(QMainWindow):
         self._active_plot_name: str | None = None
         self._active_plot_baseline: str | None = None
         self._plot_inspector_enabled = True
+        self._syncing_inspector_visibility = False
+        self._screen_change_connected = False
+        self._responsive_screen = None
+        self._workspace_auto_collapsed = False
+        self._workspace_compact_override = False
+        self._responsive_layout_timer = QTimer(self)
+        self._responsive_layout_timer.setSingleShot(True)
+        self._responsive_layout_timer.setInterval(50)
+        self._responsive_layout_timer.timeout.connect(self._apply_responsive_layout)
 
         self.setWindowTitle("JASC Data Processor")
         icon_path = Path(__file__).parent.parent / "resources" / "logo.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
-        self.resize(1100, 720)
-
         self._dataset_list = QListWidget()
         self._dataset_list.currentTextChanged.connect(self._show_dataset_editor)
         self._dataset_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -256,6 +266,9 @@ class MainWindow(QMainWindow):
         # Plot state moved to PlotTab
 
         self._tabs = QTabWidget()
+        # Hidden pages must not impose their widest size hint on the whole
+        # window; each page owns its scrolling/reflow behaviour instead.
+        self._tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self._tabs.currentChanged.connect(self._sync_inspector_to_current_tab)
         self._data_tab_widget = self._build_dataset_editor()
         self._tabs.addTab(self._data_tab_widget, "Data")
@@ -281,6 +294,7 @@ class MainWindow(QMainWindow):
         self._refresh_plot_list()
         self._refresh_spectral_analysis_list()
         self._apply_visual_style()
+        self._apply_initial_screen_geometry()
         self._sync_inspector_to_current_tab()
         self._update_dataset_summary()
         self.statusBar().showMessage("Ready")
@@ -290,15 +304,141 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
         if not getattr(self, "_applying_visual_style", False) and event.type() in self._palette_change_event_types():
             self._apply_visual_style()
+        self._schedule_responsive_layout()
+
+    def resizeEvent(self, event) -> None:
+        """Coalesce dock recalculation while the top-level window is resized."""
+        super().resizeEvent(event)
+        self._schedule_responsive_layout()
+
+    def showEvent(self, event) -> None:
+        """Finish screen-aware layout once Qt has created the native window."""
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if handle is not None and not self._screen_change_connected:
+            handle.screenChanged.connect(self._handle_screen_changed)
+            self._screen_change_connected = True
+        self._connect_responsive_screen(handle.screen() if handle is not None else self.screen())
+        self._schedule_responsive_layout()
+
+    def _apply_initial_screen_geometry(self) -> None:
+        """Choose a comfortable initial size that remains inside the work area."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1100, 720)
+            return
+        available = screen.availableGeometry()
+        margin = 24
+        maximum_width = max(1, available.width() - (2 * margin))
+        maximum_height = max(1, available.height() - (2 * margin))
+        width = min(maximum_width, max(720, min(1600, round(available.width() * 0.86))))
+        height = min(maximum_height, max(560, min(1000, round(available.height() * 0.86))))
+        self.resize(width, height)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
+
+    def _handle_screen_changed(self, screen) -> None:
+        """Keep a restored window usable when it moves to another monitor or DPI."""
+        self._connect_responsive_screen(screen)
+        if screen is not None and not self.isMaximized() and not self.isFullScreen():
+            available = screen.availableGeometry()
+            margin = 24
+            width = min(self.width(), max(1, available.width() - (2 * margin)))
+            height = min(self.height(), max(1, available.height() - (2 * margin)))
+            self.resize(width, height)
+            x = min(max(self.x(), available.left()), available.right() - width + 1)
+            y = min(max(self.y(), available.top()), available.bottom() - height + 1)
+            self.move(x, y)
+        self._schedule_responsive_layout()
+
+    def _connect_responsive_screen(self, screen) -> None:
+        """Track work-area and logical-DPI changes on the window's current screen."""
+        if screen is None or screen is self._responsive_screen:
+            return
+        previous = self._responsive_screen
+        if previous is not None:
+            try:
+                previous.availableGeometryChanged.disconnect(
+                    self._handle_available_geometry_changed
+                )
+                previous.logicalDotsPerInchChanged.disconnect(
+                    self._handle_logical_dpi_changed
+                )
+            except (RuntimeError, TypeError):
+                pass
+        self._responsive_screen = screen
+        screen.availableGeometryChanged.connect(self._handle_available_geometry_changed)
+        screen.logicalDotsPerInchChanged.connect(self._handle_logical_dpi_changed)
+
+    def _handle_available_geometry_changed(self, _geometry) -> None:
+        """Refit the restored window when taskbars or usable screen space change."""
+        self._handle_screen_changed(self._responsive_screen)
+
+    def _handle_logical_dpi_changed(self, _dpi: float) -> None:
+        """Recalculate logical-pixel allocation after a DPI-scale change."""
+        self._handle_screen_changed(self._responsive_screen)
+
+    def _schedule_responsive_layout(self) -> None:
+        """Debounce expensive dock geometry work during resize and style events."""
+        timer = getattr(self, "_responsive_layout_timer", None)
+        if timer is not None:
+            try:
+                timer.start()
+            except RuntimeError:
+                pass
+
+    def _apply_responsive_layout(self) -> None:
+        """Allocate dock widths proportionally while protecting central workspace."""
+        if not hasattr(self, "_workspace_dock") or not hasattr(self, "_inspector_dock"):
+            return
+
+        window_width = max(1, self.contentsRect().width())
+        compact_plot_layout = self._inspector_dock.isVisible() and window_width < 680
+        if compact_plot_layout:
+            if self._workspace_dock.isVisible() and not self._workspace_compact_override:
+                self._workspace_auto_collapsed = True
+                self._workspace_dock.setVisible(False)
+        else:
+            self._workspace_compact_override = False
+            if self._workspace_auto_collapsed:
+                self._workspace_auto_collapsed = False
+                self._workspace_dock.setVisible(True)
+
+        docks: list[QDockWidget] = []
+        requested: list[int] = []
+        minimums: list[int] = []
+        if self._workspace_dock.isVisible():
+            docks.append(self._workspace_dock)
+            minimums.append(190)
+            requested.append(max(190, min(320, round(window_width * 0.18))))
+        if self._inspector_dock.isVisible():
+            docks.append(self._inspector_dock)
+            minimums.append(260)
+            requested.append(max(260, min(440, round(window_width * 0.28))))
+        if not docks:
+            return
+
+        # Retain at least a useful plotting/table area. When the window is very
+        # narrow, reduce docks down to their deliberately compact minimums.
+        central_reserve = max(300, round(window_width * 0.36))
+        dock_budget = max(sum(minimums), window_width - central_reserve - 18)
+        excess = max(0, sum(requested) - dock_budget)
+        for index in reversed(range(len(requested))):
+            reduction = min(excess, requested[index] - minimums[index])
+            requested[index] -= reduction
+            excess -= reduction
+        self.resizeDocks(docks, requested, Qt.Horizontal)
 
     def _build_workspace_dock(self) -> None:
         """Build the docked workspace navigator for datasets and saved plots."""
         dock = QDockWidget("Workspace", self)
         dock.setObjectName("WorkspaceDock")
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        dock.setMinimumWidth(240)
+        dock.setMinimumWidth(190)
 
         self._workspace_nav_tabs = QTabWidget()
+        self._workspace_nav_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
         dataset_page = QWidget()
         self._dataset_nav_page = dataset_page
@@ -352,9 +492,10 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Inspector", self)
         dock.setObjectName("InspectorDock")
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        dock.setMinimumWidth(360)
+        dock.setMinimumWidth(260)
 
         self._inspector_stack = QStackedWidget()
+        self._inspector_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self._data_inspector = self._build_data_inspector()
         self._plot_inspector = self._plot_tab_widget.options_widget()
         self._inspector_stack.addWidget(self._data_inspector)
@@ -533,9 +674,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _button_row(left_button: QPushButton, right_button: QPushButton) -> QHBoxLayout:
-        """Return a two-button row with stable button widths."""
-        left_button.setMinimumWidth(120)
-        right_button.setMinimumWidth(120)
+        """Return a two-button row that can contract on narrow displays."""
+        left_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        right_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         row = QHBoxLayout()
         row.addWidget(left_button)
         row.addWidget(right_button)
@@ -639,6 +780,7 @@ class MainWindow(QMainWindow):
             default_column=default_column,
             default_start_row=default_start_row,
             default_count=default_count,
+            default_target_mode="existing" if selected_columns else "new",
             parent=self,
         )
         if dialog.exec() != RangeFillDialog.Accepted:
@@ -665,7 +807,11 @@ class MainWindow(QMainWindow):
         self._update_dataset_summary()
         column_index = list(dataset.frame.columns).index(column_name)
         self._select_dataset_range(dialog.start_row() - 1, column_index, dialog.count(), 1)
-        self.statusBar().showMessage(f"Filled {dialog.count()} value(s) in {dataset.name}.{column_name}")
+        action = "Updated" if dialog.target_mode() == "existing" else "Created"
+        pattern = "constant" if dialog.fill_pattern() == "constant" else "sequence"
+        self.statusBar().showMessage(
+            f"{action} {dataset.name}.{column_name} with {dialog.count()} {pattern} value(s)"
+        )
 
     def _smart_fill_dataset_selection(self) -> None:
         """Complete blank cells in one selected rectangle from numeric seed values."""
@@ -693,8 +839,18 @@ class MainWindow(QMainWindow):
             columns_text = f"column {column_names[0]}"
         else:
             columns_text = f"{len(column_names)} columns ({column_names[0]} to {column_names[-1]})"
+        anchor_counts: list[str] = []
+        for column_index, column_name in zip(range(left, right + 1), column_names):
+            selected_values = dataset.frame.iloc[top : bottom + 1, column_index]
+            nonblank_count = sum(
+                not pd.isna(value) and str(value).strip() != "" for value in selected_values
+            )
+            anchor_counts.append(f"{column_name}: {nonblank_count}")
         dialog = SmartFillDialog(
-            f"Rows {top + 1}-{bottom + 1}, {columns_text}",
+            (
+                f"Rows {top + 1}-{bottom + 1}, {columns_text}. "
+                f"Existing anchors ({', '.join(anchor_counts)})."
+            ),
             parent=self,
         )
         if dialog.exec() != SmartFillDialog.Accepted:
@@ -1478,6 +1634,9 @@ class MainWindow(QMainWindow):
         self._workspace_dock.visibilityChanged.connect(
             lambda visible: self._sync_checkable_action(self._show_sidebar_action, visible)
         )
+        self._workspace_dock.visibilityChanged.connect(
+            lambda _visible: self._schedule_responsive_layout()
+        )
         self._inspector_dock.visibilityChanged.connect(
             self._handle_inspector_dock_visibility_changed
         )
@@ -1508,6 +1667,7 @@ class MainWindow(QMainWindow):
                 self.setStyleSheet("")
         finally:
             self._applying_visual_style = False
+        self._schedule_responsive_layout()
 
     @staticmethod
     def _is_dark_palette(palette: QPalette) -> bool:
@@ -3473,7 +3633,12 @@ class MainWindow(QMainWindow):
             worksheet_frames=worksheet_frames,
         )
         if target_frame is not dataset.frame:
-            dataset.frame[result.target_column] = target_frame[result.target_column].reindex(dataset.frame.index)
+            values = coerce_expression_values_for_target(
+                dataset.frame,
+                result.target_column,
+                target_frame[result.target_column].reindex(dataset.frame.index),
+            )
+            dataset.frame[result.target_column] = values
         if row_positions is None:
             dataset.formulas[result.target_column] = expression.strip()
         else:
@@ -3895,7 +4060,12 @@ class MainWindow(QMainWindow):
         if worker_result.values is None:
             raise ExpressionError("Worker did not return formula values.")
 
-        dataset.frame[worker_result.target_column] = worker_result.values.reindex(dataset.frame.index)
+        values = coerce_expression_values_for_target(
+            dataset.frame,
+            worker_result.target_column,
+            worker_result.values.reindex(dataset.frame.index),
+        )
+        dataset.frame[worker_result.target_column] = values
         dataset.formulas[worker_result.target_column] = expression.strip()
         set_column_operation_comment(
             dataset,
@@ -8183,6 +8353,13 @@ class MainWindow(QMainWindow):
                 f"Required columns '{x_column}' and '{y_column}' were not found.",
             )
             return
+        try:
+            for column in dict.fromkeys(("X", "Y", x_column, y_column)):
+                numeric = pd.to_numeric(frame[column], errors="coerce")
+                validate_numeric_column_metadata(frame, column, numeric)
+        except MathOperationError as exc:
+            QMessageBox.warning(self, "Baseline Correction Map", str(exc))
+            return
         jobs = list(frame.groupby(["X", "Y"], sort=False, dropna=False))
         if not jobs:
             QMessageBox.warning(self, "Baseline Correction Map", "No X/Y pixel groups were found.")
@@ -8291,6 +8468,13 @@ class MainWindow(QMainWindow):
                     "Map fitting requires normalized X and Y coordinate columns.",
                 )
                 return
+            try:
+                for column in ("X", "Y"):
+                    numeric = pd.to_numeric(frame[column], errors="coerce")
+                    validate_numeric_column_metadata(frame, column, numeric)
+            except MathOperationError as exc:
+                QMessageBox.warning(self, "Peak Analysis Map", str(exc))
+                return
             for coordinates, group in frame.groupby(["X", "Y"], sort=False, dropna=False):
                 x_coordinate, y_coordinate = coordinates
                 label = f"{preview_dataset.name} [X={x_coordinate}, Y={y_coordinate}]"
@@ -8342,8 +8526,12 @@ class MainWindow(QMainWindow):
                     raise MathOperationError(
                         f"Required columns '{x_column}' and '{y_column}' were not found."
                     )
-                x_values = pd.to_numeric(frame[x_column], errors="coerce").to_numpy(dtype=float)
-                y_values = pd.to_numeric(frame[y_column], errors="coerce").to_numpy(dtype=float)
+                x_numeric = pd.to_numeric(frame[x_column], errors="coerce")
+                y_numeric = pd.to_numeric(frame[y_column], errors="coerce")
+                validate_numeric_column_metadata(frame, x_column, x_numeric)
+                validate_numeric_column_metadata(frame, y_column, y_numeric)
+                x_values = x_numeric.to_numpy(dtype=float)
+                y_values = y_numeric.to_numpy(dtype=float)
                 if analysis_range is not None:
                     lower, upper = analysis_range
                     outside = (x_values < lower) | (x_values > upper)
@@ -10523,23 +10711,35 @@ class MainWindow(QMainWindow):
 
     def _set_sidebar_visible(self, visible: bool) -> None:
         """Show or hide the workspace navigator dock."""
+        compact_plot_layout = (
+            self._inspector_dock.isVisible() and self.contentsRect().width() < 680
+        )
+        self._workspace_compact_override = bool(visible and compact_plot_layout)
+        if not visible:
+            self._workspace_auto_collapsed = False
         self._workspace_dock.setVisible(visible)
         if hasattr(self, "_show_sidebar_action"):
             self._sync_checkable_action(self._show_sidebar_action, visible)
+        self._schedule_responsive_layout()
 
     def _sync_inspector_to_current_tab(self, _index: int | None = None) -> None:
         """Show plot controls on Plot and maximize worksheet space on Data."""
         if not hasattr(self, "_inspector_stack"):
             return
 
-        if self._tabs.currentWidget() is self._plot_tab_widget:
-            self._inspector_stack.setCurrentWidget(self._plot_inspector)
-            self._inspector_dock.setWindowTitle("Plot Inspector")
-            self._plot_tab_widget.set_plot_options_visible(self._plot_inspector_enabled)
-            self._inspector_dock.setVisible(self._plot_inspector_enabled)
-        else:
-            self._inspector_dock.setVisible(False)
+        self._syncing_inspector_visibility = True
+        try:
+            if self._tabs.currentWidget() is self._plot_tab_widget:
+                self._inspector_stack.setCurrentWidget(self._plot_inspector)
+                self._inspector_dock.setWindowTitle("Plot Inspector")
+                self._plot_tab_widget.set_plot_options_visible(self._plot_inspector_enabled)
+                self._inspector_dock.setVisible(self._plot_inspector_enabled)
+            else:
+                self._inspector_dock.setVisible(False)
+        finally:
+            self._syncing_inspector_visibility = False
         self._sync_plot_options_action(self._plot_inspector_enabled)
+        self._schedule_responsive_layout()
 
     def _toggle_workspace_section(self) -> None:
         """Toggle visibility of the workspace dataset section."""
@@ -10575,25 +10775,46 @@ class MainWindow(QMainWindow):
     def _set_plot_options_visible_from_action(self, visible: bool) -> None:
         """Apply the View menu inspector visibility state."""
         self._plot_inspector_enabled = visible
-        self._plot_tab_widget.set_plot_options_visible(visible)
-        self._inspector_dock.setVisible(
-            visible and self._tabs.currentWidget() is self._plot_tab_widget
-        )
+        self._syncing_inspector_visibility = True
+        try:
+            self._plot_tab_widget.set_plot_options_visible(visible)
+            self._inspector_dock.setVisible(
+                visible and self._tabs.currentWidget() is self._plot_tab_widget
+            )
+        finally:
+            self._syncing_inspector_visibility = False
+        self._sync_plot_options_action(visible)
+        self._schedule_responsive_layout()
 
     def _handle_plot_options_visibility_changed(self, visible: bool) -> None:
         """Apply plot-tab option visibility to the external inspector dock."""
+        if self._syncing_inspector_visibility:
+            return
         self._plot_inspector_enabled = visible
-        if self._tabs.currentWidget() is self._plot_tab_widget:
-            self._inspector_dock.setVisible(visible)
+        self._syncing_inspector_visibility = True
+        try:
+            if self._tabs.currentWidget() is self._plot_tab_widget:
+                self._inspector_dock.setVisible(visible)
+        finally:
+            self._syncing_inspector_visibility = False
         self._sync_plot_options_action(visible)
+        self._schedule_responsive_layout()
 
     def _handle_inspector_dock_visibility_changed(self, visible: bool) -> None:
         """Treat manual dock closing as a plot-inspector preference only on Plot."""
-        if self._tabs.currentWidget() is not self._plot_tab_widget:
+        if (
+            self._syncing_inspector_visibility
+            or self._tabs.currentWidget() is not self._plot_tab_widget
+        ):
             return
         self._plot_inspector_enabled = visible
-        self._plot_tab_widget.set_plot_options_visible(visible)
+        self._syncing_inspector_visibility = True
+        try:
+            self._plot_tab_widget.set_plot_options_visible(visible)
+        finally:
+            self._syncing_inspector_visibility = False
         self._sync_plot_options_action(visible)
+        self._schedule_responsive_layout()
 
     def _sync_plot_options_action(self, visible: bool) -> None:
         """Synchronize the View menu with inspector visibility."""
@@ -10603,9 +10824,14 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _sync_checkable_action(action: QAction, checked: bool) -> None:
         """Set a checkable action without emitting its toggled signal."""
-        action.blockSignals(True)
-        action.setChecked(checked)
-        action.blockSignals(False)
+        try:
+            action.blockSignals(True)
+            action.setChecked(checked)
+            action.blockSignals(False)
+        except RuntimeError:
+            # Dock visibility can change late in QObject teardown, after Qt has
+            # already destroyed the corresponding QAction wrapper.
+            return
 
     def _reset_view_to_default(self) -> None:
         """Restore default workspace and inspector dock visibility/layout."""
@@ -10662,12 +10888,11 @@ class MainWindow(QMainWindow):
             metadata = dataset.column_metadata.get(column_name)
             if metadata is not None and metadata.value_type == "text":
                 continue
-            values = pd.to_numeric(dataset.frame[column], errors="coerce")
-            if metadata is not None and metadata.value_type in COLUMN_NUMERIC_TYPES:
-                source_values = dataset.frame[column]
-                meaningful = source_values.notna() & (source_values.astype(str).str.strip() != "")
-                if (meaningful & values.isna()).any():
-                    continue
+            source_values = dataset.frame[column]
+            values = pd.to_numeric(source_values, errors="coerce")
+            meaningful = source_values.notna() & (source_values.astype(str).str.strip() != "")
+            if (meaningful & values.isna()).any():
+                continue
             values = values[
                 values.notna()
                 & (values != float("inf"))

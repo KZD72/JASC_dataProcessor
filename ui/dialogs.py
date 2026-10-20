@@ -83,7 +83,12 @@ from core.workspace import (
     normalize_display_precision,
 )
 from math_engine.curve_fitting import FIT_METHODS
-from math_engine.calculus import DERIVATIVE_METHODS, INTEGRATION_METHODS, WINDOW_METHODS
+from math_engine.calculus import (
+    DERIVATIVE_METHODS,
+    INTEGRATION_METHODS,
+    WINDOW_METHODS,
+    validate_numeric_column_metadata,
+)
 from math_engine.interpolation import (
     FILL_POLICIES,
     INTERPOLATION_METHODS,
@@ -5682,7 +5687,8 @@ class ColumnExpressionDialog(QDialog):
         self._worksheet_columns = worksheet_columns or {
             current_dataset_name: list(column_names)
         }
-        self._selected_cell_columns = set(selected_cell_columns or ())
+        explicitly_selected_columns = set(selected_cell_columns or ())
+        self._selected_cell_columns = set(explicitly_selected_columns)
         if selected_rows_available and not self._selected_cell_columns:
             self._selected_cell_columns.update(column_names)
         self._last_loaded_formula = ""
@@ -5700,10 +5706,21 @@ class ColumnExpressionDialog(QDialog):
             self._target_combo.setCurrentText("Result")
 
         self._target_conflict_combo = QComboBox()
-        self._target_conflict_combo.addItem("Create unique new column if target exists", "unique")
-        self._target_conflict_combo.addItem("Stop and warn if target exists", "stop")
-        self._target_conflict_combo.addItem("Overwrite/update existing column", "overwrite")
-        self._column_scope_conflict_policy = "unique"
+        self._target_conflict_combo.addItem("Create a new uniquely named column", "unique")
+        self._target_conflict_combo.addItem("Stop if this column already exists", "stop")
+        self._target_conflict_combo.addItem("Update/overwrite this existing column", "overwrite")
+        preferred_policy = (
+            "overwrite"
+            if default_target in explicitly_selected_columns and default_target in column_names
+            else "unique"
+        )
+        preferred_policy_index = self._target_conflict_combo.findData(preferred_policy)
+        self._target_conflict_combo.setCurrentIndex(max(0, preferred_policy_index))
+        self._column_scope_conflict_policy = preferred_policy
+
+        self._target_action_hint = QLabel()
+        self._target_action_hint.setWordWrap(True)
+        self._target_action_hint.setTextFormat(Qt.RichText)
 
         cpu_count = os.cpu_count() or 1
         self._batch_execution_combo = QComboBox()
@@ -5770,7 +5787,8 @@ class ColumnExpressionDialog(QDialog):
         self._batch_hint = QLabel(
             "Selected-cell scope only updates selected cells in the target column and "
             "only applies to the current sheet. Choose entire-column scope for batches. "
-            "Existing target columns are protected by the output policy above. "
+            "A scalar formula such as <code>5</code> or <code>np.mean(x)</code> intentionally "
+            "writes the same value to every destination row; reference a column for row-by-row results. "
             "Position matching treats source columns as col1, col2, ... on every target sheet."
         )
         self._batch_hint.setWordWrap(True)
@@ -5778,7 +5796,8 @@ class ColumnExpressionDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Target column", self._target_combo)
-        form.addRow("If target exists", self._target_conflict_combo)
+        form.addRow("Output action", self._target_conflict_combo)
+        form.addRow("", self._target_action_hint)
         form.addRow("Batch execution", self._batch_execution_combo)
         form.addRow("Max workers", self._batch_workers_spin)
         form.addRow("Column matching", self._column_binding_combo)
@@ -5820,6 +5839,9 @@ class ColumnExpressionDialog(QDialog):
 
         self._target_combo.currentTextChanged.connect(self._load_formula_for_target)
         self._target_combo.currentTextChanged.connect(self._update_operation_scope_state)
+        self._target_combo.currentTextChanged.connect(self._update_target_action_hint)
+        self._target_conflict_combo.currentIndexChanged.connect(self._remember_column_scope_policy)
+        self._target_conflict_combo.currentIndexChanged.connect(self._update_target_action_hint)
         self._reference_worksheet_combo.currentTextChanged.connect(
             self._populate_column_references
         )
@@ -5829,11 +5851,13 @@ class ColumnExpressionDialog(QDialog):
         self._operation_scope_combo.currentIndexChanged.connect(
             self._update_dataset_selection_state
         )
+        self._operation_scope_combo.currentIndexChanged.connect(self._update_target_action_hint)
         self._populate_column_references(self._reference_worksheet_combo.currentText())
         self._load_formula_for_target(self._target_combo.currentText(), force=True)
         self._update_operation_scope_state()
         self._update_dataset_selection_state()
         self._update_column_insert_buttons()
+        self._update_target_action_hint()
 
     def target_column(self) -> str:
         """Return the selected or typed target column."""
@@ -5976,6 +6000,36 @@ class ColumnExpressionDialog(QDialog):
         for row in range(self._dataset_list.count()):
             item = self._dataset_list.item(row)
             item.setSelected(item.text() == self._current_dataset_name)
+
+    def _remember_column_scope_policy(self) -> None:
+        """Remember the user's whole-column output action across scope changes."""
+        if self.operation_scope() != "cells":
+            self._column_scope_conflict_policy = self.target_conflict_policy()
+
+    def _update_target_action_hint(self) -> None:
+        """Explain whether acceptance will create a column or modify existing data."""
+        target = self.target_column()
+        target_exists = target in self._worksheet_columns.get(self._current_dataset_name, [])
+        if self.operation_scope() == "cells":
+            text = (
+                f"Only the selected cells in existing column <b>{escape(target)}</b> "
+                "will be updated."
+            )
+        elif target_exists and self.target_conflict_policy() == "overwrite":
+            text = (
+                f"Existing column <b>{escape(target)}</b> will be overwritten for every "
+                "destination row."
+            )
+        elif target_exists and self.target_conflict_policy() == "unique":
+            text = (
+                f"<b>{escape(target)}</b> already exists, so a separate uniquely named "
+                "column will be created."
+            )
+        elif target_exists:
+            text = f"The operation will stop because <b>{escape(target)}</b> already exists."
+        else:
+            text = f"A new column named <b>{escape(target or '(unnamed)')}</b> will be created."
+        self._target_action_hint.setText(text)
 
     def _update_operation_scope_state(self) -> None:
         """Enable selected-cell scope only for a selected existing target column."""
@@ -6459,9 +6513,19 @@ class SmoothingDialog(QDialog):
             self._preview_canvas.draw_idle()
             return
         try:
+            x_source = self._preview_frame[self.x_column()]
+            y_source = self._preview_frame[columns[0]]
+            x_numeric = pd.to_numeric(x_source, errors="coerce")
+            y_numeric = pd.to_numeric(y_source, errors="coerce")
+            validate_numeric_column_metadata(
+                self._preview_frame, self.x_column(), x_numeric
+            )
+            validate_numeric_column_metadata(
+                self._preview_frame, columns[0], y_numeric
+            )
             values = pd.DataFrame({
-                "x": pd.to_numeric(self._preview_frame[self.x_column()], errors="coerce"),
-                "y": pd.to_numeric(self._preview_frame[columns[0]], errors="coerce"),
+                "x": x_numeric,
+                "y": y_numeric,
             }).replace([np.inf, -np.inf], np.nan).dropna()
             if len(values) > 4000:
                 stride = int(math.ceil(len(values) / 4000))

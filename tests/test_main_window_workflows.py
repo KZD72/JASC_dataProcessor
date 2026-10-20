@@ -64,11 +64,14 @@ class MainWindowWorkflowTests(unittest.TestCase):
             plot_tab._histogram_bins_spin,
             plot_tab._line_width_spin,
         )
-        self._spin_test_styles = []
         for spin in spin_boxes:
             with self.subTest(spin_type=type(spin).__name__):
                 windows_style = QStyleFactory.create("windows11")
-                self._spin_test_styles.append(windows_style)
+                # QWidget.setStyle() does not transfer ownership. Parent the
+                # temporary native style to the target widget so older PySide6
+                # releases do not destroy it before/after the widget at process
+                # shutdown and trigger a Windows access violation.
+                windows_style.setParent(spin)
                 spin.setStyle(windows_style)
                 spin.ensurePolished()
                 self.app.processEvents()
@@ -323,6 +326,82 @@ class MainWindowWorkflowTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(self.window._inspector_dock.isHidden())
         self.assertTrue(self.window._plot_inspector_enabled)
+
+    def test_plot_inspector_remains_usable_at_narrow_window_width(self) -> None:
+        """Regression: dock relayout must not collapse spin-box editors to zero."""
+        self.window._tabs.setCurrentWidget(self.window._plot_tab_widget)
+        self.window.resize(720, 640)
+        self.window._apply_responsive_layout()
+        self.window._plot_tab_widget._options_tabs.setCurrentIndex(1)
+        self.app.processEvents()
+
+        plot_tab = self.window._plot_tab_widget
+        typography_controls = (
+            plot_tab._x_label_size_spin,
+            plot_tab._x_tick_size_spin,
+            plot_tab._y_label_size_spin,
+            plot_tab._y_tick_size_spin,
+            plot_tab._right_y_label_size_spin,
+            plot_tab._right_y_tick_size_spin,
+        )
+        self.assertLessEqual(self.window.width(), 720)
+        self.assertGreaterEqual(self.window.centralWidget().width(), 240)
+        for spin in typography_controls:
+            with self.subTest(control=spin.objectName() or type(spin).__name__):
+                self.assertGreaterEqual(spin.width(), 90)
+                self.assertGreater(spin.lineEdit().width(), 0)
+
+    def test_responsive_docks_recalculate_after_window_resize(self) -> None:
+        """Keep docks proportional and wholly inside repeated size changes."""
+        self.window._tabs.setCurrentWidget(self.window._plot_tab_widget)
+        for width in (760, 1200, 820):
+            with self.subTest(width=width):
+                self.window.resize(width, 700)
+                self.window._apply_responsive_layout()
+                self.app.processEvents()
+                self.assertLessEqual(
+                    self.window._workspace_dock.width()
+                    + self.window._inspector_dock.width()
+                    + self.window.centralWidget().width(),
+                    self.window.width(),
+                )
+                self.assertGreaterEqual(self.window.centralWidget().width(), 240)
+                self.assertGreaterEqual(self.window._inspector_dock.width(), 260)
+
+    def test_compact_plot_layout_collapses_workspace_but_allows_override(self) -> None:
+        """Reserve useful canvas width on very small logical screens."""
+        self.window._tabs.setCurrentWidget(self.window._plot_tab_widget)
+        self.window.resize(640, 600)
+        self.window._apply_responsive_layout()
+        self.app.processEvents()
+        self.assertFalse(self.window._workspace_dock.isVisible())
+        self.assertGreaterEqual(self.window.centralWidget().width(), 300)
+
+        self.window._set_sidebar_visible(True)
+        self.window._apply_responsive_layout()
+        self.app.processEvents()
+        self.assertTrue(self.window._workspace_dock.isVisible())
+
+    def test_initial_geometry_and_plot_toolbar_fit_available_screen(self) -> None:
+        """Use logical screen geometry and an overflow-capable action bar."""
+        available = self.window.screen().availableGeometry()
+        self.assertLessEqual(self.window.width(), available.width())
+        self.assertLessEqual(self.window.height(), available.height())
+        self.assertLess(
+            self.window._plot_tab_widget._plot_actions_toolbar.minimumSizeHint().width(),
+            250,
+        )
+
+    def test_plot_option_visibility_updates_are_idempotent(self) -> None:
+        """Repeated dock synchronization must not create a visibility loop."""
+        plot_tab = self.window._plot_tab_widget
+        emissions: list[bool] = []
+        plot_tab.options_visibility_changed.connect(emissions.append)
+        plot_tab.set_plot_options_visible(True)
+        plot_tab.set_plot_options_visible(True)
+        plot_tab.set_plot_options_visible(False)
+        plot_tab.set_plot_options_visible(False)
+        self.assertEqual(emissions, [False])
 
 
 if __name__ == "__main__":

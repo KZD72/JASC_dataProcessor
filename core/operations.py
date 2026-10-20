@@ -21,6 +21,10 @@ class ExpressionError(ValueError):
     """Raised when a user expression cannot be evaluated safely."""
 
 
+_COLUMN_METADATA_ATTR = "jasc_column_metadata"
+_NUMERIC_VALUE_TYPES = {"numeric", "scientific"}
+
+
 _NUMPY_FUNCTION_NAMES = {
     "abs",
     "absolute",
@@ -322,6 +326,12 @@ def apply_column_expression(
         worksheet_frames=worksheet_frames,
     )
     target_index = _target_index(frame, row_positions)
+    values = coerce_expression_values_for_target(
+        frame,
+        clean_target,
+        values,
+        target_index=target_index,
+    )
 
     if clean_target not in frame.columns:
         frame[clean_target] = pd.NA
@@ -332,6 +342,38 @@ def apply_column_expression(
         frame.loc[target_index, clean_target] = values.loc[target_index].to_numpy()
 
     return ExpressionResult(target_column=clean_target, updated_rows=len(target_index))
+
+
+def coerce_expression_values_for_target(
+    frame: pd.DataFrame,
+    target_column: str,
+    values: pd.Series,
+    target_index: pd.Index | None = None,
+) -> pd.Series:
+    """Honor an existing target column's explicit Numeric or Text metadata."""
+    value_type = _column_value_type(frame, target_column)
+    if value_type not in {*_NUMERIC_VALUE_TYPES, "text"}:
+        return values
+
+    selected = values if target_index is None else values.loc[target_index]
+    if value_type == "text":
+        result = values.astype("object").copy()
+        meaningful = result.notna()
+        result.loc[meaningful] = result.loc[meaningful].map(str)
+        return result
+
+    meaningful = selected.notna() & selected.astype(str).str.strip().ne("")
+    numeric_selected = pd.to_numeric(selected.where(meaningful), errors="coerce")
+    invalid = meaningful & numeric_selected.isna()
+    if invalid.any():
+        example = str(selected.loc[invalid].iloc[0])
+        row_label = selected.loc[invalid].index[0]
+        raise ExpressionError(
+            f"Target column '{target_column}' is marked {value_type.title()}, but the "
+            f"formula produced non-numeric text at row {row_label!s}, such as '{example}'. "
+            "Choose a Text/Auto target or return numeric values."
+        )
+    return pd.to_numeric(values, errors="coerce")
 
 
 def evaluate_expression(
@@ -366,9 +408,17 @@ def evaluate_expression(
     try:
         result = eval(compile(tree, "<column expression>", "eval"), {"__builtins__": {}}, environment)
     except Exception as exc:
+        detail = str(exc)
+        if "loop of ufunc" in detail and "callable" in detail:
+            raise ExpressionError(
+                "A numerical function received a text/object column instead of numeric values. "
+                "Convert the referenced column to Numeric/Scientific or refill it with Fill Range."
+            ) from exc
         raise ExpressionError(f"Could not evaluate expression: {exc}") from exc
 
-    return _coerce_result_to_series(result, frame.index)
+    result_series = _coerce_result_to_series(result, frame.index)
+    _validate_expression_result_type(tree, result_series)
+    return result_series
 
 
 def _build_environment(
@@ -407,12 +457,12 @@ def _build_environment(
 
     for column_name in frame.columns:
         if _is_safe_identifier(str(column_name)) and str(column_name) not in environment:
-            environment[str(column_name)] = frame[column_name]
+            environment[str(column_name)] = _formula_column_values(frame, str(column_name))
 
     for index, column_name in enumerate(frame.columns, start=1):
         alias = f"col{index}"
         if alias not in environment or str(column_name) == alias:
-            environment[alias] = frame[column_name]
+            environment[alias] = _formula_column_values(frame, str(column_name))
 
     return environment
 
@@ -493,7 +543,7 @@ def _column_by_name(frame: pd.DataFrame, name: object) -> pd.Series:
     column_name = str(name)
     if column_name not in frame.columns:
         raise ExpressionError(f"Column '{column_name}' does not exist.")
-    return frame[column_name]
+    return _formula_column_values(frame, column_name)
 
 
 def _worksheet_column_by_name(
@@ -515,10 +565,103 @@ def _worksheet_column_by_name(
             f"'{clean_worksheet_name}'."
         )
 
-    positional_values = source_frame[clean_column_name].reset_index(drop=True)
+    positional_values = _formula_column_values(
+        source_frame,
+        clean_column_name,
+    ).reset_index(drop=True)
     aligned_values = positional_values.reindex(pd.RangeIndex(len(target_frame)))
     aligned_values.index = target_frame.index
     return aligned_values
+
+
+def _formula_column_values(frame: pd.DataFrame, column_name: str) -> pd.Series:
+    """Promote wholly numeric object/string columns for safe formula arithmetic."""
+    source = frame[column_name]
+    if _column_value_type(frame, column_name) == "text":
+        text = source.astype("string")
+        return text.where(text.notna(), pd.NA).astype("object")
+    if pd.api.types.is_numeric_dtype(source.dtype):
+        return source
+
+    meaningful = source.notna() & source.astype(str).str.strip().ne("")
+    if not meaningful.any():
+        return source
+    numeric = pd.to_numeric(source.where(meaningful), errors="coerce")
+    if numeric.loc[meaningful].notna().all():
+        return numeric
+    return source
+
+
+def _validate_expression_result_type(tree: ast.Expression, values: pd.Series) -> None:
+    """Reject accidental string arithmetic while retaining deliberate text formulas."""
+    meaningful = values.notna() & values.astype(str).str.strip().ne("")
+    if not meaningful.any():
+        return
+    numeric = pd.to_numeric(values.where(meaningful), errors="coerce")
+    if numeric.loc[meaningful].notna().all():
+        return
+
+    risky_operators = (
+        ast.Mult,
+        ast.Sub,
+        ast.Div,
+        ast.FloorDiv,
+        ast.Mod,
+        ast.Pow,
+        ast.USub,
+        ast.UAdd,
+    )
+    has_numeric_operation = any(
+        isinstance(node, risky_operators)
+        or (
+            isinstance(node, ast.Call)
+            and not (isinstance(node.func, ast.Name) and node.func.id in {"col", "sheet"})
+        )
+        for node in ast.walk(tree)
+    )
+    if not has_numeric_operation or _has_deliberate_text_literal(tree):
+        return
+
+    invalid = meaningful & numeric.isna()
+    row_position = int(np.flatnonzero(invalid.to_numpy())[0]) + 1
+    example = str(values.loc[invalid].iloc[0])
+    raise ExpressionError(
+        f"The formula produced text at row {row_position}, such as '{example}', during "
+        "a numerical operation. This commonly means a source column contains mixed "
+        "numbers and text. Correct the source values or mark/use a deliberate Text formula."
+    )
+
+
+def _has_deliberate_text_literal(tree: ast.Expression) -> bool:
+    """Return whether an expression contains text other than accessor names."""
+    accessor_literals: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in {"col", "sheet"}:
+            continue
+        accessor_literals.update(
+            id(argument)
+            for argument in node.args
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+        )
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in accessor_literals
+        for node in ast.walk(tree)
+    )
+
+
+def _column_value_type(frame: pd.DataFrame, column_name: str) -> str:
+    """Return the lightweight value-type key mirrored in DataFrame attrs."""
+    metadata_by_column = frame.attrs.get(_COLUMN_METADATA_ATTR, {})
+    if not isinstance(metadata_by_column, dict):
+        return ""
+    metadata = metadata_by_column.get(str(column_name), {})
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("value_type", "") or "").strip().lower()
 
 
 def _target_index(frame: pd.DataFrame, row_positions: Sequence[int] | None) -> pd.Index:

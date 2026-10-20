@@ -1136,23 +1136,22 @@ class PlotCanvas(QWidget):
         column: str,
         role_label: str,
     ) -> None:
-        """Raise when explicit column metadata conflicts with numeric plot usage."""
+        """Raise when metadata or cell content conflicts with numeric plot usage."""
         metadata = dataframe_column_metadata(frame, column)
         if metadata.value_type == "text":
             raise ValueError(
                 f"{role_label} column '{column}' is marked Text in metadata; "
                 "choose a Numeric/Scientific column or update its metadata."
             )
-        if metadata.value_type not in COLUMN_NUMERIC_TYPES:
-            return
 
         meaningful = source_values.notna() & (source_values.astype(str).str.strip() != "")
         invalid = meaningful & numeric_values.isna()
         if invalid.any():
             example = str(source_values[invalid].iloc[0])
+            row_position = int(np.flatnonzero(invalid.to_numpy())[0]) + 1
             raise ValueError(
-                f"{role_label} column '{column}' is marked numeric but contains "
-                f"non-numeric text such as '{example}'."
+                f"{role_label} column '{column}' contains non-numeric text at row "
+                f"{row_position}, such as '{example}'. Plotting will not silently omit it."
             )
 
     def _surface_values(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from html import escape
 from io import StringIO
 
 import pandas as pd
@@ -410,7 +411,7 @@ class DataTableWidget(QWidget):
 
 
 class RangeFillDialog(QDialog):
-    """Dialog for filling a column with an arithmetic sequence."""
+    """Dialog for explicitly creating or updating a numeric column fill."""
 
     def __init__(
         self,
@@ -418,16 +419,37 @@ class RangeFillDialog(QDialog):
         default_column: str,
         default_start_row: int,
         default_count: int,
+        default_target_mode: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         """Create a range-fill dialog with sensible defaults."""
         super().__init__(parent)
         self.setWindowTitle("Fill Range")
+        self.setMinimumWidth(500)
+        self._column_names = list(column_names)
 
-        self._target_column = QComboBox()
-        self._target_column.setEditable(True)
-        self._target_column.addItems(column_names)
-        self._target_column.setCurrentText(default_column or "x")
+        self._target_mode = QComboBox()
+        self._target_mode.addItem("Update an existing column", "existing")
+        self._target_mode.addItem("Create a new column", "new")
+
+        self._existing_target = QComboBox()
+        self._existing_target.addItems(column_names)
+        if default_column in column_names:
+            self._existing_target.setCurrentText(default_column)
+
+        self._new_target = QLineEdit(self._suggest_new_column_name("New Column"))
+        if default_column and default_column not in column_names:
+            self._new_target.setText(default_column)
+
+        target_mode = default_target_mode
+        if target_mode not in {"existing", "new"}:
+            target_mode = "existing" if default_column in column_names else "new"
+        target_mode_index = self._target_mode.findData(target_mode)
+        self._target_mode.setCurrentIndex(max(0, target_mode_index))
+
+        self._fill_pattern = QComboBox()
+        self._fill_pattern.addItem("Arithmetic sequence", "sequence")
+        self._fill_pattern.addItem("Constant value", "constant")
 
         self._start_row = QSpinBox()
         self._start_row.setRange(1, 1_000_000)
@@ -447,21 +469,96 @@ class RangeFillDialog(QDialog):
         self._step.setDecimals(10)
         self._step.setValue(1.0)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._summary = QLabel()
+        self._summary.setWordWrap(True)
+
+        self._buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
 
         layout = QFormLayout(self)
-        layout.addRow("Target column", self._target_column)
+        layout.addRow("Target action", self._target_mode)
+        self._existing_target_label = QLabel("Existing column")
+        layout.addRow(self._existing_target_label, self._existing_target)
+        self._new_target_label = QLabel("New column name")
+        layout.addRow(self._new_target_label, self._new_target)
+        layout.addRow("Fill pattern", self._fill_pattern)
         layout.addRow("Start row", self._start_row)
         layout.addRow("Rows", self._count)
         layout.addRow("Start value", self._start_value)
-        layout.addRow("Step", self._step)
-        layout.addRow(buttons)
+        self._step_label = QLabel("Step")
+        layout.addRow(self._step_label, self._step)
+        layout.addRow("Result", self._summary)
+        layout.addRow(self._buttons)
+
+        self._target_mode.currentIndexChanged.connect(self._sync_controls)
+        self._fill_pattern.currentIndexChanged.connect(self._sync_controls)
+        self._existing_target.currentTextChanged.connect(self._update_summary)
+        self._new_target.textChanged.connect(self._update_summary)
+        self._start_row.valueChanged.connect(self._update_summary)
+        self._count.valueChanged.connect(self._update_summary)
+        self._start_value.valueChanged.connect(self._update_summary)
+        self._step.valueChanged.connect(self._update_summary)
+        self._sync_controls()
+
+    def _suggest_new_column_name(self, base_name: str) -> str:
+        """Return a non-conflicting default name without mutating the worksheet."""
+        if base_name not in self._column_names:
+            return base_name
+        suffix = 2
+        while f"{base_name} {suffix}" in self._column_names:
+            suffix += 1
+        return f"{base_name} {suffix}"
+
+    def _sync_controls(self) -> None:
+        """Keep target and pattern controls consistent with the explicit choices."""
+        use_existing = self.target_mode() == "existing"
+        self._existing_target_label.setEnabled(use_existing)
+        self._existing_target.setEnabled(use_existing)
+        self._new_target_label.setEnabled(not use_existing)
+        self._new_target.setEnabled(not use_existing)
+
+        use_step = self.fill_pattern() == "sequence"
+        self._step_label.setEnabled(use_step)
+        self._step.setEnabled(use_step)
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        """Describe the exact write before the dialog is accepted."""
+        target = self.target_column() or "(unnamed)"
+        first_row = self.start_row()
+        last_row = first_row + self.count() - 1
+        action = "replace values in" if self.target_mode() == "existing" else "create"
+        if self.fill_pattern() == "constant":
+            values = f"the constant value {self.start_value():g}"
+        else:
+            final_value = self.start_value() + (self.count() - 1) * self.step()
+            values = (
+                f"a sequence from {self.start_value():g} to {final_value:g} "
+                f"(step {self.step():g})"
+            )
+        self._summary.setText(
+            f"This will {action} <b>{escape(target)}</b>, rows {first_row}-{last_row}, "
+            f"using {values}."
+        )
+        ok_button = self._buttons.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            label = "Update Column" if self.target_mode() == "existing" else "Create Column"
+            ok_button.setText(label)
+
+    def target_mode(self) -> str:
+        """Return ``existing`` or ``new`` for the requested write."""
+        return str(self._target_mode.currentData() or "existing")
+
+    def fill_pattern(self) -> str:
+        """Return ``sequence`` or ``constant`` for the generated values."""
+        return str(self._fill_pattern.currentData() or "sequence")
 
     def target_column(self) -> str:
-        """Return the selected or typed target column name."""
-        return self._target_column.currentText().strip()
+        """Return the selected existing column or requested new column name."""
+        if self.target_mode() == "existing":
+            return self._existing_target.currentText().strip()
+        return self._new_target.text().strip()
 
     def start_row(self) -> int:
         """Return the one-based first row to fill."""
@@ -477,7 +574,27 @@ class RangeFillDialog(QDialog):
 
     def step(self) -> float:
         """Return the numeric increment between generated values."""
+        if self.fill_pattern() == "constant":
+            return 0.0
         return self._step.value()
+
+    def accept(self) -> None:
+        """Reject ambiguous target choices before any worksheet is modified."""
+        target = self.target_column()
+        if not target:
+            QMessageBox.warning(self, "Fill Range", "Choose a target column.")
+            return
+        if self.target_mode() == "existing" and target not in self._column_names:
+            QMessageBox.warning(self, "Fill Range", "Choose an existing column to update.")
+            return
+        if self.target_mode() == "new" and target in self._column_names:
+            QMessageBox.warning(
+                self,
+                "Fill Range",
+                "That column already exists. Choose 'Update an existing column' or enter a new name.",
+            )
+            return
+        super().accept()
 
 
 class SmartFillDialog(QDialog):
@@ -548,11 +665,13 @@ class SmartFillDialog(QDialog):
             SMART_FILL_MODE_AUTO: (
                 "Auto chooses Numeric for finite numbers, Date-Time for recognizable date "
                 "values, and Category Cycle otherwise. Existing cells are anchors and only "
-                "blank selected cells are written."
+                "blank selected cells are written. One numeric anchor repeats because at least "
+                "two anchors are needed to infer an increment."
             ),
             SMART_FILL_MODE_NUMERIC: (
-                "One anchor repeats; two or more anchors define a row-position linear "
-                "sequence. Auto pattern can detect consecutive interleaved numeric seeds "
+                "Important: one numeric anchor is treated as a constant and repeats; it cannot "
+                "define an increment. Two or more anchors define a row-position linear sequence. "
+                "Auto pattern can detect consecutive interleaved numeric seeds "
                 "such as 1, 10, 2, 20."
             ),
             SMART_FILL_MODE_DATETIME: (

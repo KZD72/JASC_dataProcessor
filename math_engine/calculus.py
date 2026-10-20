@@ -221,23 +221,30 @@ def _numeric_column(frame: pd.DataFrame, column: str | None, minimum_points: int
 
 
 def validate_numeric_column_metadata(frame: pd.DataFrame, column: object, values: pd.Series) -> None:
-    """Reject numeric math operations on columns explicitly marked as text."""
+    """Reject text metadata and nonblank nonnumeric cells in numeric workflows."""
     metadata = dataframe_column_metadata(frame, column)
     if metadata.value_type == "text":
         raise MathOperationError(
             f"Column '{column}' is marked Text in metadata; choose a Numeric/Scientific column "
             "or update the column metadata."
         )
-    if metadata.value_type not in COLUMN_NUMERIC_TYPES:
-        return
 
     source = frame[column]
     meaningful = source.notna() & (source.astype(str).str.strip() != "")
-    invalid = meaningful & values.isna()
+    source_numeric = pd.to_numeric(source.where(meaningful), errors="coerce")
+    invalid = meaningful & source_numeric.isna()
     if invalid.any():
         example = str(source[invalid].iloc[0])
+        row_position = int(np.flatnonzero(invalid.to_numpy())[0]) + 1
+        type_context = (
+            "is marked numeric but "
+            if metadata.value_type in COLUMN_NUMERIC_TYPES
+            else ""
+        )
         raise MathOperationError(
-            f"Column '{column}' is marked numeric but contains non-numeric text such as '{example}'."
+            f"Column '{column}' {type_context}contains non-numeric text at row "
+            f"{row_position}, such as '{example}'. Numerical operations do not silently "
+            "discard text; correct the cell or choose another column."
         )
 
 

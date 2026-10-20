@@ -777,8 +777,12 @@ class PeakAnalysisDialog(QDialog):
                 raise MathOperationError(
                     "Map preview requires a finite X/Y pixel. Choose a preview pixel."
                 )
-            map_x = pd.to_numeric(self._frame["X"], errors="coerce").to_numpy(dtype=float)
-            map_y = pd.to_numeric(self._frame["Y"], errors="coerce").to_numpy(dtype=float)
+            map_x_numeric = pd.to_numeric(self._frame["X"], errors="coerce")
+            map_y_numeric = pd.to_numeric(self._frame["Y"], errors="coerce")
+            validate_numeric_column_metadata(self._frame, "X", map_x_numeric)
+            validate_numeric_column_metadata(self._frame, "Y", map_y_numeric)
+            map_x = map_x_numeric.to_numpy(dtype=float)
+            map_y = map_y_numeric.to_numpy(dtype=float)
             selected = np.isclose(map_x, coordinates["X"], rtol=0.0, atol=1.0e-12) & np.isclose(
                 map_y, coordinates["Y"], rtol=0.0, atol=1.0e-12
             )

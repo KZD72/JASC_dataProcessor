@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from core.workspace import dataframe_column_metadata
+
 
 class DataPrepError(ValueError):
     """Raised when a data-preparation operation cannot be applied."""
@@ -47,7 +49,11 @@ def apply_filter_condition(frame: pd.DataFrame, condition: FilterCondition) -> p
     if condition.operator not in FILTER_OPERATORS:
         raise DataPrepError(f"Unknown filter operator: {condition.operator}")
 
-    mask = _condition_mask(frame[condition.column], condition)
+    mask = _condition_mask(
+        frame[condition.column],
+        condition,
+        value_type=dataframe_column_metadata(frame, condition.column).value_type,
+    )
     return _reset_copy(frame.loc[mask])
 
 
@@ -141,11 +147,22 @@ def clean_missing_values(
     if strategy == "drop_rows":
         return _reset_copy(result.dropna(subset=clean_columns))
     if strategy == "fill_value":
-        result[clean_columns] = result[clean_columns].fillna(fill_value)
+        for column in clean_columns:
+            result[column] = _fill_missing_value(
+                result[column],
+                fill_value,
+                column,
+                dataframe_column_metadata(frame, column).value_type,
+            )
         return result
     if strategy in {"fill_mean", "fill_median", "interpolate"}:
         for column in clean_columns:
-            numeric = pd.to_numeric(result[column], errors="coerce")
+            numeric = _strict_numeric_values(
+                result[column],
+                column,
+                "Missing-value cleanup",
+                value_type=dataframe_column_metadata(frame, column).value_type,
+            )
             if strategy == "fill_mean":
                 replacement = numeric.mean()
                 result[column] = numeric.fillna(replacement)
@@ -178,7 +195,15 @@ def group_aggregate_dataframe(
     if not clean_aggs:
         raise DataPrepError("Choose at least one aggregation.")
 
-    numeric = frame[clean_values].apply(pd.to_numeric, errors="coerce")
+    numeric = pd.DataFrame({
+        column: _strict_numeric_values(
+            frame[column],
+            column,
+            "Group aggregation",
+            value_type=dataframe_column_metadata(frame, column).value_type,
+        )
+        for column in clean_values
+    })
     working = pd.concat([frame[clean_groups], numeric], axis=1)
     result = working.groupby(clean_groups, dropna=False)[clean_values].agg(clean_aggs)
     result.columns = [
@@ -251,7 +276,12 @@ def bin_dataframe(
     if bin_count < 1:
         raise DataPrepError("Bin count must be at least 1.")
 
-    numeric_bins = pd.to_numeric(frame[bin_column], errors="coerce")
+    numeric_bins = _strict_numeric_values(
+        frame[bin_column],
+        bin_column,
+        "Binning",
+        value_type=dataframe_column_metadata(frame, bin_column).value_type,
+    )
     finite = numeric_bins.replace([np.inf, -np.inf], np.nan).dropna()
     if finite.empty:
         raise DataPrepError(f"Bin column '{bin_column}' does not contain numeric values.")
@@ -262,7 +292,15 @@ def bin_dataframe(
 
     edges = np.linspace(minimum, maximum, int(bin_count) + 1)
     categories = pd.cut(numeric_bins, bins=edges, include_lowest=True, duplicates="drop")
-    numeric_values = frame[clean_values].apply(pd.to_numeric, errors="coerce")
+    numeric_values = pd.DataFrame({
+        column: _strict_numeric_values(
+            frame[column],
+            column,
+            "Binning",
+            value_type=dataframe_column_metadata(frame, column).value_type,
+        )
+        for column in clean_values
+    })
     working = pd.concat([pd.Series(categories, name="_bin"), numeric_bins.rename(bin_column), numeric_values], axis=1)
     grouped = working.dropna(subset=["_bin"]).groupby("_bin", observed=False)
 
@@ -286,7 +324,11 @@ def bin_dataframe(
     return pd.DataFrame(rows)
 
 
-def _condition_mask(source: pd.Series, condition: FilterCondition) -> pd.Series:
+def _condition_mask(
+    source: pd.Series,
+    condition: FilterCondition,
+    value_type: str = "",
+) -> pd.Series:
     """Return a boolean mask for one condition."""
     operator = condition.operator
     if operator == "blank":
@@ -296,7 +338,12 @@ def _condition_mask(source: pd.Series, condition: FilterCondition) -> pd.Series:
 
     value = condition.value
     if operator in {"gt", "ge", "lt", "le", "between"}:
-        numeric_source = pd.to_numeric(source, errors="coerce")
+        numeric_source = _strict_numeric_values(
+            source,
+            str(source.name),
+            "Numeric filter",
+            value_type=value_type,
+        )
         first_value = _parse_float(value, "Numeric filter comparisons need a numeric value.")
         if operator == "between":
             second_value = _parse_float(condition.value2, "Range filters need numeric minimum and maximum values.")
@@ -334,6 +381,68 @@ def _existing_columns(frame: pd.DataFrame, columns: list[str], label: str) -> li
     if missing:
         raise DataPrepError(f"Missing {label} column(s): " + ", ".join(missing))
     return clean_columns
+
+
+def _strict_numeric_values(
+    source: pd.Series,
+    label: str,
+    operation: str,
+    value_type: str = "",
+) -> pd.Series:
+    """Convert numeric strings while refusing to reinterpret nonblank text as missing."""
+    if value_type == "text":
+        raise DataPrepError(
+            f"{operation} requires numeric values in '{label}', but that column is marked Text. "
+            "Choose another column or update its metadata."
+        )
+    meaningful = source.notna() & source.astype(str).str.strip().ne("")
+    numeric = pd.to_numeric(source.where(meaningful), errors="coerce")
+    invalid = meaningful & numeric.isna()
+    if invalid.any():
+        row_position = int(np.flatnonzero(invalid.to_numpy())[0]) + 1
+        example = str(source.loc[invalid].iloc[0])
+        raise DataPrepError(
+            f"{operation} requires numeric values in '{label}', but row {row_position} "
+            f"contains '{example}'. Correct the cell or choose another column."
+        )
+    return numeric
+
+
+def _fill_missing_value(
+    source: pd.Series,
+    fill_value: str,
+    label: str,
+    value_type: str,
+) -> pd.Series:
+    """Fill blanks without silently changing a numeric column into text."""
+    if value_type == "text":
+        return source.fillna(str(fill_value))
+
+    meaningful = source.notna() & source.astype(str).str.strip().ne("")
+    existing_numeric = pd.to_numeric(source.where(meaningful), errors="coerce")
+    inferred_numeric = bool(meaningful.any() and existing_numeric.loc[meaningful].notna().all())
+    numeric_column = (
+        value_type in {"numeric", "scientific"}
+        or pd.api.types.is_numeric_dtype(source.dtype)
+        or inferred_numeric
+    )
+    if not numeric_column:
+        return source.fillna(fill_value)
+
+    try:
+        numeric_fill = float(str(fill_value).strip())
+    except (TypeError, ValueError) as exc:
+        raise DataPrepError(
+            f"Missing-value cleanup cannot fill numeric column '{label}' with "
+            f"non-numeric text '{fill_value}'. Enter a number or mark the column Text."
+        ) from exc
+    numeric = _strict_numeric_values(
+        source,
+        label,
+        "Missing-value cleanup",
+        value_type=value_type,
+    )
+    return numeric.fillna(numeric_fill)
 
 
 def _parse_float(text: str, message: str) -> float:

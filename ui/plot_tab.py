@@ -23,9 +23,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QSpinBox,
     QTabWidget,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -151,6 +153,7 @@ class PlotTab(QWidget):
         super().__init__(parent)
         self._workspace = workspace
         self._external_options = external_options
+        self._plot_options_visible = True
         self._plot_series: list[PlotSeries] = []
         self._plot_locators: list[PlotLocator] = []
         self._auto_axis_labels: dict[str, str] = {"x": "", "y": "", "right_y": ""}
@@ -884,6 +887,7 @@ class PlotTab(QWidget):
         # --- layout groups ---
         series_group = QGroupBox("Series")
         sf = QFormLayout(series_group)
+        self._configure_responsive_form(sf)
         self._series_rows: dict[str, tuple[QWidget | None, QWidget]] = {}
         self._bar_options_panel = self._build_bar_options_panel()
         self._fill_options_panel = self._build_fill_options_panel()
@@ -963,25 +967,17 @@ class PlotTab(QWidget):
 
         axes_group = QGroupBox("Axes")
         af = QFormLayout(axes_group)
+        self._configure_responsive_form(af)
         af.addRow("Title", self._title_edit)
         af.addRow("X label", self._x_label_edit)
         af.addRow("Left Y label", self._y_label_edit)
         af.addRow("Right Y label", self._right_y_label_edit)
-        af.addRow(
-            "X text sizes",
-            self._axis_font_size_row(self._x_label_size_spin, self._x_tick_size_spin),
-        )
-        af.addRow(
-            "Left Y text sizes",
-            self._axis_font_size_row(self._y_label_size_spin, self._y_tick_size_spin),
-        )
-        af.addRow(
-            "Right Y text sizes",
-            self._axis_font_size_row(
-                self._right_y_label_size_spin,
-                self._right_y_tick_size_spin,
-            ),
-        )
+        af.addRow("X label size", self._x_label_size_spin)
+        af.addRow("X number size", self._x_tick_size_spin)
+        af.addRow("Left Y label size", self._y_label_size_spin)
+        af.addRow("Left Y number size", self._y_tick_size_spin)
+        af.addRow("Right Y label size", self._right_y_label_size_spin)
+        af.addRow("Right Y number size", self._right_y_tick_size_spin)
         af.addRow("X scale", self._x_scale_combo)
         af.addRow("Left Y scale", self._y_scale_combo)
         af.addRow("Right Y scale", self._right_y_scale_combo)
@@ -1000,6 +996,7 @@ class PlotTab(QWidget):
 
         legend_group = QGroupBox("Legend")
         legend_form = QFormLayout(legend_group)
+        self._configure_responsive_form(legend_form)
         legend_form.addRow("", self._legend_checkbox)
         legend_form.addRow("Location", self._legend_pos_combo)
         legend_form.addRow("Text size", self._legend_font_size_spin)
@@ -1021,6 +1018,7 @@ class PlotTab(QWidget):
 
         locator_group = QGroupBox("Data Location")
         lf = QFormLayout(locator_group)
+        self._configure_responsive_form(lf)
         lf.addRow("Series", self._locator_series_combo)
         lf.addRow("Lookup", self._locator_mode_combo)
         lf.addRow("X value", self._locator_x_edit)
@@ -1034,13 +1032,16 @@ class PlotTab(QWidget):
         lf.addRow("Located", self._locator_list)
 
         ctrl_tabs = QTabWidget()
+        ctrl_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         ctrl_tabs.addTab(series_group, "Series")
         ctrl_tabs.addTab(axes_group, "Axes")
         ctrl_tabs.addTab(legend_group, "Legend")
         ctrl_tabs.addTab(locator_group, "Locator")
+        self._options_tabs = ctrl_tabs
 
         ctrl_panel = QWidget()
-        ctrl_panel.setMinimumWidth(330)
+        ctrl_panel.setMinimumWidth(0)
+        ctrl_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         cl = QVBoxLayout(ctrl_panel)
         cl.addWidget(ctrl_tabs)
         cl.addStretch(1)
@@ -1053,7 +1054,8 @@ class PlotTab(QWidget):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(350)
+        scroll.setMinimumWidth(0)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         scroll.setWidget(ctrl_panel)
         self._plot_options_scroll = scroll
 
@@ -1087,18 +1089,24 @@ class PlotTab(QWidget):
 
         self._toggle_options_button = QPushButton("Hide Inspector" if self._external_options else "Hide Options")
         self._toggle_options_button.clicked.connect(self._toggle_plot_options)
-        top_row = QHBoxLayout()
-        top_row.addWidget(self._active_plot_label)
-        top_row.addStretch(1)
-        top_row.addWidget(self._new_plot_button)
-        top_row.addWidget(self._save_plot_button)
-        top_row.addWidget(self._copy_plot_button)
-        top_row.addWidget(self._load_plot_button)
-        top_row.addWidget(self._remove_plot_button)
-        top_row.addWidget(self._toggle_options_button)
+        # QToolBar moves actions that do not fit into its extension menu. This
+        # avoids a wide fixed minimum while retaining one-row access on roomy
+        # displays and complete access on narrow/high-DPI screens.
+        top_bar = QToolBar("Plot actions", self)
+        top_bar.setMovable(False)
+        top_bar.setFloatable(False)
+        top_bar.addWidget(self._active_plot_label)
+        top_bar.addSeparator()
+        top_bar.addWidget(self._new_plot_button)
+        top_bar.addWidget(self._save_plot_button)
+        top_bar.addWidget(self._copy_plot_button)
+        top_bar.addWidget(self._load_plot_button)
+        top_bar.addWidget(self._remove_plot_button)
+        top_bar.addWidget(self._toggle_options_button)
+        self._plot_actions_toolbar = top_bar
 
         layout = QVBoxLayout(self)
-        layout.addLayout(top_row)
+        layout.addWidget(top_bar)
         if self._external_options:
             layout.addWidget(self._plot_canvas)
         else:
@@ -1150,9 +1158,19 @@ class PlotTab(QWidget):
         self._update_legend_controls_enabled()
         self._sync_export_size()
         self._update_plot_type_option_visibility()
+        for combo in self.findChildren(QComboBox):
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(10)
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.refresh_controls()
 
     # -- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _configure_responsive_form(form: QFormLayout) -> None:
+        """Allow form labels and fields to reflow on narrow inspector docks."""
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
     @staticmethod
     def _range_row(min_edit: QLineEdit, max_edit: QLineEdit) -> QWidget:
@@ -1177,22 +1195,9 @@ class PlotTab(QWidget):
         spin.setSingleStep(0.5)
         spin.setSuffix(" pt")
         spin.setSpecialValueText("Style default")
+        spin.setMinimumWidth(90)
+        spin.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         return spin
-
-    @staticmethod
-    def _axis_font_size_row(
-        label_spin: QDoubleSpinBox,
-        tick_spin: QDoubleSpinBox,
-    ) -> QWidget:
-        """Return compact label/tick typography controls for one axis."""
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("Label"))
-        layout.addWidget(label_spin)
-        layout.addWidget(QLabel("Numbers"))
-        layout.addWidget(tick_spin)
-        return row
 
     def _build_bar_options_panel(self) -> QWidget:
         """Return bar-specific series controls."""
@@ -1751,10 +1756,13 @@ class PlotTab(QWidget):
 
     def _toggle_plot_options(self) -> None:
         """Toggle the plot options panel from the Plot tab header."""
-        self.set_plot_options_visible(self._plot_options_scroll.isHidden())
+        self.set_plot_options_visible(not self._plot_options_visible)
 
     def set_plot_options_visible(self, visible: bool) -> None:
         """Show or hide the plot options panel."""
+        visible = bool(visible)
+        changed = visible != self._plot_options_visible
+        self._plot_options_visible = visible
         self._plot_options_scroll.setVisible(visible)
         if self._external_options:
             self._toggle_options_button.setText("Hide Inspector" if visible else "Show Inspector")
@@ -1766,11 +1774,12 @@ class PlotTab(QWidget):
             self._plot_splitter.setSizes([460, 760])
         else:
             self._plot_splitter.setSizes([0, 1])
-        self.options_visibility_changed.emit(visible)
+        if changed:
+            self.options_visibility_changed.emit(visible)
 
     def plot_options_visible(self) -> bool:
         """Return whether the plot options panel is currently visible."""
-        return self._plot_options_scroll.isVisible()
+        return self._plot_options_visible
 
     def reset_view_to_default(self) -> None:
         """Restore plot-panel visibility and splitter sizing."""

@@ -15,7 +15,7 @@ Reviewed on 2026-09-24 against the current repository state, session changelog, 
 - Plotting: Matplotlib canvas and toolbar, saved plot definitions and duplication, multi-series XY plots, right Y axis, axis ranges/scales, per-axis label/tick typography, live-canvas clipboard copy, locators, SciencePlots styles, family/subtype plot selection, line/scatter/line+markers/errorbar, bar/barh/area/histogram with categorical label support, box/violin, initial pie/donut/Voronoi composition charts, interpolated 2D and spectral-slice maps with selectable palettes plus X/Y/intensity readout, export-only physical sizing, and direct double-click editing of rendered labels (including colour bars), legends, axes, and series appearance.
 - Interpolated 2D maps: X/Y/Z coordinate roles, heatmap/contour/filled contour rendering, linear/cubic-spline/piecewise-cubic interpolation, grid resolution, saved state, dataset rename support, and X/Y locator prediction of Z values.
 - Batch workflows: dialog-based multi-sheet execution, exact-name and column-position bindings, preflight tables, multi-column expansion, cancelable modal progress, per-source outputs, and cumulative summaries are implemented for formulas, calculus, smoothing, FFT/iFFT, interpolation, statistics, and curve fitting. Formula batches have an initial process-worker path; the remaining long operations are still executed synchronously from the UI workflow.
-- Verification and UI polish: 175 automated tests pass in the active Python environment, including Qt-offscreen workflow coverage. The interface has docked workspace/inspector panels, compact toolbar grouping, reset view, sidebar visibility controls, application icon, direct context actions, reliable cross-style numeric steppers, explicit project-security save modes, and theme-aware styling.
+- Verification and UI polish: 210 automated tests pass in the active Python environment, including Qt-offscreen workflow coverage. The interface has screen/DPI-aware initial geometry, proportionally resized workspace/inspector docks, responsive wrapping forms, toolbar overflow, compact-mode workspace collapse with explicit override, reset view, sidebar visibility controls, application icon, direct context actions, reliable cross-style numeric steppers, explicit project-security save modes, and theme-aware styling.
 
 ### Current Gaps
 - The automated suite exists and is runnable, but core import, formula, calculus, interpolation, statistics, fitting, project-persistence, and end-to-end batch paths need broader regression coverage. Verification commands, linting, and repeatable manual smoke scripts are not yet documented as a complete developer gate.
@@ -122,7 +122,7 @@ Purpose: make future work safer before broad feature growth.
 
 Completed foundation:
 - A usable Python environment is available.
-- The repository has a 121-test `unittest` suite and Qt-offscreen tests that instantiate `MainWindow` and exercise important worksheet, Excel import, plot, digitizer, and performance workflows.
+- The repository has a 210-test `unittest` suite and Qt-offscreen tests that instantiate `MainWindow` and exercise important worksheet, Excel import, plot, responsive-layout, digitizer, and performance workflows.
 
 Remaining tasks:
 - Document one-command core and Qt verification paths in `README.md`.
