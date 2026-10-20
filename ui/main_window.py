@@ -281,6 +281,7 @@ class MainWindow(QMainWindow):
         self._plot_tab_widget.load_plot_requested.connect(self._load_selected_plot)
         self._plot_tab_widget.remove_plot_requested.connect(self._delete_selected_plot)
         self._plot_tab_widget.options_visibility_changed.connect(self._handle_plot_options_visibility_changed)
+        self._plot_tab_widget.dataset_created.connect(self._refresh_dataset_list)
         self._tabs.addTab(self._plot_tab_widget, "Plot")
         self._spectral_analysis_viewer = SpectralAnalysisViewer(self)
         self._spectral_analysis_viewer.export_requested.connect(

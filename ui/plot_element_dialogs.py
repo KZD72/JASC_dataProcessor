@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTabWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -66,6 +68,227 @@ _MATPLOTLIB_COLOURS: dict[str, str] = {
     "tab:red": "#d62728",
     "tab:purple": "#9467bd",
 }
+
+
+class SurfacePlotDetailsDialog(QDialog):
+    """Edit scientific rendering, contour, validity, and extrema map options."""
+
+    def __init__(self, series: Any, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("2D Map Details")
+        self.setModal(True)
+        self.resize(610, 560)
+
+        self._render_mode = self._combo([
+            ("Automatic (native when complete)", "auto"),
+            ("Native regular grid", "native"),
+            ("Interpolated grid", "interpolated"),
+        ], series.surface_render_mode)
+        self._aspect = self._combo([("Automatic", "auto"), ("Equal X/Y units", "equal")], series.surface_aspect)
+        self._alpha = self._float_spin(0.0, 1.0, series.surface_alpha, 0.05)
+        self._scale_mode = self._combo([("Automatic", "auto"), ("Manual limits", "manual"), ("Robust percentiles", "percentile")], series.color_scale_mode)
+        self._normalization = self._combo([("Linear", "linear"), ("Logarithmic", "log"), ("Symmetric log", "symlog"), ("Diverging around center", "centered")], series.color_normalization)
+        self._color_min = QLineEdit(series.color_minimum)
+        self._color_max = QLineEdit(series.color_maximum)
+        self._percentile_low = self._float_spin(0.0, 100.0, series.color_percentile_low, 1.0)
+        self._percentile_high = self._float_spin(0.0, 100.0, series.color_percentile_high, 1.0)
+        self._color_center = self._float_spin(-1e15, 1e15, series.color_center, 0.1)
+        self._bad_color = QLineEdit(series.color_bad)
+        self._under_color = QLineEdit(series.color_under)
+        self._over_color = QLineEdit(series.color_over)
+
+        self._level_mode = self._combo([("Number of levels", "count"), ("Fixed interval", "interval"), ("Explicit list", "custom")], series.contour_level_mode)
+        self._level_count = QSpinBox(); self._level_count.setRange(2, 256); self._level_count.setValue(series.contour_level_count)
+        self._level_interval = self._float_spin(1e-15, 1e15, series.contour_interval, 0.1)
+        self._custom_levels = QLineEdit(series.contour_custom_levels)
+        self._contour_labels = QCheckBox("Show contour labels"); self._contour_labels.setChecked(series.contour_labels)
+        self._contour_format = QLineEdit(series.contour_label_format)
+        self._contour_overlay = QCheckBox("Overlay contour lines on filled maps"); self._contour_overlay.setChecked(series.contour_overlay)
+        self._line_color = QLineEdit(series.contour_line_color)
+        self._line_width = self._float_spin(0.0, 10.0, series.contour_line_width, 0.1)
+        self._line_style = self._combo([("Solid", "solid"), ("Dashed", "dashed"), ("Dotted", "dotted"), ("Dash-dot", "dashdot")], series.contour_line_style)
+
+        self._show_points = QCheckBox("Show measured points"); self._show_points.setChecked(series.show_data_points)
+        self._show_triangles = QCheckBox("Show Delaunay triangulation"); self._show_triangles.setChecked(series.show_triangulation)
+        self._show_boundary = QCheckBox("Show measured convex-hull boundary"); self._show_boundary.setChecked(series.show_boundary)
+        self._mask_boundary = QCheckBox("Mask interpolation outside measured boundary"); self._mask_boundary.setChecked(series.mask_outside_boundary)
+
+        self._global_max = QCheckBox("Label global maximum"); self._global_max.setChecked(series.show_global_maximum)
+        self._global_min = QCheckBox("Label global minimum"); self._global_min.setChecked(series.show_global_minimum)
+        self._extrema_source = self._combo([("Measured values (recommended)", "measured"), ("Rendered/interpolated grid", "interpolated")], series.extrema_source)
+        self._local_max = QCheckBox("Label local maxima"); self._local_max.setChecked(series.show_local_maxima)
+        self._local_min = QCheckBox("Label local minima"); self._local_min.setChecked(series.show_local_minima)
+        self._local_count = QSpinBox(); self._local_count.setRange(1, 100); self._local_count.setValue(series.local_extrema_count)
+        self._prominence = self._float_spin(0.0, 1e15, series.local_extrema_prominence, 0.1)
+        self._separation = self._float_spin(0.0, 1e15, series.local_extrema_separation, 0.1)
+        self._label_mode = self._combo([("X, Y and Z with provenance", "xyz"), ("Z value only", "z")], series.extrema_label_mode)
+        self._extrema_format = QLineEdit(series.extrema_label_format)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._form_page([
+            ("Rendering", self._render_mode), ("Aspect", self._aspect), ("Opacity", self._alpha),
+            ("Colour range", self._scale_mode), ("Normalization", self._normalization),
+            ("Manual minimum", self._color_min), ("Manual maximum", self._color_max),
+            ("Lower percentile", self._percentile_low), ("Upper percentile", self._percentile_high),
+            ("Diverging center", self._color_center), ("Missing colour", self._bad_color),
+            ("Under-range colour", self._under_color), ("Over-range colour", self._over_color),
+        ]), "Colour & Grid")
+        tabs.addTab(self._form_page([
+            ("Level definition", self._level_mode), ("Level count", self._level_count),
+            ("Interval", self._level_interval), ("Custom levels", self._custom_levels),
+            (None, self._contour_labels), ("Label number format", self._contour_format),
+            (None, self._contour_overlay), ("Line colour (blank = palette)", self._line_color),
+            ("Line width", self._line_width), ("Line style", self._line_style),
+        ]), "Contours")
+        tabs.addTab(self._form_page([
+            (None, self._show_points), (None, self._show_triangles),
+            (None, self._show_boundary), (None, self._mask_boundary),
+        ]), "Validity")
+        note = QLabel("Measured extrema are observations. Interpolated extrema may be created by the interpolation method and are labelled accordingly.")
+        note.setWordWrap(True)
+        extrema_page = self._form_page([
+            (None, note),
+            (None, self._global_max), (None, self._global_min), ("Extrema source", self._extrema_source),
+            (None, self._local_max), (None, self._local_min), ("Maximum local labels", self._local_count),
+            ("Minimum prominence", self._prominence), ("Minimum XY separation", self._separation),
+            ("Label contents", self._label_mode), ("Number format", self._extrema_format),
+        ])
+        tabs.addTab(extrema_page, "Extrema")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self); layout.addWidget(tabs); layout.addWidget(buttons)
+
+    @staticmethod
+    def _combo(items: list[tuple[str, str]], value: str) -> QComboBox:
+        combo = QComboBox()
+        for label, data in items: combo.addItem(label, data)
+        index = combo.findData(value)
+        if index >= 0: combo.setCurrentIndex(index)
+        return combo
+
+    @staticmethod
+    def _float_spin(minimum: float, maximum: float, value: float, step: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox(); spin.setRange(minimum, maximum); spin.setDecimals(8); spin.setSingleStep(step); spin.setValue(value); return spin
+
+    @staticmethod
+    def _form_page(rows: list[tuple[str | None, QWidget]]) -> QWidget:
+        page = QWidget(); form = QFormLayout(page)
+        for label, widget in rows:
+            form.addRow(widget) if label is None else form.addRow(label, widget)
+        return page
+
+    def series_updates(self) -> dict[str, object]:
+        return {
+            "surface_render_mode": self._render_mode.currentData(), "surface_aspect": self._aspect.currentData(), "surface_alpha": self._alpha.value(),
+            "color_scale_mode": self._scale_mode.currentData(), "color_minimum": self._color_min.text().strip(), "color_maximum": self._color_max.text().strip(),
+            "color_percentile_low": self._percentile_low.value(), "color_percentile_high": self._percentile_high.value(), "color_normalization": self._normalization.currentData(),
+            "color_center": self._color_center.value(), "color_bad": self._bad_color.text().strip(), "color_under": self._under_color.text().strip(), "color_over": self._over_color.text().strip(),
+            "contour_level_mode": self._level_mode.currentData(), "contour_level_count": self._level_count.value(), "contour_interval": self._level_interval.value(),
+            "contour_custom_levels": self._custom_levels.text().strip(), "contour_labels": self._contour_labels.isChecked(), "contour_label_format": self._contour_format.text().strip(),
+            "contour_overlay": self._contour_overlay.isChecked(), "contour_line_color": self._line_color.text().strip(), "contour_line_width": self._line_width.value(), "contour_line_style": self._line_style.currentData(),
+            "show_data_points": self._show_points.isChecked(), "show_triangulation": self._show_triangles.isChecked(), "show_boundary": self._show_boundary.isChecked(), "mask_outside_boundary": self._mask_boundary.isChecked(),
+            "show_global_maximum": self._global_max.isChecked(), "show_global_minimum": self._global_min.isChecked(), "extrema_source": self._extrema_source.currentData(),
+            "show_local_maxima": self._local_max.isChecked(), "show_local_minima": self._local_min.isChecked(), "local_extrema_count": self._local_count.value(),
+            "local_extrema_prominence": self._prominence.value(), "local_extrema_separation": self._separation.value(), "extrema_label_mode": self._label_mode.currentData(), "extrema_label_format": self._extrema_format.text().strip(),
+        }
+
+
+class SurfaceAnalysisDialog(QDialog):
+    """Configure grid/profile/ROI/contour extraction from a committed map series."""
+
+    def __init__(
+        self,
+        default_name: str,
+        bounds: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 1.0),
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Analyse 2D Map")
+        self.setModal(True)
+        self.setMinimumWidth(470)
+        x_minimum, x_maximum, y_minimum, y_maximum = bounds
+        self._operation = SurfacePlotDetailsDialog._combo([
+            ("Export rendered grid", "grid"),
+            ("Horizontal profile at Y", "horizontal"),
+            ("Vertical profile at X", "vertical"),
+            ("Arbitrary line profile", "line"),
+            ("Rectangular ROI statistics", "roi"),
+            ("Extract contour vertices", "contours"),
+        ], "grid")
+        self._coordinate = SurfacePlotDetailsDialog._float_spin(
+            -1e15, 1e15, (y_minimum + y_maximum) / 2.0, 0.1
+        )
+        self._x_min = SurfacePlotDetailsDialog._float_spin(-1e15, 1e15, x_minimum, 0.1)
+        self._x_max = SurfacePlotDetailsDialog._float_spin(-1e15, 1e15, x_maximum, 0.1)
+        self._y_min = SurfacePlotDetailsDialog._float_spin(-1e15, 1e15, y_minimum, 0.1)
+        self._y_max = SurfacePlotDetailsDialog._float_spin(-1e15, 1e15, y_maximum, 0.1)
+        self._line_x1 = SurfacePlotDetailsDialog._float_spin(-1e15, 1e15, x_minimum, 0.1)
+        self._line_y1 = SurfacePlotDetailsDialog._float_spin(-1e15, 1e15, y_minimum, 0.1)
+        self._line_x2 = SurfacePlotDetailsDialog._float_spin(-1e15, 1e15, x_maximum, 0.1)
+        self._line_y2 = SurfacePlotDetailsDialog._float_spin(-1e15, 1e15, y_maximum, 0.1)
+        self._line_samples = QSpinBox()
+        self._line_samples.setRange(2, 10_000)
+        self._line_samples.setValue(200)
+        self._name = QLineEdit(default_name)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form = QFormLayout(self)
+        form.addRow("Operation", self._operation)
+        form.addRow("Horizontal Y / vertical X", self._coordinate)
+        form.addRow("Line start X", self._line_x1)
+        form.addRow("Line start Y", self._line_y1)
+        form.addRow("Line end X", self._line_x2)
+        form.addRow("Line end Y", self._line_y2)
+        form.addRow("Line samples", self._line_samples)
+        form.addRow("ROI X minimum", self._x_min)
+        form.addRow("ROI X maximum", self._x_max)
+        form.addRow("ROI Y minimum", self._y_min)
+        form.addRow("ROI Y maximum", self._y_max)
+        form.addRow("Result sheet", self._name)
+        form.addRow(buttons)
+
+    def operation(self) -> str:
+        return str(self._operation.currentData())
+
+    def coordinate(self) -> float:
+        return self._coordinate.value()
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        return (
+            self._x_min.value(), self._x_max.value(),
+            self._y_min.value(), self._y_max.value(),
+        )
+
+    def line_profile(self) -> tuple[float, float, float, float, int]:
+        """Return arbitrary line endpoints and sample count."""
+        return (
+            self._line_x1.value(),
+            self._line_y1.value(),
+            self._line_x2.value(),
+            self._line_y2.value(),
+            self._line_samples.value(),
+        )
+
+    def configure_line_profile(
+        self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+    ) -> None:
+        """Select arbitrary-line mode and prefill mouse-picked endpoints."""
+        index = self._operation.findData("line")
+        if index >= 0:
+            self._operation.setCurrentIndex(index)
+        self._line_x1.setValue(start_x)
+        self._line_y1.setValue(start_y)
+        self._line_x2.setValue(end_x)
+        self._line_y2.setValue(end_y)
+
+    def output_name(self) -> str:
+        return self._name.text().strip()
 
 
 class PlotSeriesAppearanceDialog(QDialog):

@@ -8,14 +8,16 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from matplotlib import rcParams, style as mpl_style
+from matplotlib import colormaps, colors as mpl_colors, rcParams, style as mpl_style
 from matplotlib.backend_bases import MouseEvent
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.path import Path as MplPath
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QVBoxLayout, QWidget
+from scipy import ndimage
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
+from scipy.spatial import ConvexHull, Delaunay
 
 from core.workspace import COLUMN_NUMERIC_TYPES, Workspace, dataframe_column_metadata
 from models.plot_settings import LegendSettings
@@ -70,6 +72,43 @@ class PlotSeries:
     grid_resolution: int = 120
     color_map: str = "viridis"
     colorbar_label: str = ""
+    surface_render_mode: str = "auto"
+    surface_aspect: str = "auto"
+    surface_alpha: float = 1.0
+    color_scale_mode: str = "auto"
+    color_minimum: str = ""
+    color_maximum: str = ""
+    color_percentile_low: float = 2.0
+    color_percentile_high: float = 98.0
+    color_normalization: str = "linear"
+    color_center: float = 0.0
+    color_bad: str = "#d9d9d9"
+    color_under: str = ""
+    color_over: str = ""
+    contour_level_mode: str = "count"
+    contour_level_count: int = 12
+    contour_interval: float = 1.0
+    contour_custom_levels: str = ""
+    contour_labels: bool = True
+    contour_label_format: str = ".4g"
+    contour_overlay: bool = False
+    contour_line_color: str = ""
+    contour_line_width: float = 0.8
+    contour_line_style: str = "solid"
+    show_data_points: bool = False
+    show_triangulation: bool = False
+    show_boundary: bool = False
+    mask_outside_boundary: bool = True
+    show_global_maximum: bool = False
+    show_global_minimum: bool = False
+    extrema_source: str = "measured"
+    show_local_maxima: bool = False
+    show_local_minima: bool = False
+    local_extrema_count: int = 5
+    local_extrema_prominence: float = 0.0
+    local_extrema_separation: float = 0.0
+    extrema_label_mode: str = "xyz"
+    extrema_label_format: str = ".4g"
     spectral_column: str = ""
     spectral_center: float = 0.0
     spectral_sampling: str = "nearest"
@@ -142,6 +181,18 @@ class _SurfaceValues:
 
 
 @dataclass(frozen=True, slots=True)
+class SurfaceExtremum:
+    """One measured or interpolated map extremum selected for annotation."""
+
+    kind: str
+    x_value: float
+    y_value: float
+    z_value: float
+    source: str
+    local: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class PlotResult:
     """Summary of a completed plot render."""
 
@@ -201,6 +252,8 @@ class PlotCanvas(QWidget):
     """A QWidget wrapping a Matplotlib FigureCanvas and navigation toolbar."""
 
     element_double_clicked = Signal(str, object)
+    surface_cut_selected = Signal(float, float, float, float)
+    surface_cut_cancelled = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create the Matplotlib figure, toolbar, and empty plot placeholder."""
@@ -216,6 +269,7 @@ class PlotCanvas(QWidget):
             "or a legend entry to edit it directly."
         )
         self.canvas.mpl_connect("button_press_event", self._handle_canvas_button_press)
+        self.canvas.mpl_connect("key_press_event", self._handle_canvas_key_press)
         self.toolbar = PlotNavigationToolbar(self)
         self.canvas.mpl_connect("motion_notify_event", self._handle_canvas_motion)
         self.axes = self.figure.add_subplot(111)
@@ -225,6 +279,9 @@ class PlotCanvas(QWidget):
         self._rendered_surface_grids: list[
             tuple[_SurfaceValues, np.ndarray, np.ndarray, np.ma.MaskedArray]
         ] = []
+        self._surface_cut_pick_active = False
+        self._surface_cut_points: list[tuple[float, float]] = []
+        self._surface_cut_artists: list[Any] = []
         self.coordinate_readout = QLabel()
         self.coordinate_readout.setObjectName("MutedLabel")
         self.coordinate_readout.setMinimumHeight(20)
@@ -310,6 +367,9 @@ class PlotCanvas(QWidget):
 
     def _handle_canvas_button_press(self, event: object) -> None:
         """Emit the rendered plot element under a left-button double-click."""
+        if self._surface_cut_pick_active:
+            self._handle_surface_cut_click(event)
+            return
         if not bool(getattr(event, "dblclick", False)):
             return
         button = getattr(event, "button", None)
@@ -322,6 +382,138 @@ class PlotCanvas(QWidget):
         target = self.editable_element_at(float(pixel_x), float(pixel_y))
         if target is not None:
             self.element_double_clicked.emit(target[0], target[1])
+
+    def begin_surface_cut_selection(self) -> None:
+        """Arm a two-click interaction for selecting a line across a rendered map."""
+        if not self._rendered_surface_grids:
+            raise ValueError("Render a 2D map before selecting a cut line.")
+        toolbar_mode = str(self.toolbar.mode).lower()
+        if toolbar_mode:
+            if "zoom" in toolbar_mode:
+                self.toolbar.zoom()
+            else:
+                self.toolbar.pan()
+        self.clear_surface_cut_overlay()
+        self._surface_cut_pick_active = True
+        self._surface_cut_points = []
+        self.canvas.setCursor(Qt.CrossCursor)
+        self.canvas.setFocus()
+        self.coordinate_readout.setVisible(True)
+        self.coordinate_readout.setText(
+            "Cut selection: click the start point; right-click or Esc cancels."
+        )
+
+    def cancel_surface_cut_selection(self, *, notify: bool = True) -> None:
+        """Cancel an active cut-line selection and remove its temporary overlay."""
+        was_active = self._surface_cut_pick_active
+        self._surface_cut_pick_active = False
+        self._surface_cut_points = []
+        self.canvas.unsetCursor()
+        self.clear_surface_cut_overlay()
+        if self._rendered_surface_grids:
+            self.coordinate_readout.setText(
+                "Move the mouse over the map to read X, Y, and intensity"
+            )
+        if was_active and notify:
+            self.surface_cut_cancelled.emit()
+
+    def clear_surface_cut_overlay(self) -> None:
+        """Remove the interactive cut line without changing the rendered map."""
+        for artist in self._surface_cut_artists:
+            try:
+                artist.remove()
+            except (AttributeError, ValueError):
+                pass
+        self._surface_cut_artists = []
+        self.canvas.draw_idle()
+
+    def surface_cut_selection_active(self) -> bool:
+        """Return whether the canvas is waiting for cut-line clicks."""
+        return self._surface_cut_pick_active
+
+    def _handle_surface_cut_click(self, event: object) -> None:
+        """Capture or cancel one endpoint during the two-click cut workflow."""
+        button = getattr(event, "button", None)
+        button_name = getattr(button, "name", "").lower()
+        if button in {3, "right"} or button_name == "right":
+            self.cancel_surface_cut_selection()
+            return
+        if button not in {1, "left"} and button_name != "left":
+            return
+        if getattr(event, "inaxes", None) is not self.axes:
+            return
+        x_value = getattr(event, "xdata", None)
+        y_value = getattr(event, "ydata", None)
+        if x_value is None or y_value is None:
+            return
+        point = (float(x_value), float(y_value))
+        if not np.all(np.isfinite(point)):
+            return
+
+        if not self._surface_cut_points:
+            self._surface_cut_points = [point]
+            self._draw_surface_cut_overlay(point, point)
+            self.coordinate_readout.setText(
+                f"Cut start x={point[0]:.6g}, y={point[1]:.6g}; click the end point."
+            )
+            return
+
+        start = self._surface_cut_points[0]
+        if np.hypot(point[0] - start[0], point[1] - start[1]) <= 1e-15:
+            self.coordinate_readout.setText("Choose an end point different from the start.")
+            return
+        self._draw_surface_cut_overlay(start, point)
+        self._surface_cut_pick_active = False
+        self._surface_cut_points = [start, point]
+        self.canvas.unsetCursor()
+        self.coordinate_readout.setText(
+            f"Selected cut ({start[0]:.6g}, {start[1]:.6g}) to "
+            f"({point[0]:.6g}, {point[1]:.6g})."
+        )
+        self.surface_cut_selected.emit(start[0], start[1], point[0], point[1])
+
+    def _draw_surface_cut_overlay(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+    ) -> None:
+        """Draw a high-contrast selected cut over any map palette."""
+        if len(self._surface_cut_artists) == 2:
+            for artist in self._surface_cut_artists:
+                artist.set_data([start[0], end[0]], [start[1], end[1]])
+        else:
+            self.clear_surface_cut_overlay()
+            outline, = self.axes.plot(
+                [start[0], end[0]],
+                [start[1], end[1]],
+                color="white",
+                linewidth=4.2,
+                marker="o",
+                markersize=7.0,
+                markeredgecolor="white",
+                markerfacecolor="white",
+                zorder=30,
+                label="_nolegend_",
+            )
+            line, = self.axes.plot(
+                [start[0], end[0]],
+                [start[1], end[1]],
+                color="#d627d9",
+                linewidth=2.0,
+                marker="o",
+                markersize=4.5,
+                markeredgecolor="#d627d9",
+                markerfacecolor="#d627d9",
+                zorder=31,
+                label="_nolegend_",
+            )
+            self._surface_cut_artists = [outline, line]
+        self.canvas.draw_idle()
+
+    def _handle_canvas_key_press(self, event: object) -> None:
+        """Allow Escape to leave interactive cut selection safely."""
+        if self._surface_cut_pick_active and str(getattr(event, "key", "")).lower() == "escape":
+            self.cancel_surface_cut_selection()
 
     def editable_element_at(self, pixel_x: float, pixel_y: float) -> tuple[str, object] | None:
         """Return the editable artist or axis region at display-pixel coordinates."""
@@ -537,6 +729,12 @@ class PlotCanvas(QWidget):
         locators: list[PlotLocator] | None,
     ) -> PlotResult:
         """Render selected workspace series with active Matplotlib style settings."""
+        if self._surface_cut_pick_active:
+            self.cancel_surface_cut_selection()
+        else:
+            self._surface_cut_points = []
+            self._surface_cut_artists = []
+            self.canvas.unsetCursor()
         self._remove_right_axes()
         self.figure.clear()
         self._disable_layout_engine()
@@ -590,6 +788,7 @@ class PlotCanvas(QWidget):
                         target_axes=self.axes,
                         series_index=series_index,
                         series=series,
+                        surface_values=surface_values,
                         grid_x=grid_x,
                         grid_y=grid_y,
                         grid_z=grid_z,
@@ -1279,7 +1478,17 @@ class PlotCanvas(QWidget):
         self,
         surface_values: _SurfaceValues,
     ) -> tuple[np.ndarray, np.ndarray, np.ma.MaskedArray]:
-        """Interpolate scattered X/Y/Z points onto a regular grid."""
+        """Return a native regular grid when possible or an interpolated grid."""
+        render_mode = str(surface_values.series.surface_render_mode or "auto")
+        if render_mode in {"auto", "native"}:
+            native = self._native_surface_grid(surface_values)
+            if native is not None:
+                return native
+            if render_mode == "native":
+                raise ValueError(
+                    "Native grid mode requires one complete value for every X/Y grid cell."
+                )
+
         resolution = max(10, min(int(surface_values.series.grid_resolution), 500))
         grid_x_values = np.linspace(
             float(np.min(surface_values.x_values)),
@@ -1297,7 +1506,40 @@ class PlotCanvas(QWidget):
             x_values=grid_x.ravel(),
             y_values=grid_y.ravel(),
         ).reshape(grid_x.shape)
+        if surface_values.series.mask_outside_boundary:
+            points = np.column_stack((surface_values.x_values, surface_values.y_values))
+            targets = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+            try:
+                outside = Delaunay(points).find_simplex(targets) < 0
+                grid_z = np.asarray(grid_z, dtype=float)
+                grid_z.ravel()[outside] = np.nan
+            except Exception:
+                pass
         return grid_x, grid_y, np.ma.masked_invalid(grid_z)
+
+    @staticmethod
+    def _native_surface_grid(
+        surface_values: _SurfaceValues,
+    ) -> tuple[np.ndarray, np.ndarray, np.ma.MaskedArray] | None:
+        """Return the original complete Cartesian grid without interpolation."""
+        frame = pd.DataFrame({
+            "x": surface_values.x_values,
+            "y": surface_values.y_values,
+            "z": surface_values.z_values,
+        })
+        if frame.duplicated(["x", "y"]).any():
+            frame = frame.groupby(["x", "y"], as_index=False)["z"].mean()
+        x_values = np.sort(frame["x"].unique())
+        y_values = np.sort(frame["y"].unique())
+        if len(frame) != len(x_values) * len(y_values):
+            return None
+        pivot = frame.pivot(index="y", columns="x", values="z").reindex(
+            index=y_values, columns=x_values
+        )
+        if pivot.isna().any().any():
+            return None
+        grid_x, grid_y = np.meshgrid(x_values, y_values)
+        return grid_x, grid_y, np.ma.masked_invalid(pivot.to_numpy(dtype=float))
 
     def _evaluate_surface(
         self,
@@ -1813,6 +2055,7 @@ class PlotCanvas(QWidget):
         target_axes: Any,
         series_index: int,
         series: PlotSeries,
+        surface_values: _SurfaceValues,
         grid_x: np.ndarray,
         grid_y: np.ndarray,
         grid_z: np.ma.MaskedArray,
@@ -1820,38 +2063,573 @@ class PlotCanvas(QWidget):
         """Draw an interpolated X/Y/Z surface using its explicit plot type."""
         if grid_z.count() == 0:
             raise ValueError("interpolation produced no plottable grid values")
-        color_map = series.color_map or "viridis"
+        color_map = colormaps.get_cmap(series.color_map or "viridis").copy()
+        color_map.set_bad(series.color_bad or "#d9d9d9")
+        if series.color_under:
+            color_map.set_under(series.color_under)
+        if series.color_over:
+            color_map.set_over(series.color_over)
+        normalization, minimum, maximum = self._surface_normalization(series, grid_z)
+        levels = self._surface_contour_levels(series, minimum, maximum)
+        common = {
+            "cmap": color_map,
+            "norm": normalization,
+            "alpha": min(max(float(series.surface_alpha), 0.0), 1.0),
+        }
 
         if series.plot_type in {"contour", "spectra_contour"}:
+            line_kwargs: dict[str, object] = dict(common)
+            if series.contour_line_color:
+                line_kwargs.pop("cmap", None)
+                line_kwargs.pop("norm", None)
+                line_kwargs["colors"] = series.contour_line_color
             mappable = target_axes.contour(
                 grid_x,
                 grid_y,
                 grid_z,
-                levels=12,
-                cmap=color_map,
+                levels=levels,
+                linewidths=max(float(series.contour_line_width), 0.0),
+                linestyles=series.contour_line_style or "solid",
+                **line_kwargs,
             )
-            target_axes.clabel(mappable, inline=True, fontsize=8)
+            if series.contour_labels:
+                target_axes.clabel(
+                    mappable,
+                    inline=True,
+                    fontsize=8,
+                    fmt=self._matplotlib_number_format(series.contour_label_format),
+                )
         elif series.plot_type in {"contourf", "spectra_contourf"}:
             mappable = target_axes.contourf(
                 grid_x,
                 grid_y,
                 grid_z,
-                levels=16,
-                cmap=color_map,
+                levels=levels,
+                extend="both" if series.color_under or series.color_over else "neither",
+                **common,
             )
+            if series.contour_overlay:
+                overlay_kwargs: dict[str, object] = {
+                    "levels": levels,
+                    "linewidths": max(float(series.contour_line_width), 0.0),
+                    "linestyles": series.contour_line_style or "solid",
+                    "alpha": min(max(float(series.surface_alpha), 0.0), 1.0),
+                }
+                if series.contour_line_color:
+                    overlay_kwargs["colors"] = series.contour_line_color
+                else:
+                    overlay_kwargs["colors"] = "black"
+                lines = target_axes.contour(grid_x, grid_y, grid_z, **overlay_kwargs)
+                if series.contour_labels:
+                    target_axes.clabel(
+                        lines,
+                        inline=True,
+                        fontsize=8,
+                        fmt=self._matplotlib_number_format(series.contour_label_format),
+                    )
         else:
             mappable = target_axes.pcolormesh(
                 grid_x,
                 grid_y,
                 grid_z,
                 shading="auto",
-                cmap=color_map,
+                **common,
             )
+
+        self._draw_surface_validity_overlays(target_axes, surface_values, series)
+        self._draw_surface_extrema(
+            target_axes, surface_values, grid_x, grid_y, grid_z, series
+        )
+        target_axes.set_aspect("equal" if series.surface_aspect == "equal" else "auto")
 
         colorbar = self.figure.colorbar(mappable, ax=target_axes)
         colorbar_label = series.colorbar_label or self.default_colorbar_label(series)
         colorbar.set_label(colorbar_label)
         self._colorbar_labels.append((series_index, colorbar.ax.yaxis.label))
+
+    @staticmethod
+    def _matplotlib_number_format(value: str) -> str:
+        """Return a safe Matplotlib format string from a compact Python format."""
+        clean = str(value or ".4g").strip()
+        return clean if clean.startswith("%") else "%" + clean
+
+    @staticmethod
+    def _surface_contour_levels(
+        series: PlotSeries,
+        minimum: float,
+        maximum: float,
+    ) -> int | np.ndarray:
+        """Return validated contour levels from count, interval, or explicit values."""
+        mode = str(series.contour_level_mode or "count")
+        if mode == "custom":
+            tokens = [
+                token for token in str(series.contour_custom_levels).replace(",", " ").replace(";", " ").split()
+                if token
+            ]
+            try:
+                levels = np.asarray(sorted({float(token) for token in tokens}), dtype=float)
+            except ValueError as exc:
+                raise ValueError("Custom contour levels must be numeric values.") from exc
+            levels = levels[np.isfinite(levels)]
+            if len(levels) < 2:
+                raise ValueError("Enter at least two distinct custom contour levels.")
+            return levels
+        if mode == "interval":
+            interval = float(series.contour_interval)
+            if not np.isfinite(interval) or interval <= 0:
+                raise ValueError("Contour interval must be a positive finite number.")
+            start = np.floor(minimum / interval) * interval
+            levels = np.arange(start, maximum + interval, interval, dtype=float)
+            levels = levels[(levels >= minimum) & (levels <= maximum)]
+            if len(levels) < 2:
+                return np.linspace(minimum, maximum, 2)
+            if len(levels) > 1000:
+                raise ValueError("Contour interval creates more than 1,000 levels.")
+            return levels
+        return max(2, min(int(series.contour_level_count), 256))
+
+    @staticmethod
+    def _surface_normalization(
+        series: PlotSeries,
+        grid_z: np.ma.MaskedArray,
+    ) -> tuple[mpl_colors.Normalize, float, float]:
+        """Return colour normalization and its effective finite range."""
+        values = np.asarray(grid_z.compressed(), dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            raise ValueError("surface contains no finite values")
+        mode = str(series.color_scale_mode or "auto")
+        if mode == "manual":
+            try:
+                minimum = float(str(series.color_minimum).strip())
+                maximum = float(str(series.color_maximum).strip())
+            except ValueError as exc:
+                raise ValueError("Manual colour limits require numeric minimum and maximum values.") from exc
+        elif mode == "percentile":
+            low = min(max(float(series.color_percentile_low), 0.0), 100.0)
+            high = min(max(float(series.color_percentile_high), 0.0), 100.0)
+            if low >= high:
+                raise ValueError("Lower colour percentile must be below the upper percentile.")
+            minimum, maximum = (float(value) for value in np.percentile(values, [low, high]))
+        else:
+            minimum, maximum = float(np.min(values)), float(np.max(values))
+        if not np.isfinite(minimum) or not np.isfinite(maximum) or minimum >= maximum:
+            if minimum == maximum:
+                padding = max(abs(minimum) * 1e-9, 1e-12)
+                minimum -= padding
+                maximum += padding
+            else:
+                raise ValueError("Colour scale minimum must be below maximum.")
+
+        normalization = str(series.color_normalization or "linear")
+        if normalization == "log":
+            positive = values[values > 0]
+            if positive.size == 0 or maximum <= 0:
+                raise ValueError("Log colour normalization requires positive Z values.")
+            minimum = max(minimum, float(np.min(positive)))
+            norm: mpl_colors.Normalize = mpl_colors.LogNorm(minimum, maximum)
+        elif normalization == "symlog":
+            threshold = max(max(abs(minimum), abs(maximum)) * 1e-3, 1e-12)
+            norm = mpl_colors.SymLogNorm(threshold, vmin=minimum, vmax=maximum)
+        elif normalization == "centered":
+            center = float(series.color_center)
+            if not minimum < center < maximum:
+                raise ValueError("Diverging colour center must lie between the colour limits.")
+            norm = mpl_colors.TwoSlopeNorm(vcenter=center, vmin=minimum, vmax=maximum)
+        else:
+            norm = mpl_colors.Normalize(minimum, maximum)
+        return norm, minimum, maximum
+
+    @staticmethod
+    def _draw_surface_validity_overlays(
+        target_axes: Any,
+        surface_values: _SurfaceValues,
+        series: PlotSeries,
+    ) -> None:
+        """Draw optional measured points, Delaunay mesh, and convex-hull boundary."""
+        x_values = surface_values.x_values
+        y_values = surface_values.y_values
+        points = np.column_stack((x_values, y_values))
+        if series.show_triangulation and len(points) >= 3:
+            target_axes.triplot(x_values, y_values, color="0.35", linewidth=0.45, alpha=0.6)
+        if series.show_boundary and len(points) >= 3:
+            try:
+                hull = ConvexHull(points)
+                closed = np.append(hull.vertices, hull.vertices[0])
+                target_axes.plot(
+                    x_values[closed], y_values[closed], color="black", linewidth=1.1,
+                    linestyle="--", alpha=0.85,
+                )
+            except Exception:
+                pass
+        if series.show_data_points:
+            target_axes.scatter(
+                x_values, y_values, s=12.0, marker="o", facecolors="white",
+                edgecolors="black", linewidths=0.55, alpha=0.9, zorder=4,
+                label="_nolegend_",
+            )
+
+    def surface_extrema(
+        self,
+        surface_values: _SurfaceValues,
+        grid_x: np.ndarray,
+        grid_y: np.ndarray,
+        grid_z: np.ma.MaskedArray,
+        series: PlotSeries,
+    ) -> list[SurfaceExtremum]:
+        """Return selected global/local extrema with measured/interpolated provenance."""
+        if series.extrema_source == "interpolated":
+            x_values = np.asarray(grid_x, dtype=float)
+            y_values = np.asarray(grid_y, dtype=float)
+            z_values = np.asarray(grid_z.filled(np.nan), dtype=float)
+            source = "interpolated"
+        else:
+            x_values = np.asarray(surface_values.x_values, dtype=float)
+            y_values = np.asarray(surface_values.y_values, dtype=float)
+            z_values = np.asarray(surface_values.z_values, dtype=float)
+            source = "measured"
+        valid = np.isfinite(z_values)
+        if not np.any(valid):
+            return []
+        extrema: list[SurfaceExtremum] = []
+        if series.show_global_maximum:
+            extrema.append(self._global_extremum(x_values, y_values, z_values, valid, "maximum", source))
+        if series.show_global_minimum:
+            extrema.append(self._global_extremum(x_values, y_values, z_values, valid, "minimum", source))
+        if series.show_local_maxima or series.show_local_minima:
+            if z_values.ndim == 2:
+                local = self._local_surface_extrema(
+                    x_values, y_values, z_values, series, source, extrema
+                )
+            else:
+                local = self._local_measured_extrema(
+                    x_values, y_values, z_values, series, source, extrema
+                )
+            extrema.extend(local)
+        return extrema
+
+    @staticmethod
+    def _global_extremum(
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+        z_values: np.ndarray,
+        valid: np.ndarray,
+        kind: str,
+        source: str,
+    ) -> SurfaceExtremum:
+        """Return one centroid-nearest representative for a tied global extremum."""
+        target = np.nanmax(z_values) if kind == "maximum" else np.nanmin(z_values)
+        candidates = np.argwhere(valid & np.isclose(z_values, target, rtol=1e-12, atol=1e-15))
+        if z_values.ndim == 1:
+            indexes = candidates[:, 0]
+            cx, cy = np.mean(x_values[indexes]), np.mean(y_values[indexes])
+            chosen = indexes[np.argmin((x_values[indexes] - cx) ** 2 + (y_values[indexes] - cy) ** 2)]
+            return SurfaceExtremum(kind, float(x_values[chosen]), float(y_values[chosen]), float(target), source)
+        cx = float(np.mean(x_values[tuple(candidates.T)]))
+        cy = float(np.mean(y_values[tuple(candidates.T)]))
+        distances = (x_values[tuple(candidates.T)] - cx) ** 2 + (y_values[tuple(candidates.T)] - cy) ** 2
+        row, column = candidates[int(np.argmin(distances))]
+        return SurfaceExtremum(kind, float(x_values[row, column]), float(y_values[row, column]), float(target), source)
+
+    @staticmethod
+    def _local_surface_extrema(
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+        z_values: np.ndarray,
+        series: PlotSeries,
+        source: str,
+        existing: list[SurfaceExtremum],
+    ) -> list[SurfaceExtremum]:
+        """Return prominence-filtered local extrema with greedy physical separation."""
+        valid = np.isfinite(z_values)
+        filled_max = np.where(valid, z_values, -np.inf)
+        filled_min = np.where(valid, z_values, np.inf)
+        local_max = valid & (filled_max == ndimage.maximum_filter(filled_max, size=3, mode="nearest"))
+        local_min = valid & (filled_min == ndimage.minimum_filter(filled_min, size=3, mode="nearest"))
+        local_floor = ndimage.minimum_filter(filled_min, size=3, mode="nearest")
+        local_ceiling = ndimage.maximum_filter(filled_max, size=3, mode="nearest")
+        prominence = max(float(series.local_extrema_prominence), 0.0)
+        candidates: list[tuple[float, SurfaceExtremum]] = []
+        if series.show_local_maxima:
+            for row, column in np.argwhere(local_max & ((z_values - local_floor) >= prominence)):
+                score = float(z_values[row, column] - local_floor[row, column])
+                candidates.append((score, SurfaceExtremum("maximum", float(x_values[row, column]), float(y_values[row, column]), float(z_values[row, column]), source, True)))
+        if series.show_local_minima:
+            for row, column in np.argwhere(local_min & ((local_ceiling - z_values) >= prominence)):
+                score = float(local_ceiling[row, column] - z_values[row, column])
+                candidates.append((score, SurfaceExtremum("minimum", float(x_values[row, column]), float(y_values[row, column]), float(z_values[row, column]), source, True)))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        selected: list[SurfaceExtremum] = []
+        separation = max(float(series.local_extrema_separation), 0.0)
+        for _score, candidate in candidates:
+            if any(np.hypot(candidate.x_value - item.x_value, candidate.y_value - item.y_value) <= max(separation, 1e-12) for item in [*existing, *selected]):
+                continue
+            selected.append(candidate)
+            if len(selected) >= max(1, min(int(series.local_extrema_count), 100)):
+                break
+        return selected
+
+    @staticmethod
+    def _local_measured_extrema(
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+        z_values: np.ndarray,
+        series: PlotSeries,
+        source: str,
+        existing: list[SurfaceExtremum],
+    ) -> list[SurfaceExtremum]:
+        """Return local extrema among measured Delaunay-neighbouring points."""
+        points = np.column_stack((x_values, y_values))
+        try:
+            triangulation = Delaunay(points)
+        except Exception:
+            return []
+        neighbours: list[set[int]] = [set() for _ in range(len(points))]
+        for simplex in triangulation.simplices:
+            for index in simplex:
+                neighbours[int(index)].update(int(item) for item in simplex if item != index)
+
+        threshold = max(float(series.local_extrema_prominence), 0.0)
+        candidates: list[tuple[float, SurfaceExtremum]] = []
+        for index, adjacent in enumerate(neighbours):
+            if not adjacent or not np.isfinite(z_values[index]):
+                continue
+            adjacent_values = z_values[list(adjacent)]
+            adjacent_values = adjacent_values[np.isfinite(adjacent_values)]
+            if adjacent_values.size == 0:
+                continue
+            maximum_score = float(z_values[index] - np.max(adjacent_values))
+            minimum_score = float(np.min(adjacent_values) - z_values[index])
+            if series.show_local_maxima and maximum_score >= threshold:
+                candidates.append((maximum_score, SurfaceExtremum(
+                    "maximum", float(x_values[index]), float(y_values[index]),
+                    float(z_values[index]), source, True,
+                )))
+            if series.show_local_minima and minimum_score >= threshold:
+                candidates.append((minimum_score, SurfaceExtremum(
+                    "minimum", float(x_values[index]), float(y_values[index]),
+                    float(z_values[index]), source, True,
+                )))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        selected: list[SurfaceExtremum] = []
+        separation = max(float(series.local_extrema_separation), 0.0)
+        for _score, candidate in candidates:
+            if any(
+                np.hypot(
+                    candidate.x_value - item.x_value,
+                    candidate.y_value - item.y_value,
+                ) <= max(separation, 1e-12)
+                for item in [*existing, *selected]
+            ):
+                continue
+            selected.append(candidate)
+            if len(selected) >= max(1, min(int(series.local_extrema_count), 100)):
+                break
+        return selected
+
+    def _draw_surface_extrema(
+        self,
+        target_axes: Any,
+        surface_values: _SurfaceValues,
+        grid_x: np.ndarray,
+        grid_y: np.ndarray,
+        grid_z: np.ma.MaskedArray,
+        series: PlotSeries,
+    ) -> None:
+        """Draw uncluttered extrema markers and provenance-aware callout labels."""
+        extrema = self.surface_extrema(surface_values, grid_x, grid_y, grid_z, series)
+        number_format = str(series.extrema_label_format or ".4g")
+        offsets = ((8, 8), (8, -18), (-72, 8), (-72, -18))
+        for index, item in enumerate(extrema):
+            is_maximum = item.kind == "maximum"
+            marker = "^" if is_maximum else "v"
+            color = "#d62728" if is_maximum else "#1f77b4"
+            target_axes.scatter([item.x_value], [item.y_value], marker=marker, s=72, color=color, edgecolors="white", linewidths=0.9, zorder=7, label="_nolegend_")
+            if series.extrema_label_mode == "z":
+                label = f"{item.kind[:3].title()} Z={format(item.z_value, number_format)}"
+            else:
+                label = (
+                    f"{item.kind[:3].title()} ({item.source})\n"
+                    f"X={format(item.x_value, number_format)}, Y={format(item.y_value, number_format)}\n"
+                    f"Z={format(item.z_value, number_format)}"
+                )
+            target_axes.annotate(
+                label, (item.x_value, item.y_value), xytext=offsets[index % len(offsets)],
+                textcoords="offset points", fontsize=8, color="black",
+                bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.82, "edgecolor": color},
+                arrowprops={"arrowstyle": "-", "color": color, "linewidth": 0.7}, zorder=8,
+            )
+
+    def surface_grid_frame(
+        self,
+        workspace: Workspace,
+        series: PlotSeries,
+    ) -> pd.DataFrame:
+        """Return the rendered native/interpolated surface as tidy X/Y/Z rows."""
+        surface = self._surface_values(workspace, series, "linear", "linear")
+        grid_x, grid_y, grid_z = self._interpolated_surface_grid(surface)
+        values = np.asarray(grid_z.filled(np.nan), dtype=float)
+        return pd.DataFrame({
+            "x": grid_x.ravel(),
+            "y": grid_y.ravel(),
+            "z": values.ravel(),
+            "valid": np.isfinite(values).ravel().astype(int),
+        })
+
+    def surface_profile_frame(
+        self,
+        workspace: Workspace,
+        series: PlotSeries,
+        orientation: str,
+        coordinate: float,
+    ) -> pd.DataFrame:
+        """Return the closest horizontal or vertical profile through a surface grid."""
+        surface = self._surface_values(workspace, series, "linear", "linear")
+        grid_x, grid_y, grid_z = self._interpolated_surface_grid(surface)
+        if orientation == "vertical":
+            column = int(np.argmin(np.abs(grid_x[0, :] - coordinate)))
+            frame = pd.DataFrame({
+                "distance": grid_y[:, column],
+                "x": grid_x[:, column],
+                "y": grid_y[:, column],
+                "z": np.asarray(grid_z[:, column].filled(np.nan), dtype=float),
+            })
+        else:
+            row = int(np.argmin(np.abs(grid_y[:, 0] - coordinate)))
+            frame = pd.DataFrame({
+                "distance": grid_x[row, :],
+                "x": grid_x[row, :],
+                "y": grid_y[row, :],
+                "z": np.asarray(grid_z[row, :].filled(np.nan), dtype=float),
+            })
+        return frame.dropna(subset=["z"]).reset_index(drop=True)
+
+    def surface_line_profile_frame(
+        self,
+        workspace: Workspace,
+        series: PlotSeries,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        sample_count: int = 200,
+    ) -> pd.DataFrame:
+        """Return an interpolated profile between two arbitrary map coordinates."""
+        count = max(2, min(int(sample_count), 10_000))
+        start = np.asarray([float(start_x), float(start_y)], dtype=float)
+        end = np.asarray([float(end_x), float(end_y)], dtype=float)
+        if not np.all(np.isfinite([*start, *end])):
+            raise ValueError("Line-profile coordinates must be finite numbers.")
+        length = float(np.linalg.norm(end - start))
+        if length <= 0.0:
+            raise ValueError("The line-profile start and end points must be different.")
+
+        surface = self._surface_values(workspace, series, "linear", "linear")
+        fraction = np.linspace(0.0, 1.0, count)
+        x_values = start[0] + fraction * (end[0] - start[0])
+        y_values = start[1] + fraction * (end[1] - start[1])
+        z_values = self._evaluate_surface(surface, x_values, y_values)
+        if series.mask_outside_boundary:
+            points = np.column_stack((surface.x_values, surface.y_values))
+            targets = np.column_stack((x_values, y_values))
+            try:
+                z_values[Delaunay(points).find_simplex(targets) < 0] = np.nan
+            except Exception:
+                pass
+        frame = pd.DataFrame({
+            "distance": fraction * length,
+            "fraction": fraction,
+            "x": x_values,
+            "y": y_values,
+            "z": np.asarray(z_values, dtype=float),
+        })
+        return frame.dropna(subset=["z"]).reset_index(drop=True)
+
+    def surface_roi_summary_frame(
+        self,
+        workspace: Workspace,
+        series: PlotSeries,
+        x_minimum: float,
+        x_maximum: float,
+        y_minimum: float,
+        y_maximum: float,
+    ) -> pd.DataFrame:
+        """Return descriptive and integrated values inside one rectangular map ROI."""
+        grid = self.surface_grid_frame(workspace, series)
+        low_x, high_x = sorted((float(x_minimum), float(x_maximum)))
+        low_y, high_y = sorted((float(y_minimum), float(y_maximum)))
+        roi = grid[
+            grid["x"].between(low_x, high_x)
+            & grid["y"].between(low_y, high_y)
+            & grid["z"].notna()
+        ]
+        if roi.empty:
+            raise ValueError("The selected ROI contains no finite rendered map cells.")
+        unique_x = np.sort(grid["x"].unique())
+        unique_y = np.sort(grid["y"].unique())
+        dx = float(np.median(np.diff(unique_x))) if len(unique_x) > 1 else 1.0
+        dy = float(np.median(np.diff(unique_y))) if len(unique_y) > 1 else 1.0
+        values = roi["z"].to_numpy(dtype=float)
+        maximum_row = roi.loc[roi["z"].idxmax()]
+        minimum_row = roi.loc[roi["z"].idxmin()]
+        metrics: list[tuple[str, float]] = [
+            ("cell_count", float(len(values))),
+            ("mean", float(np.mean(values))),
+            ("median", float(np.median(values))),
+            ("standard_deviation", float(np.std(values, ddof=1)) if len(values) > 1 else 0.0),
+            ("minimum", float(np.min(values))),
+            ("minimum_x", float(minimum_row["x"])),
+            ("minimum_y", float(minimum_row["y"])),
+            ("maximum", float(np.max(values))),
+            ("maximum_x", float(maximum_row["x"])),
+            ("maximum_y", float(maximum_row["y"])),
+            ("integrated_z_dx_dy", float(np.sum(values) * abs(dx * dy))),
+            ("x_minimum", low_x),
+            ("x_maximum", high_x),
+            ("y_minimum", low_y),
+            ("y_maximum", high_y),
+        ]
+        return pd.DataFrame(metrics, columns=["metric", "value"])
+
+    def surface_contours_frame(
+        self,
+        workspace: Workspace,
+        series: PlotSeries,
+    ) -> pd.DataFrame:
+        """Extract rendered contour vertices and enclosed polygon areas."""
+        surface = self._surface_values(workspace, series, "linear", "linear")
+        grid_x, grid_y, grid_z = self._interpolated_surface_grid(surface)
+        _norm, minimum, maximum = self._surface_normalization(series, grid_z)
+        levels = self._surface_contour_levels(series, minimum, maximum)
+        if isinstance(levels, int):
+            levels = np.linspace(minimum, maximum, levels)
+        figure = Figure()
+        axes = figure.add_subplot(111)
+        contour_set = axes.contour(grid_x, grid_y, grid_z, levels=levels)
+        rows: list[dict[str, float | int]] = []
+        for level, segments in zip(contour_set.levels, contour_set.allsegs):
+            for segment_index, segment in enumerate(segments):
+                if len(segment) < 2:
+                    continue
+                area = 0.0
+                if len(segment) >= 3 and np.allclose(segment[0], segment[-1]):
+                    area = 0.5 * abs(float(np.sum(
+                        segment[:, 0] * np.roll(segment[:, 1], -1)
+                        - np.roll(segment[:, 0], -1) * segment[:, 1]
+                    )))
+                for vertex_index, (x_value, y_value) in enumerate(segment):
+                    rows.append({
+                        "level": float(level),
+                        "segment": int(segment_index),
+                        "vertex": int(vertex_index),
+                        "x": float(x_value),
+                        "y": float(y_value),
+                        "enclosed_area": area,
+                    })
+        if not rows:
+            raise ValueError("No contour vertices could be extracted for these levels.")
+        return pd.DataFrame(rows)
 
     @staticmethod
     def default_colorbar_label(series: PlotSeries) -> str:
@@ -1908,7 +2686,18 @@ class PlotCanvas(QWidget):
         y_value = getattr(event, "ydata", None)
         if x_value is None or y_value is None:
             return
+        if self._surface_cut_pick_active and len(self._surface_cut_points) == 1:
+            start = self._surface_cut_points[0]
+            self._draw_surface_cut_overlay(
+                start,
+                (float(x_value), float(y_value)),
+            )
         text = self._format_surface_coordinate(float(x_value), float(y_value))
+        if self._surface_cut_pick_active:
+            if self._surface_cut_points:
+                text = "Cut end: " + text
+            else:
+                text = "Cut start: " + text
         self.coordinate_readout.setText(text)
         self.toolbar.set_message(text)
 
@@ -2142,6 +2931,11 @@ class PlotCanvas(QWidget):
 
     def _draw_empty_state(self, clear_axes: bool = True) -> None:
         """Show the placeholder plot when no series can be rendered."""
+        if self._surface_cut_pick_active:
+            self.cancel_surface_cut_selection()
+        self._surface_cut_points = []
+        self._surface_cut_artists = []
+        self.canvas.unsetCursor()
         self._series_artists = []
         self._colorbar_labels = []
         self._rendered_surface_grids = []

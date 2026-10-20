@@ -1221,7 +1221,8 @@ Selecting a queued series switches the editor to **Update Series** mode. Mapping
 
 Rendered data, text, and axes can be edited without navigating to the lateral inspector. Double-click:
 
-- A **plotted line, marker, bar, filled region, distribution, composition cell, or 2D map** to edit that committed series. The focused dialog provides compatible graph subtypes, series name and legend inclusion, continuous/dashed/dotted/dash-dot line patterns, line width, symbol shape and size, automatic or custom colour, fill opacity, and bar width. For example, an XY line can be changed directly to scatter, line + markers, errorbar, bar, horizontal bar, or area.
+- A **plotted line, marker, bar, filled region, distribution, or composition cell** to edit that committed series. The focused dialog provides compatible graph subtypes, series name and legend inclusion, continuous/dashed/dotted/dash-dot line patterns, line width, symbol shape and size, automatic or custom colour, fill opacity, and bar width. For example, an XY line can be changed directly to scatter, line + markers, errorbar, bar, horizontal bar, or area.
+- A **2D or spectral map** to open its map-specific Colour & Grid, Contours, Validity, and Extrema editor.
 - The **plot title** to change its text.
 - An **X, left-Y, or right-Y axis label**, tick-label area, or axis line to edit its label, label size, tick-number size, linear/log scale, optional minimum/maximum, and the shared grid state.
 - A **legend entry label** to rename that committed series or include/exclude it from the legend.
@@ -1246,14 +1247,25 @@ Accepted changes redraw immediately and update the corresponding lateral Plot In
 | Composition | Pie | Label column plus positive value column |
 | Composition | Donut | Label column plus positive value column |
 | Composition | Voronoi Composition | Label/value columns and Circular, Rectangular, or Polygonal container |
-| 2D Maps | Interpolated Heatmap | X/Y/Z scattered coordinates, interpolation method, grid resolution |
-| 2D Maps | Contour | X/Y/Z scattered coordinates, interpolation method, grid resolution |
-| 2D Maps | Filled Contour | X/Y/Z scattered coordinates, interpolation method, grid resolution |
+| 2D Maps | Interpolated Heatmap | X/Y/Z coordinates; native complete grid or interpolated scattered grid |
+| 2D Maps | Contour | X/Y/Z coordinates; configurable levels, labels, line style, and normalization |
+| 2D Maps | Filled Contour | X/Y/Z coordinates; configurable fill levels and optional contour overlay |
 | Spectra Plot | Spectral Heatmap | Long-form X/Y/Raman-shift-or-frequency/intensity data; target center; closest or linear spectral sampling |
 | Spectra Plot | Spectral Contour | Long-form spectral-map data rendered as contour lines at the target center |
 | Spectra Plot | Filled Spectral Contour | Long-form spectral-map data rendered as filled contours at the target center |
 
-2D-map interpolation choices are **Linear**, **Cubic spline**, and **Piecewise cubic**. The **Palette** selector now occupies its own full-width row above interpolation and grid resolution; it applies Viridis, Plasma, Inferno, Magma, Cividis, Turbo, grayscale, diverging, terrain/ocean, and other supplied Matplotlib colour maps and is retained in saved plots. **Colour-bar label** sets a custom intensity/Z label; leaving it blank uses the selected value column automatically. The rendered colour-bar label can also be edited directly by double-clicking it, like the other rendered axis labels. A dedicated row above the canvas follows the mouse and reports `x`, `y`, and interpolated Z/intensity for ordinary and spectral maps; masked interpolation edges fall back to the closest measured map pixel. Maps require numeric Z values and at least three distinct non-collinear X/Y coordinate points. Rendering failures appear as a message on the canvas instead of a blank plot.
+2D-map interpolation choices are **Linear**, **Cubic spline**, and **Piecewise cubic**. **Automatic** rendering preserves a complete Cartesian input grid without resampling and otherwise interpolates onto the selected resolution; users may explicitly require Native or Interpolated mode. The **Palette** selector applies the supplied Matplotlib colour maps and is retained in saved plots. **Colour-bar label** sets a custom intensity/Z label; leaving it blank uses the selected value column automatically. The rendered colour-bar label can also be edited directly by double-clicking it.
+
+Select a committed map and click **Map Details...**, or double-click the map, for four groups of saved controls:
+
+- **Colour & Grid**: automatic, manual, or robust-percentile limits; linear, logarithmic, symmetric-log, or center-aware diverging normalization; missing/under/over colours; opacity; and automatic or equal-unit aspect.
+- **Contours**: level count, fixed interval, or explicit numeric levels; labels and number format; line colour/width/style; and an optional line overlay on filled contours.
+- **Validity**: measured data points, Delaunay triangulation, convex-hull boundary, and masking outside that measured boundary.
+- **Extrema**: global and local maxima/minima, prominence and physical-separation filters, label count/content, and either measured or rendered-grid values. Labels explicitly state **measured** or **interpolated** so interpolation overshoot is not presented as an observation.
+
+Click **Analyse Map...** to create an ordinary reusable worksheet containing the rendered X/Y/Z grid, a closest horizontal or vertical profile, an arbitrary point-to-point profile, rectangular ROI statistics, or contour vertices and enclosed areas. ROI output includes cell count, mean, median, standard deviation, extrema with coordinates, and a grid-spacing-weighted integral. The repository includes analytically defined regular-grid and irregular point-cloud examples under `Test_Data`.
+
+A dedicated row above the canvas follows the mouse and reports `x`, `y`, and interpolated Z/intensity for ordinary and spectral maps; masked interpolation edges fall back to the closest measured map pixel. Maps require numeric Z values and at least three distinct non-collinear X/Y coordinate points. Rendering failures appear as a message on the canvas instead of a blank plot.
 
 For an imported hyperspectral map, choose **Spectra Plot** and select its worksheet. JASC automatically proposes `X`, `Y`, `Raman Shift` (or a frequency/wavenumber equivalent), and `Intensity`. Enter the target center and choose **Closest measured shift** to take the nearest available spectral sample independently at every pixel, or **Linear spectral interpolation** to interpolate between the two surrounding samples in every pixel spectrum. The separate 2D-map interpolation control then determines how those sampled XY intensities are drawn on the spatial grid. Target center, spectral column, sampling method, spatial interpolation, and grid resolution are retained in saved plots.
 
@@ -1489,6 +1501,9 @@ If `python` is not found, activate the environment where the dependencies were i
 - Provide at least three distinct, non-collinear coordinate points.
 - Ensure Z is numeric and enough finite points remain after blank removal.
 - Try Linear before cubic methods and reduce grid resolution for expensive data.
+- Use **Automatic** or **Interpolated grid** when the X/Y points do not form a complete Cartesian grid; **Native regular grid** deliberately rejects missing cells.
+- Logarithmic colour normalization requires positive Z values. For signed data, use linear, symmetric-log, or diverging-around-center normalization.
+- Ensure custom contour levels contain at least two distinct finite numbers.
 
 ### A plot style or LaTeX fails
 

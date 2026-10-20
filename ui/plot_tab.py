@@ -49,6 +49,8 @@ from ui.plot_element_dialogs import (
     PlotLegendEntryEditDialog,
     PlotSeriesAppearanceDialog,
     PlotTextEditDialog,
+    SurfaceAnalysisDialog,
+    SurfacePlotDetailsDialog,
 )
 
 _LINE_LABELS: dict[str, str] = {
@@ -129,6 +131,20 @@ _COLOR_MAP_LABELS: dict[str, str] = {
 }
 _PLOT_SERIES_FIELDS = {field.name for field in fields(PlotSeries)}
 _PLOT_LOCATOR_FIELDS = {field.name for field in fields(PlotLocator)}
+_SURFACE_ADVANCED_FIELDS = {
+    "surface_render_mode", "surface_aspect", "surface_alpha",
+    "color_scale_mode", "color_minimum", "color_maximum",
+    "color_percentile_low", "color_percentile_high", "color_normalization",
+    "color_center", "color_bad", "color_under", "color_over",
+    "contour_level_mode", "contour_level_count", "contour_interval",
+    "contour_custom_levels", "contour_labels", "contour_label_format",
+    "contour_overlay", "contour_line_color", "contour_line_width",
+    "contour_line_style", "show_data_points", "show_triangulation",
+    "show_boundary", "mask_outside_boundary", "show_global_maximum",
+    "show_global_minimum", "extrema_source", "show_local_maxima",
+    "show_local_minima", "local_extrema_count", "local_extrema_prominence",
+    "local_extrema_separation", "extrema_label_mode", "extrema_label_format",
+}
 
 
 class PlotTab(QWidget):
@@ -142,6 +158,7 @@ class PlotTab(QWidget):
     new_plot_requested = Signal()
     plot_draft_replaced = Signal()
     options_visibility_changed = Signal(bool)
+    dataset_created = Signal(str)
 
     def __init__(
         self,
@@ -161,6 +178,8 @@ class PlotTab(QWidget):
         self._loading_series_controls = False
         self._series_editor_dirty = False
         self._editing_series_row: int | None = None
+        self._pending_surface_cut: tuple[PlotSeries, tuple[float, float, float, float]] | None = None
+        self._surface_profile_windows: list[QDialog] = []
         self._preview_dirty = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -168,6 +187,8 @@ class PlotTab(QWidget):
         self._preview_timer.timeout.connect(self._render_scheduled_preview)
         self._plot_canvas = PlotCanvas()
         self._plot_canvas.element_double_clicked.connect(self._edit_rendered_plot_element)
+        self._plot_canvas.surface_cut_selected.connect(self._handle_surface_cut_selected)
+        self._plot_canvas.surface_cut_cancelled.connect(self._handle_surface_cut_cancelled)
         self._build_ui()
 
     # -- public API for MainWindow -----------------------------------------
@@ -1245,14 +1266,296 @@ class PlotTab(QWidget):
     def _build_surface_options_panel(self) -> QWidget:
         """Return 2D interpolated map controls."""
         panel = QWidget()
-        layout = QHBoxLayout(panel)
+        layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("Interpolation"))
-        layout.addWidget(self._interpolation_method_combo)
-        layout.addWidget(QLabel("Grid"))
-        layout.addWidget(self._surface_resolution_spin)
-        layout.addStretch(1)
+        layout.setSpacing(5)
+
+        settings_row = QHBoxLayout()
+        settings_row.addWidget(QLabel("Interpolation"))
+        settings_row.addWidget(self._interpolation_method_combo, 1)
+        settings_row.addWidget(QLabel("Grid resolution"))
+        settings_row.addWidget(self._surface_resolution_spin)
+        layout.addLayout(settings_row)
+
+        actions_row = QHBoxLayout()
+        details_button = QPushButton("Map Details...")
+        details_button.clicked.connect(self._edit_surface_details)
+        analysis_button = QPushButton("Analyse Map...")
+        analysis_button.clicked.connect(self._analyse_surface)
+        pick_cut_button = QPushButton("Pick Cut Line...")
+        pick_cut_button.setToolTip(
+            "Choose a start and end point directly on the rendered map, then plot and save the profile."
+        )
+        pick_cut_button.clicked.connect(self._start_surface_cut_selection)
+        actions_row.addWidget(details_button)
+        actions_row.addWidget(analysis_button)
+        actions_row.addWidget(pick_cut_button)
+        actions_row.addStretch(1)
+        layout.addLayout(actions_row)
         return panel
+
+    def _selected_surface_series(self, title: str) -> tuple[int, PlotSeries] | None:
+        """Return the selected committed surface series or explain what is required."""
+        row = self._selected_series_row()
+        if row is None or not 0 <= row < len(self._plot_series):
+            QMessageBox.information(self, title, "Select a committed 2D map series first.")
+            return None
+        series = self._plot_series[row]
+        if series.plot_type not in _SURFACE_PLOT_TYPES:
+            QMessageBox.information(self, title, "The selected series is not a 2D map.")
+            return None
+        if self.has_unapplied_series_edits():
+            QMessageBox.information(self, title, "Apply or revert the staged series edits first.")
+            return None
+        return row, series
+
+    def _edit_surface_details(self) -> None:
+        """Open the complete persisted scientific-map rendering editor."""
+        selected = self._selected_surface_series("2D Map Details")
+        if selected is None:
+            return
+        row, _series = selected
+        self._edit_surface_details_for_row(row)
+
+    def _edit_surface_details_for_row(self, row: int) -> None:
+        """Edit one committed map series identified by its queue row."""
+        if not 0 <= row < len(self._plot_series):
+            return
+        if self._series_editor_dirty:
+            QMessageBox.information(
+                self,
+                "Unapplied Series Edits",
+                "Update or revert the selected series before editing the map on the canvas.",
+            )
+            return
+        series = self._plot_series[row]
+        if series.plot_type not in _SURFACE_PLOT_TYPES:
+            return
+        dialog = SurfacePlotDetailsDialog(series, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._plot_series[row] = replace(series, **dialog.series_updates())
+        self._series_list.item(row).setText(self._series_text(self._plot_series[row]))
+        self._series_list.setCurrentRow(row)
+        self._load_series_controls(self._plot_series[row])
+        self._render_plot()
+
+    def _analyse_surface(self) -> None:
+        """Create a worksheet from the selected map grid, profile, ROI, or contours."""
+        selected = self._selected_surface_series("Analyse 2D Map")
+        if selected is None:
+            return
+        _row, series = selected
+        try:
+            preview = self._plot_canvas.surface_grid_frame(self._workspace, series)
+            bounds = (
+                float(preview["x"].min()),
+                float(preview["x"].max()),
+                float(preview["y"].min()),
+                float(preview["y"].max()),
+            )
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "Analyse 2D Map", str(exc))
+            return
+        dialog = SurfaceAnalysisDialog(
+            f"{series.z_column or 'map'}_analysis", bounds, self
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        output_name = dialog.output_name()
+        if not output_name:
+            QMessageBox.warning(self, "Analyse 2D Map", "Enter a result sheet name.")
+            return
+        try:
+            operation = dialog.operation()
+            if operation == "grid":
+                frame = self._plot_canvas.surface_grid_frame(self._workspace, series)
+            elif operation in {"horizontal", "vertical"}:
+                frame = self._plot_canvas.surface_profile_frame(
+                    self._workspace, series, operation, dialog.coordinate()
+                )
+            elif operation == "line":
+                frame = self._plot_canvas.surface_line_profile_frame(
+                    self._workspace, series, *dialog.line_profile()
+                )
+            elif operation == "roi":
+                frame = self._plot_canvas.surface_roi_summary_frame(
+                    self._workspace, series, *dialog.bounds()
+                )
+            else:
+                frame = self._plot_canvas.surface_contours_frame(self._workspace, series)
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "Analyse 2D Map", str(exc))
+            return
+        self._commit_surface_analysis(series, operation, output_name, frame)
+
+    def _start_surface_cut_selection(self) -> None:
+        """Arm the canvas so two map clicks define an arbitrary profile line."""
+        selected = self._selected_surface_series("Pick Map Cut Line")
+        if selected is None:
+            return
+        _row, series = selected
+        try:
+            grid = self._plot_canvas.surface_grid_frame(self._workspace, series)
+            bounds = (
+                float(grid["x"].min()),
+                float(grid["x"].max()),
+                float(grid["y"].min()),
+                float(grid["y"].max()),
+            )
+            self._plot_canvas.begin_surface_cut_selection()
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "Pick Map Cut Line", str(exc))
+            return
+        self._pending_surface_cut = (series, bounds)
+        self.status_message.emit(
+            "Click the cut start and end points on the map; right-click or Esc cancels"
+        )
+
+    def _handle_surface_cut_selected(
+        self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+    ) -> None:
+        """Confirm a mouse-picked line, then create its worksheet and profile plot."""
+        pending = self._pending_surface_cut
+        self._pending_surface_cut = None
+        if pending is None:
+            return
+        series, bounds = pending
+        dialog = SurfaceAnalysisDialog(
+            f"{series.z_column or 'map'}_cut", bounds, self
+        )
+        dialog.configure_line_profile(start_x, start_y, end_x, end_y)
+        if dialog.exec() != QDialog.Accepted:
+            self._plot_canvas.clear_surface_cut_overlay()
+            return
+        output_name = dialog.output_name()
+        if not output_name:
+            QMessageBox.warning(self, "Pick Map Cut Line", "Enter a result sheet name.")
+            self._plot_canvas.clear_surface_cut_overlay()
+            return
+        try:
+            frame = self._plot_canvas.surface_line_profile_frame(
+                self._workspace, series, *dialog.line_profile()
+            )
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "Pick Map Cut Line", str(exc))
+            self._plot_canvas.clear_surface_cut_overlay()
+            return
+        self._commit_surface_analysis(series, "line", output_name, frame)
+
+    def _handle_surface_cut_cancelled(self) -> None:
+        """Clear pending state when a canvas cut selection is cancelled."""
+        self._pending_surface_cut = None
+        self.status_message.emit("Map cut selection cancelled")
+
+    def _commit_surface_analysis(
+        self,
+        series: PlotSeries,
+        operation: str,
+        output_name: str,
+        frame: pd.DataFrame,
+    ) -> Dataset:
+        """Store one map-analysis result and show a cut profile when applicable."""
+        dataset = self._workspace.add_dataset(output_name, frame)
+        self._annotate_surface_analysis_dataset(dataset, operation, series)
+        if operation in {"horizontal", "vertical", "line"}:
+            self._show_surface_profile(dataset, operation, series)
+        self.dataset_created.emit(dataset.name)
+        self.refresh_controls(dataset.name)
+        self.status_message.emit(f"Created map-analysis worksheet {dataset.name}")
+        return dataset
+
+    def _show_surface_profile(
+        self,
+        dataset: Dataset,
+        operation: str,
+        source_series: PlotSeries,
+    ) -> None:
+        """Open a non-modal, zoomable plot for a generated map cut."""
+        if "distance" not in dataset.frame.columns or "z" not in dataset.frame.columns:
+            return
+        operation_labels = {
+            "horizontal": "Horizontal map cut",
+            "vertical": "Vertical map cut",
+            "line": "Map line cut",
+        }
+        x_labels = {
+            "horizontal": "X coordinate",
+            "vertical": "Y coordinate",
+            "line": "Distance along cut",
+        }
+        window = QDialog(self)
+        window.setAttribute(Qt.WA_DeleteOnClose, True)
+        window.setWindowTitle(operation_labels.get(operation, "Map cut profile"))
+        window.resize(760, 500)
+        canvas = PlotCanvas(window)
+        canvas.plot_series(
+            self._workspace,
+            [PlotSeries(
+                dataset.name,
+                "distance",
+                dataset.name,
+                "z",
+                plot_type="line_marker",
+                color="tab:blue",
+                marker="o",
+                marker_size=3.5,
+                custom_label=source_series.z_column or "Z",
+            )],
+            title=(
+                f"{operation_labels.get(operation, 'Map cut')}: "
+                f"{source_series.z_column or 'Z'}"
+            ),
+            x_label=x_labels.get(operation, "Distance"),
+            y_label=source_series.colorbar_label or source_series.z_column or "Z",
+            legend_settings=LegendSettings(enabled=False),
+        )
+        layout = QVBoxLayout(window)
+        layout.addWidget(canvas)
+        window._profile_canvas = canvas  # type: ignore[attr-defined]
+        self._surface_profile_windows.append(window)
+        window.destroyed.connect(
+            lambda _object=None, profile_window=window: self._discard_surface_profile_window(
+                profile_window
+            )
+        )
+        window.show()
+
+    def _discard_surface_profile_window(self, window: QDialog) -> None:
+        """Release a closed profile window from the non-modal window registry."""
+        if window in self._surface_profile_windows:
+            self._surface_profile_windows.remove(window)
+
+    @staticmethod
+    def _annotate_surface_analysis_dataset(
+        dataset: Dataset,
+        operation: str,
+        source_series: PlotSeries,
+    ) -> None:
+        """Assign useful roles and provenance to generated map-analysis columns."""
+        role_maps = {
+            "grid": {"x": "x", "y": "y", "z": "z"},
+            "horizontal": {"distance": "x", "z": "y"},
+            "vertical": {"distance": "x", "z": "y"},
+            "line": {"distance": "x", "z": "y"},
+            "contours": {"x": "x", "y": "y", "level": "z"},
+            "roi": {"metric": "label", "value": "y"},
+        }
+        source_name = source_series.z_dataset or source_series.y_dataset
+        for column_name, role in role_maps.get(operation, {}).items():
+            if column_name not in dataset.frame.columns:
+                continue
+            metadata = dataset.metadata_for_column(column_name)
+            metadata.role = role
+            metadata.comment = (
+                f"Generated by 2D map analysis '{operation}' from "
+                f"{source_name}:{source_series.z_column}."
+            )
+        dataset.sync_column_metadata_attrs()
 
     def _build_voronoi_options_panel(self) -> QWidget:
         """Return Voronoi composition controls."""
@@ -1805,6 +2108,42 @@ class PlotTab(QWidget):
     def _plot_series_from_state(self, state: dict[str, object]) -> PlotSeries:
         """Deserialize one saved series dictionary into a PlotSeries."""
         clean_state = {key: value for key, value in state.items() if key in _PLOT_SERIES_FIELDS}
+
+        def choice(key: str, default: str, allowed: set[str]) -> None:
+            value = str(clean_state.get(key, default) or default)
+            clean_state[key] = value if value in allowed else default
+
+        def number(
+            key: str,
+            default: float,
+            minimum: float | None = None,
+            maximum: float | None = None,
+        ) -> None:
+            try:
+                value = float(clean_state.get(key, default))
+            except (TypeError, ValueError):
+                value = default
+            if not np.isfinite(value):
+                value = default
+            if minimum is not None:
+                value = max(value, minimum)
+            if maximum is not None:
+                value = min(value, maximum)
+            clean_state[key] = value
+
+        def integer(key: str, default: int, minimum: int, maximum: int) -> None:
+            try:
+                value = int(clean_state.get(key, default))
+            except (TypeError, ValueError):
+                value = default
+            clean_state[key] = max(minimum, min(value, maximum))
+
+        def boolean(key: str, default: bool) -> None:
+            value = clean_state.get(key, default)
+            if isinstance(value, str):
+                value = value.strip().lower() in {"1", "true", "yes", "on"}
+            clean_state[key] = bool(value)
+
         columns = clean_state.get("distribution_columns", ())
         if isinstance(columns, str):
             clean_state["distribution_columns"] = (columns,)
@@ -1817,12 +2156,7 @@ class PlotTab(QWidget):
         clean_state["spectral_column"] = str(
             clean_state.get("spectral_column", "") or ""
         )
-        try:
-            clean_state["spectral_center"] = float(
-                clean_state.get("spectral_center", 0.0)
-            )
-        except (TypeError, ValueError):
-            clean_state["spectral_center"] = 0.0
+        number("spectral_center", 0.0)
         spectral_sampling = str(
             clean_state.get("spectral_sampling", "nearest") or "nearest"
         )
@@ -1842,10 +2176,50 @@ class PlotTab(QWidget):
         clean_state["voronoi_shape"] = self._normalized_voronoi_shape(
             str(clean_state.get("voronoi_shape", "circle") or "circle")
         )
-        try:
-            clean_state["grid_resolution"] = int(clean_state.get("grid_resolution", 120))
-        except (TypeError, ValueError):
-            clean_state["grid_resolution"] = 120
+        integer("grid_resolution", 120, 10, 500)
+        choice("surface_render_mode", "auto", {"auto", "native", "interpolated"})
+        choice("surface_aspect", "auto", {"auto", "equal"})
+        choice("color_scale_mode", "auto", {"auto", "manual", "percentile"})
+        choice("color_normalization", "linear", {"linear", "log", "symlog", "centered"})
+        choice("contour_level_mode", "count", {"count", "interval", "custom"})
+        choice("contour_line_style", "solid", {"solid", "dashed", "dotted", "dashdot"})
+        choice("extrema_source", "measured", {"measured", "interpolated"})
+        choice("extrema_label_mode", "xyz", {"xyz", "z"})
+        number("surface_alpha", 1.0, 0.0, 1.0)
+        number("color_percentile_low", 2.0, 0.0, 100.0)
+        number("color_percentile_high", 98.0, 0.0, 100.0)
+        number("color_center", 0.0)
+        number("contour_interval", 1.0, 1e-15)
+        number("contour_line_width", 0.8, 0.0, 10.0)
+        number("local_extrema_prominence", 0.0, 0.0)
+        number("local_extrema_separation", 0.0, 0.0)
+        integer("contour_level_count", 12, 2, 256)
+        integer("local_extrema_count", 5, 1, 100)
+        for key, default in {
+            "contour_labels": True,
+            "contour_overlay": False,
+            "show_data_points": False,
+            "show_triangulation": False,
+            "show_boundary": False,
+            "mask_outside_boundary": True,
+            "show_global_maximum": False,
+            "show_global_minimum": False,
+            "show_local_maxima": False,
+            "show_local_minima": False,
+        }.items():
+            boolean(key, default)
+        for key, default in {
+            "color_minimum": "",
+            "color_maximum": "",
+            "color_bad": "#d9d9d9",
+            "color_under": "",
+            "color_over": "",
+            "contour_custom_levels": "",
+            "contour_label_format": ".4g",
+            "contour_line_color": "",
+            "extrema_label_format": ".4g",
+        }.items():
+            clean_state[key] = str(clean_state.get(key, default) or default)
         return PlotSeries(**clean_state)
 
     @staticmethod
@@ -2202,7 +2576,7 @@ class PlotTab(QWidget):
         z_column = self._z_column_combo.currentText()
         if plot_type in {"box", "violin"}:
             y_column = distribution_columns[0] if distribution_columns else y_column
-        return PlotSeries(
+        series = PlotSeries(
             x_dataset=y_dataset if plot_type in {"box", "violin"} else self._x_dataset_combo.currentText(),
             x_column="" if plot_type in {"box", "violin"} else self._x_column_combo.currentText(),
             x_err_column=self._x_err_column_combo.currentText() if plot_type == "errorbar" else "",
@@ -2262,6 +2636,19 @@ class PlotTab(QWidget):
             ),
             voronoi_shape=str(self._voronoi_shape_combo.currentData() or "circle"),
         )
+        row = self._selected_series_row()
+        if (
+            plot_type in _SURFACE_PLOT_TYPES
+            and row is not None
+            and 0 <= row < len(self._plot_series)
+            and self._plot_series[row].plot_type in _SURFACE_PLOT_TYPES
+        ):
+            previous = self._plot_series[row]
+            series = replace(
+                series,
+                **{name: getattr(previous, name) for name in _SURFACE_ADVANCED_FIELDS},
+            )
+        return series
 
     def _update_selected_series(self) -> None:
         """Replace the selected queued series from current controls."""
@@ -2815,6 +3202,12 @@ class PlotTab(QWidget):
         if not self._plot_series:
             return
         if element == "series" and isinstance(payload, int):
+            if (
+                0 <= payload < len(self._plot_series)
+                and self._plot_series[payload].plot_type in _SURFACE_PLOT_TYPES
+            ):
+                self._edit_surface_details_for_row(payload)
+                return
             self._edit_series_appearance_from_canvas(payload)
             return
         if element == "colorbar_label" and isinstance(payload, int):
