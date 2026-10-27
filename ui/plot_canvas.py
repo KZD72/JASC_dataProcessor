@@ -1343,7 +1343,9 @@ class PlotCanvas(QWidget):
                 "choose a Numeric/Scientific column or update its metadata."
             )
 
-        meaningful = source_values.notna() & (source_values.astype(str).str.strip() != "")
+        meaningful = source_values.notna()
+        if not pd.api.types.is_numeric_dtype(source_values.dtype):
+            meaningful &= source_values.astype(str).str.strip().ne("")
         invalid = meaningful & numeric_values.isna()
         if invalid.any():
             example = str(source_values[invalid].iloc[0])

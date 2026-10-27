@@ -1,6 +1,177 @@
 # Large Data Loading and Clipboard Performance Audit
 
-Date: 2026-08-17
+Latest re-evaluation: 2026-10-21. Original loading/clipboard audit: 2026-08-17.
+
+## Polars/Parquet Paged Table Slice (2026-10-21)
+
+Implemented an explicit **Open Large Dataset** workflow and separate workspace registry for read-only disk-backed sources. Regular separated text is incrementally transcoded to UTF-8, then written through Polars' streaming Parquet sink; existing Parquet is snapshotted with bounded copies. Source tables never become complete Pandas DataFrames. Text columns remain strings to avoid sample-based numeric corruption; vendor-specific layouts and whitespace tables are deferred rather than silently interpreted as ordinary tables.
+
+`LargeDataView` holds one replaceable data-buffer window capped at 1,000 rows, 32 projected columns, and 8 MiB estimated Polars data size. Oversized windows shrink and a single over-budget row fails safely. Cell callbacks never query disk. Background requests coalesce and check source/generation before commit; old windows are evicted. Edge-wheel navigation, Previous/Next, global row jumps, column windows, global row labels, copy, retry, and explicit window-to-worksheet extraction are implemented. Ordinary analysis and undo never see a partial source disguised as a complete worksheet. A full-source lazy scan boundary is available; full-source filtering/analysis controls remain future work.
+
+Version-9 projects stream embedded Parquet members to/from disk and preserve the existing package seal, signing, and encryption path. Ordinary-only projects continue to write version 8. Project I/O is still synchronous. Large-import cancellation rejects results and cleans temporary storage; native Polars phases finish cooperatively before cancellation takes effect. Closing retains both import and page worker owners until they stop.
+
+Measured with `benchmarks/paged_large_data_audit.py`, including a visible offscreen Qt view and 60 distant windows; synthetic CSV generation uses bounded chunks outside the timed interval:
+
+| Measurement | 1,000,000 x 10 | 4,000,000 x 10 |
+| --- | --- | --- |
+| Source CSV / Parquet snapshot | 88.29 / 7.60 MiB | 382.02 / 29.49 MiB |
+| Disk-backed text preparation | 3.589 s | 12.740 s |
+| Median / maximum window load (includes 40 ms debounce and GUI delivery) | 87.2 / 107.0 ms | 82.6 / 101.2 ms |
+| Maximum cached rows / data bytes | 1,000 / 91,200 | 1,000 / 99,200 |
+| GUI heartbeat p95 / maximum gap | 12.9 / 24.0 ms | 12.8 / 20.4 ms |
+| Navigation working set after first 10 windows | 302.0-334.0 MiB | 358.5-383.7 MiB |
+| Maximum sampled process working set including import | 483.7 MiB | 903.1 MiB |
+
+These measurements establish bounded display windows and responsive navigation for these cases, not a total-process 1,000-row memory cap or proof of 10 GB/larger-than-RAM capacity. Native decoder/streaming buffers, memory-mapped input pages, Qt, in-flight results, and allocator retention require additional memory; import working set rises with this larger source. Memory-budget hardening and larger capacity tests remain necessary. No speed comparison against DuckDB was performed; Polars is the first implementation, not a benchmark-selected winner. Raw results: `benchmarks/paged_large_data_2026-10-21.json` and `benchmarks/paged_large_data_4m_2026-10-21.json`. Official API references: [Polars streaming Parquet sink](https://docs.pola.rs/api/python/stable/reference/api/polars.LazyFrame.sink_parquet.html), [lazy CSV scan](https://docs.pola.rs/api/python/stable/reference/api/polars.scan_csv.html).
+
+## Background Text Import Slice (2026-10-21)
+
+Implemented a reusable thread-based job controller with Qt-independent cancellation/progress contracts, queued GUI-thread delivery, controlled errors, rejection of late cancelled results, and thread ownership through complete termination. Keep the worker's Python wrapper alive until its thread has joined; releasing it early exposed a native Qt lifetime race during regression testing. Window close requests cancel and defer destruction until the active job stops.
+
+Text preflight, explicit-rule reinspection, parsing, and preamble/provenance preparation now run off the GUI thread. Status-bar controls show the current phase, actual byte progress during CSV parser reads, and Cancel. Numeric/locale checks and result metadata remain unchanged. The optional `read_tabular_file(context=...)` path wraps binary reads to check cancellation, throttles progress notifications, and checks again between conversion phases; ordinary synchronous API calls remain compatible. Encoding detection now opens the file and reads only the sample, fixing `read_bytes()[:sample_size]`, which previously allocated the entire file before slicing.
+
+Prepared data is detached from the live workspace. Size decisions and metadata hints run on the GUI thread before publishing the accepted batch. A cancelled run adds no sheets, even if earlier files were already prepared. A failed commit rolls back all newly added sheets; failures in individual source/metadata reads are reported without publishing that incomplete file. Project changes reject stale results. Import reentry is prevented until the current run finishes.
+
+`benchmarks/background_import_audit.py` exercises the real asynchronous import path with a synthetic 1,000,000 x 10 numeric CSV (89.25 MiB), bypassing only file/options/size prompts. It measures Qt timer delivery rather than physical screen painting; synthetic input is generated outside the timed interval. Results under the same development environment as the first slice:
+
+| Run | Result |
+| --- | --- |
+| Successful full import | 1.751 s including GUI commit; 1,000,000 rows published |
+| 10 ms GUI heartbeat during import | 166 ticks; 95th-percentile gap 10.8 ms; maximum gap 100.4 ms |
+| Cancellation requested after 50 ms timer delay | Completed 10.6 ms after actual request delivery; no datasets/rows published |
+| Cancellation heartbeat | Maximum gap 26.5 ms; no reported errors |
+
+Raw results are in `benchmarks/background_import_2026-10-21.json` and `benchmarks/background_import_cancel_2026-10-21.json`. Reproduce with:
+
+```powershell
+& 'C:\Users\julia\anaconda3\envs\dataProcessing\python.exe' -B benchmarks/background_import_audit.py --output benchmarks/background_import_2026-10-21.json
+& 'C:\Users\julia\anaconda3\envs\dataProcessing\python.exe' -B benchmarks/background_import_audit.py --cancel-after-ms 50 --output benchmarks/background_import_cancel_2026-10-21.json
+```
+
+All **267 tests pass**. Eleven new background/import regressions cover event-loop responsiveness, worker versus GUI callback affinity, duplicate-job protection, queued-success cancellation, restart/error recovery, cancellation after the first batch file, stale-workspace rejection, incomplete metadata, commit rollback and GUI affinity, deferred close, cancellation during real parser reads with released file handles, bounded encoding detection, and encoding/locale/map equivalence. Existing batch-import tests now wait for asynchronous completion and explicitly dispose their widgets on the GUI thread. `git diff --check` passes; README, roadmap, handoff, and Markdown/PDF manual are synchronized.
+
+Cancellation remains cooperative: a native conversion, map-array allocation, or legacy Bruker parsing phase may finish its current work unit before stopping. This slice is still in-memory Pandas and does not implement chunked storage, delta undo, process-worker jobs, or background Excel/project/analysis execution. Those are subsequent migrations onto this controller. Desktop interaction and representative very large vendor files remain manual follow-up checks.
+
+## First Implementation Slice (2026-10-21)
+
+The import/validation/formula improvements below are implemented and verified. The assessment in the following section is the preserved pre-change baseline. Recorded after-change results are in `benchmarks/large_sheet_audit_phase1_2026-10-21.json`, using the same ten-case harness and environment as the baseline.
+
+| Path | Baseline | After this slice |
+| --- | --- | --- |
+| Auto import, 100,000 x 10 numeric CSV, 8.16 MiB | 5.511 s | 0.173 s |
+| Auto import, 1,000,000 x 2 numeric CSV, 18.61 MiB | 11.409 s | 0.367 s |
+| Explicit dot-decimal import, same million-row CSV | 3.560 s | 0.350 s |
+| Million-point X/Y preparation | 0.699 s | 0.0169 s |
+| Million-point line construction, excluding subsequent explicit canvas paint | 0.888 s | 0.215 s |
+| Million-row safe `sin(col1)` evaluation | 0.468 s | 0.00670 s |
+| GUI timer maximum gap during that formula | 0.518 s | 0.0148 s |
+| One selected spectral slice over 1,000,000 source rows | 1.337 s | 0.0734 s |
+| One-cell edit, 1,000,000 x 10 sheet with snapshot history | 0.0737 s | 0.0251 s |
+| One-cell edit, 4,000,000 x 10 sheet above snapshot budget | 0.0381 s | 0.000983 s; still no undo |
+
+Changes:
+
+- Standard numeric point-decimal text tables now use the native float reader after a bounded parser-selection probe. The complete file must still parse; explicit comma formats and Python/whitespace parsing retain the strict raw-token path. Round-trip float parsing preserves precision and signed zero. Boolean probe columns are rejected; native parsing disables internal low-memory chunks to prevent a late Boolean-only chunk becoming 1/0. An invalid token, nonfinite overflow, or all-missing column triggers the raw-token fallback. This is an in-memory fast path, not chunked or out-of-core ingestion.
+- Locale conversion now computes each convention's finite numeric candidates once per column and reuses the evidence. Only ambiguous columns wait for table-wide evidence. Invalid/mixed columns retain their exact original strings; explicit formats and grouping rules stay supported. Direct float-array conversion retains signed zero and decimal precision; exceptional conversions use the existing scalar parser.
+- Calculus and formula validation bypass string conversion for native numeric dtypes after respecting explicit Text metadata. Plotting, statistics, and Data Prep avoid string conversion while preserving their existing missing/nonfinite policies and row-specific text rejection. No validation results are cached across operations.
+- Formula environments bind only AST-referenced column names/aliases, reuse converted inputs within the evaluation, and avoid allocating unused row/index arrays. Name collisions, exact `col(...)` references, worksheet access, and deliberate text formulas retain their behavior.
+- Native numeric cell edits no longer rescan/reconvert an already numeric Auto column. Whole-sheet history copies remain; their storage architecture has not changed.
+
+Verification: all **256 tests pass**, including 11 new regressions covering scalar/vector locale equivalence, late malformed/Boolean/overflow/grouped tokens, table-level ambiguity, a Boolean tail beyond parser chunk boundaries, signed zero, precision, missing/nullable values, Text metadata, formula bindings, and numeric targets. All ten isolated benchmark cases completed. `git diff --check` passes. Results retain the baseline's synthetic/offscreen and dependency-version limitations; the CSV measurements describe the guarded ordinary-numeric path, not all locale/vendor files.
+
+Next implementation slices remain the shared background-job controller and safe commits, operation-delta undo, revision-aware display reduction/map caches, and disk-backed large-data mode. Faster synchronous work does not make remaining long operations cancellable.
+
+## Current Re-evaluation (2026-10-21)
+
+The earlier clipboard, column-sizing, ownership-transfer, and streaming-project fixes remain implemented. The historical sections below describe their original causes and must not be read as a list of defects still present. Current measurements identify **locale conversion, numeric validation, whole-sheet history, synchronous execution, and unbounded plotted point counts** as the next priorities. This evaluation changes no application behavior.
+
+### Method and reproducibility
+
+Added `benchmarks/large_sheet_audit.py`, with recorded output in `benchmarks/large_sheet_audit_2026-10-21.json`. Run the complete diagnostic suite with:
+
+```powershell
+& 'C:\Users\julia\anaconda3\envs\dataProcessing\python.exe' -B benchmarks/large_sheet_audit.py --output benchmarks/large_sheet_audit_2026-10-21.json
+```
+
+Each of ten cases runs sequentially in a fresh process with Qt offscreen. Most timings are medians of three calls; CSV JASC import, project I/O, full plot construction, painting, snapshots, and undo use one call each. Fixture generation and garbage collection are outside timed regions. Synthetic numeric sheets cover 100,000 and 1,000,000 rows with 10 columns, plus a 4,000,000 x 10 worksheet (40 million cells). The spectral case covers 1,000 pixels x 1,000 spectral samples. CSVs are 8.16 and 18.61 MiB. No user files are modified; generated CSV/project files use temporary directories.
+
+Environment: Windows, 16 logical CPUs, 63.4 GiB physical RAM (about 43 GiB available at the start); Python 3.13.13, Pandas 3.0.3, NumPy 2.4.4, PySide6 6.11.0. Pandas and NumPy exceed the repository's declared `<3` / `<2` constraints, so results describe the actual development environment, not every supported installation. Raw timings have no profiling/tracemalloc overhead. Windows working-set counters include native memory, but each recorded peak is the process high-water mark up to that point, not an isolated allocation count for the operation.
+
+These are diagnostic results on synthetic, mostly numeric data with warm/repeated file reads. Offscreen attachment excludes physical screen painting, and viewport scrolling, real instrument exports, large Excel workbooks, complete Raman fits, process-worker startup/serialization, and multi-gigabyte files were not benchmarked. No 10 GB capability is claimed.
+
+### Measurements
+
+| Actual path | Input | Observed time or memory |
+| --- | --- | --- |
+| Editor attachment and bounded sizing | 100,000 x 10 / 1,000,000 x 10 | 20 ms / 68 ms |
+| Editor attachment and bounded sizing | 4,000,000 x 10 | 505 ms |
+| One-cell edit including history | 1,000,000 x 10 (76.3 MiB numeric buffers) | 74 ms median; three edits retain 228.9 MiB of undo buffers |
+| Undo | Same million-row sheet | 91 ms; total process peak reached 785 MiB, including interpreter/Qt/native allocations and earlier operations |
+| One-cell edit above history limit | 4,000,000 x 10 (305.2 MiB buffers) | 38 ms, but **no undo entry is created** because one snapshot exceeds 256 MiB |
+| JASC Auto CSV import / explicit dot-decimal import | 100,000 x 10, 8.16 MiB CSV | 5.51 s / 1.68 s |
+| Direct Pandas typed CSV reader, control | Same 8.16 MiB file | 0.057 s |
+| JASC Auto CSV import / explicit dot-decimal import | 1,000,000 x 2, 18.61 MiB CSV | 11.41 s / 3.56 s |
+| Direct Pandas typed CSV reader, control | Same 18.61 MiB file | 0.111 s |
+| Plot X/Y preparation alone | 1,000,000 numeric points | 0.699 s; direct NumPy two-column assembly control: 0.00435 s |
+| Plot construction, then explicit canvas paint | Same million-point line | 0.888 s + 0.143 s; all 1,000,000 points remain in the plotted artist |
+| Numeric validation of an already numeric column | 1,000,000 values | 0.342 s |
+| Safe formula evaluation `sin(col1)` | 1,000,000 values | 0.468 s; direct NumPy sine control: 0.00391 s |
+| GUI timer gap while evaluating that formula | A 10 ms Qt timer, formula dispatched on GUI thread | 0.518 s maximum gap |
+| Spectral map preparation at one selected shift | 1,000 pixels x 1,000 samples | 1.337 s |
+| Selected fit-spectrum lookup / viewer redraw preparation | Same curves, 1,000 metric rows | 1.4 ms / 45 ms; redraw preparation excludes later canvas paint |
+| Ordinary `.jasc` save / verified load | 1,000,000 x 2 synthetic numeric sheet | 1.29 s / 0.185 s |
+
+The Pandas/NumPy controls omit JASC's locale rules, metadata checks, validation, workspace operations, and history. Their ratios show where overhead lies; they are **not promised speedups** for a complete replacement implementation. CSV compression is unusually effective for this synthetic sequence, so project times are not estimates for noisy scientific data.
+
+Additional `cProfile` evidence is saved in `benchmarks/large_sheet_profiles_2026-10-21.json`. Profiling times are intentionally not mixed with the table's wall timings:
+
+- Locale Auto conversion of just 20,000 x 10 cells made **1,000,000 calls** to `_parse_localized_number`: two decimal-convention parses per token during table-level inference, two again during column-level inference, then one conversion parse. The inference passes consumed most of the profiled conversion time.
+- Numeric validation and formula-result validation spent most of their profiled time constructing string arrays, stripping strings, and parsing numbers that were already numeric.
+- A supplementary 100,000-row mixed worksheet with one numeric and nine object-text columns took 0.864 s to evaluate `sin(col1)`. `_build_environment()` eagerly prepares every identifier and positional alias, including unused text columns; it can prepare the same column twice.
+- That mixed sheet's shallow profile was 7.63 MiB versus 51.55 MiB using `memory_usage(deep=True)`. The current file/dataset warning profile is a buffer estimate and can substantially underestimate text data. Deep estimates may count shared strings repeatedly; this is not a direct measurement of uniquely owned RAM. Likewise, object snapshots copy pointer arrays and may share immutable string objects, so this ratio must not be applied blindly to undo memory.
+
+### Findings and proposed changes
+
+1. **Optimize locale-aware ingestion first.** `core/file_io.py::_infer_frame_number_format()` and `_convert_localized_numeric_columns()` currently inspect all tokens repeatedly and then perform Python regex/float conversion per cell. An explicit number format avoids inference but still parses every cell in Python. Introduce one shared token classification/conversion pass per column or bounded chunk, reuse its evidence, and add a vectorized path for ordinary decimal/scientific numbers. `read_csv` selected columns, row limits, and chunk iteration should bound temporary string storage. Sample only to propose a schema: validate all subsequent chunks and fall back losslessly if later tokens contradict it. Preserve mixed/text columns, raw tokens, locale ambiguity decisions, and exact leading metadata; do not replace this with unconditional inferred numeric parsing or coercion that drops text.
+
+2. **Use dtype-aware numeric validation.** `math_engine/calculus.py::validate_numeric_column_metadata()`, `ui/plot_canvas.py::_validate_numeric_metadata()`, and `core/operations.py::_validate_expression_result_type()` stringify whole numeric arrays. Native numeric dtypes can bypass text parsing after checking declared Text metadata and the algorithm's finite/missing-value policy. Object/string columns still need complete strict conversion with visible row/example errors. Reuse validated numeric arrays within an operation. Evaluate only AST-referenced formula columns and reuse one prepared value for its name and alias. Introduce dataset/column mutation revisions before caching validation across operations; numerous current paths write directly to DataFrames, so caching without comprehensive invalidation would risk stale results.
+
+3. **Run long work outside the Qt event loop.** The measured half-second timer gap confirms actual event starvation even for a simple formula, and imports are far longer. Build the shared job controller with progress, cooperative cancellation, stale-result protection, safe shutdown, immutable/owned input snapshots, and transactional GUI-thread commits. Use threads for I/O and suitable native numerical work; process workers for CPU-bound Python work only when transfer cost and memory fit a measured budget. Cancellation must be checked between chunks/jobs, since an arbitrary native parser or optimizer call cannot necessarily be interrupted immediately. Qt model APIs stay on the GUI thread; workers return data/results through queued signals. [Qt thread-safety requirements](https://doc.qt.io/qt-6/qabstractitemmodel.html#thread-safety) support this boundary.
+
+4. **Replace snapshot history with operation deltas.** `ui/dataframe_model.py::_snapshot()` copies the complete sheet before a one-cell edit, and `_restore_snapshot()` copies it again. Store cell/range changes with old/new values and dtypes; for formulas or fills retain only affected columns/slices and associated metadata. Structural edits need removed row/column payloads and index/shape information. Group an entire paste/analysis commit as one command; cap aggregate retained history bytes and consider disk-backed payloads for large structural commands. Preserve atomic failure and exact undo/redo values, metadata, formulas, and dtypes. Do not treat the existing no-undo path above 256 MiB as the completed large-sheet solution.
+
+5. **Bound display work and reuse map intermediates.** Million-point line construction still validates and sends the entire dataset to Matplotlib. Add viewport-aware min/max envelope or an equivalent feature-preserving display reduction, use fewer markers, and cache by data revision, columns, range, scales, and display resolution. Preserve the full source arrays for scientific calculations, cut exports, and a deliberate full-resolution export option; simple every-N sampling can erase narrow peaks. Cache spatial grids/triangulations and extracted spectral slices instead of reconstructing them for each cut/style change. The measured Raman result viewer is reasonably quick at 1,000 pixels: prioritize full spectral-map preparation and future large cases over rewriting its already fast lookup. Its code still recreates hidden diagnostics and scans curve tables repeatedly; lazily draw diagnostics and pre-index spectrum groups when measurements justify it.
+
+6. **Implement a separate disk-backed path for genuinely large data.** The `Dataset.backend` label is persisted, but `Workspace.add_dataset()` still requires a Pandas DataFrame; the label alone provides no out-of-core support. Keep normal editable Pandas sheets and introduce a backend interface for schema, row count, paged reads, selection/query, summaries, and explicit bounded materialization. Use DuckDB over Parquet/Arrow for large read-only/limited-edit datasets, with asynchronous page caching, selected-column/filter pushdown, bounded query memory, a spill directory, and limited worker count. SciPy fitting should materialize the requested columns/region or one spectrum batch, rather than the full dataset. Pandas itself recommends loading less data and chunking for suitable operations; DuckDB documents both disk spilling and Parquet projection/filter pushdown. [Pandas scaling](https://pandas.pydata.org/docs/user_guide/scale.html), [DuckDB workload tuning](https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads), [DuckDB file formats](https://duckdb.org/docs/current/guides/performance/file_formats).
+
+7. **Store spectral cubes without repeating their axes internally.** The current Horiba normalizer repeats X, Y, and spectral coordinates for every intensity value. A regular P-pixel x S-sample cube uses roughly `32 * P * S` bytes for four float64 columns versus roughly `8 * P * S + 16 * P + 8 * S` bytes for intensity plus separate axes, before masks, indexes, and result columns. Preserve the existing long-form worksheet/export contract, but consider a chunked cube representation behind the backend boundary and row-offset/pixel indexes for analysis. Full Raman jobs currently build all grouped job frames and accumulate many curve/result frames before concatenation; stream bounded batches and result blocks rather than retaining every intermediate. This is a code-based scaling finding, not a benchmark of complete peak fitting.
+
+Project save/load now stream correctly and are not the leading bottleneck in this run. Integrity checking intentionally adds member reads: preserve package seals, signatures, authentication, atomic replacement, and backward compatibility. Hashing while streaming writes is a possible later improvement. Versioned optional Parquet payloads could preserve dtypes and accelerate large typed project reads, while the default open CSV format remains supported.
+
+### Large-data display requirement (2026-10-21)
+
+The user clarified that backend adoption must ship together with dynamic row loading. Evaluate Polars lazy/streaming against the DuckDB/Parquet proposal above before choosing an engine. The current Qt table paints only requested cells but its source is still a complete Pandas DataFrame; UI painting virtualization alone does not reduce source storage.
+
+For disk-backed mode, retain at most 1,000 data rows in a replaceable display cache, with an additional byte limit and column projection for wide tables. Fetch windows in the background, coalesce navigation requests, discard stale results, preserve global row identities, and evict visited pages rather than accumulating them. Budget in-flight results and engine/import buffers separately: 1,000 cached display rows is not a claim that the whole process uses only 1,000 rows of memory. Avoid full-source materialization during import, project loading, resizing, and undo. Filters, sorts, summaries, and scientific analysis must target the backend dataset or an explicit selection, not implicitly the displayed page. Start read-only and materialize only bounded selections for existing Pandas/SciPy operations.
+
+Acceptance checks must include repeated scrolling and far-row jumps with bounded retained memory, final/empty page correctness, stable global labels, source/filter switch races, responsive navigation, and backend-wide operation semantics. This section records requirements; the paged backend is not implemented yet. See Stage 11 in `Roadmap.md`.
+
+### Suggested delivery order and acceptance gates
+
+Start with locale conversion and dtype-aware validation, then add background jobs and delta history before a larger backend migration. Display reduction and map caches can follow once revision tracking exists. DuckDB/Parquet and a spectral-cube backend address capacity limits that the earlier steps cannot solve.
+
+Proposed targets for the same reference machine (targets, not achieved results):
+
+- The 18.61 MiB ordinary numeric CSV should import below 1 s, with lossless mixed/locale fallback covered separately.
+- Simple million-row `sin(col1)` evaluation and X/Y preparation should each be below 100 ms, excluding deliberate full-data canvas painting.
+- A one-cell undo command should retain storage proportional to the changed cell/dtype metadata, not the sheet, including on the 305 MiB worksheet.
+- Under a long job, a 10 ms GUI heartbeat should have a 95th-percentile gap below 50 ms and no routine blocking commit above 100 ms. Cancel acknowledgement should arrive within 250 ms between bounded work units; uninterruptible algorithm phases must be identified honestly.
+- Interactive million-point line redraw should target below 100 ms after preprocessing, with automated peak/extrema preservation checks for display reduction.
+- A future 10 GB source should be queryable/previewable without full Pandas materialization; its test must verify process memory and cancellation, not merely successful parsing.
+
+Before accepting optimizations, run the existing numeric type-safety/import/persistence regressions, add late-invalid-token and locale-chunk-boundary cases, verify revision invalidation and cancellation atomicity, and repeat the diagnostic suite. Extend benchmarks with long strings, wide sheets, missing values, real vendor maps, cold-cache reads, desktop scrolling, and constrained-RAM runs. Resolve the declared-versus-installed dependency mismatch so future comparisons are meaningful.
+
+## Historical Audit (2026-08-17)
 
 ## Outcome
 

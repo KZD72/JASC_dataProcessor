@@ -300,7 +300,7 @@ class SurfaceMapFeatureTests(unittest.TestCase):
 
         with (
             patch("ui.plot_tab.SurfaceAnalysisDialog", AcceptedCutDialog),
-            patch.object(tab, "_show_surface_profile") as show_profile,
+            patch.object(tab, "_save_surface_profile") as show_profile,
         ):
             tab._handle_surface_cut_selected(-2.0, -1.0, 2.0, -1.0)
 
@@ -311,26 +311,40 @@ class SurfaceMapFeatureTests(unittest.TestCase):
         show_profile.assert_called_once()
         tab.deleteLater()
 
-    def test_cut_profile_window_is_non_modal_and_zoomable(self) -> None:
+    def test_cuts_create_persistent_plots_and_preserve_source_draft(self) -> None:
+        import tempfile
+        from core import project_io
+
         tab = PlotTab(self.workspace, external_options=False)
-        output = self.workspace.add_dataset(
-            "cut_profile",
-            self.canvas.surface_line_profile_frame(
+        tab.queue_plot_series([self.series], title="Source map")
+        source_state = tab.current_plot_state()
+        created = []
+        tab.plot_created.connect(created.append)
+        for operation in ("horizontal", "vertical", "line"):
+            frame = (self.canvas.surface_line_profile_frame(
                 self.workspace, self.series, -2.0, -1.0, 2.0, -1.0, 9
-            ),
-        )
-
-        tab._show_surface_profile(output, "line", self.series)
-        self.app.processEvents()
-
-        self.assertEqual(len(tab._surface_profile_windows), 1)
-        window = tab._surface_profile_windows[0]
-        self.assertFalse(window.isModal())
-        profile_canvas = window._profile_canvas
-        self.assertGreaterEqual(len(profile_canvas.axes.lines), 1)
-        self.assertEqual(profile_canvas.axes.get_xlabel(), "Distance along cut")
-        window.close()
-        self.app.processEvents()
+            ) if operation == "line" else self.canvas.surface_profile_frame(
+                self.workspace, self.series, operation, -1.0
+            ))
+            tab._commit_surface_analysis(self.series, operation, "cut", frame)
+        self.assertEqual(len(created), 3)
+        self.assertEqual(tab.current_plot_state(), source_state)
+        self.assertFalse(any(isinstance(child, QDialog) for child in tab.children()))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "cuts.jasc"
+            project_io.save_project(self.workspace, path)
+            loaded = project_io.load_project(path)
+        self.assertEqual(loaded.plot_names(), self.workspace.plot_names())
+        restored = PlotTab(loaded, external_options=False)
+        for name in created:
+            saved = loaded.get_plot(name)
+            restored.load_plot_state(saved.state)
+            self.assertEqual(len(restored._plot_canvas.axes.lines), 1)
+            profile = saved.state["series"][0]
+            self.assertEqual(profile["x_column"], "distance")
+            self.assertEqual(profile["y_column"], "z")
+            self.assertIn(profile["y_dataset"], loaded.dataset_names())
+        restored.deleteLater()
         tab.deleteLater()
 
     def test_advanced_surface_state_round_trips_and_malformed_values_clamp(self) -> None:

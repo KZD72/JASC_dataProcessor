@@ -941,6 +941,8 @@ class DataFrameTableModel(QAbstractTableModel):
         if metadata is not None and metadata.value_type:
             return
         column = frame[column_name]
+        if is_numeric_dtype(column.dtype):
+            return
         blank = column.isna()
         if column.dtype == object or pd.api.types.is_string_dtype(column.dtype):
             strings = column.astype("string")

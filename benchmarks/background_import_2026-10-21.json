@@ -1,0 +1,33 @@
+{
+  "rows": 1000000,
+  "columns": 10,
+  "csv_mib": 89.24856281280518,
+  "elapsed_s": 1.751219900000251,
+  "heartbeat_ticks": 166,
+  "heartbeat_p95_gap_s": 0.010792099999707715,
+  "heartbeat_max_gap_s": 0.100367300000471,
+  "cancel_requested": false,
+  "cancel_completion_s": null,
+  "published_datasets": [
+    "large"
+  ],
+  "published_rows": 1000000,
+  "progress_messages": [
+    "Inspecting large.csv",
+    "Preparing large.csv (1/1)",
+    "Reading large.csv",
+    "Validating column C0",
+    "Validating column C1",
+    "Validating column C2",
+    "Validating column C3",
+    "Validating column C4",
+    "Validating column C5",
+    "Validating column C6",
+    "Validating column C7",
+    "Validating column C8",
+    "Validating column C9",
+    "Reading metadata: large.csv"
+  ],
+  "errors": [],
+  "qt_offscreen": true
+}

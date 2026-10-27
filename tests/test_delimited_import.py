@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import gc
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +13,8 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtTest import QTest
+from PySide6.QtCore import QCoreApplication, QEvent
 
 from core.file_io import (
     AUTO_DATA_KIND,
@@ -382,6 +386,10 @@ class DelimitedImportTests(unittest.TestCase):
 class DelimitedBatchImportTests(unittest.TestCase):
     """Exercise multi-file importing and header-pattern resolution."""
 
+    def setUp(self) -> None:
+        # Dispose unreachable widgets from earlier GUI tests on the GUI thread.
+        gc.collect()
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
@@ -419,6 +427,10 @@ class DelimitedBatchImportTests(unittest.TestCase):
                     patch.object(window, "_confirm_large_dataset", return_value=True),
                 ):
                     window._import_data_file()
+                    deadline = time.monotonic() + 15
+                    while window._text_import_token is not None and time.monotonic() < deadline:
+                        QTest.qWait(5)
+                    self.assertIsNone(window._text_import_token, "Background import did not finish")
 
                 self.assertEqual(window._workspace.dataset_names(), ["first", "second"])
                 self.assertEqual(
@@ -433,6 +445,9 @@ class DelimitedBatchImportTests(unittest.TestCase):
                 )
             finally:
                 window.close()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                gc.collect()
 
     def test_import_attaches_raw_and_parsed_preamble_to_worksheet(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -468,6 +483,10 @@ class DelimitedBatchImportTests(unittest.TestCase):
                     patch.object(window, "_confirm_large_dataset", return_value=True),
                 ):
                     window._import_data_file()
+                    deadline = time.monotonic() + 15
+                    while window._text_import_token is not None and time.monotonic() < deadline:
+                        QTest.qWait(5)
+                    self.assertIsNone(window._text_import_token, "Background import did not finish")
 
                 dataset = window._workspace.get_dataset("spectrum")
                 self.assertEqual(
@@ -482,6 +501,9 @@ class DelimitedBatchImportTests(unittest.TestCase):
                 self.assertEqual(dataset.column_metadata["Intensity"].role, "y")
             finally:
                 window.close()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                gc.collect()
 
     def test_imported_spectral_map_records_layout_and_coordinate_roles(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -523,6 +545,10 @@ class DelimitedBatchImportTests(unittest.TestCase):
                     patch.object(window, "_confirm_large_dataset", return_value=True),
                 ):
                     window._import_data_file()
+                    deadline = time.monotonic() + 15
+                    while window._text_import_token is not None and time.monotonic() < deadline:
+                        QTest.qWait(5)
+                    self.assertIsNone(window._text_import_token, "Background import did not finish")
 
                 dataset = window._workspace.get_dataset("map")
                 self.assertEqual(
@@ -551,6 +577,9 @@ class DelimitedBatchImportTests(unittest.TestCase):
                 )
             finally:
                 window.close()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                gc.collect()
 
     def test_mismatched_headers_can_be_discarded_for_generic_columns(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -590,6 +619,10 @@ class DelimitedBatchImportTests(unittest.TestCase):
                     ) as pattern_prompt,
                 ):
                     window._import_data_file()
+                    deadline = time.monotonic() + 15
+                    while window._text_import_token is not None and time.monotonic() < deadline:
+                        QTest.qWait(5)
+                    self.assertIsNone(window._text_import_token, "Background import did not finish")
 
                 pattern_prompt.assert_called_once()
                 for name in ("first", "second"):
@@ -598,6 +631,9 @@ class DelimitedBatchImportTests(unittest.TestCase):
                     self.assertEqual(len(frame), 1)
             finally:
                 window.close()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                gc.collect()
 
     def test_mixed_header_presence_prompts_and_can_cancel_the_batch(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -636,6 +672,10 @@ class DelimitedBatchImportTests(unittest.TestCase):
                     ) as pattern_prompt,
                 ):
                     window._import_data_file()
+                    deadline = time.monotonic() + 15
+                    while window._text_import_token is not None and time.monotonic() < deadline:
+                        QTest.qWait(5)
+                    self.assertIsNone(window._text_import_token, "Background import did not finish")
 
                 pattern_prompt.assert_called_once()
                 inspections = pattern_prompt.call_args.args[0]
@@ -646,6 +686,9 @@ class DelimitedBatchImportTests(unittest.TestCase):
                 self.assertEqual(window._workspace.dataset_names(), [])
             finally:
                 window.close()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                gc.collect()
 
 
 if __name__ == "__main__":

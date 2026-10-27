@@ -4,6 +4,10 @@
 
 ## Current Capability Baseline
 
+The first measured large-sheet performance slice, shared background-job controller, and cancellable staged text imports are implemented. A first Polars/Parquet large-data slice now provides read-only disk-backed sources, bounded asynchronous 1,000-row/32-column/8 MiB windows, explicit window extraction, and embedded version-9 project persistence. Full-source query/analysis UI, vendor-map storage, larger-than-RAM capacity validation, Excel/project/analysis job migration, delta undo, and plot reduction/caching remain pending; see `Large_Data_Performance_Audit.md` for measured results.
+
+Map cuts create persistent editable workspace plots backed by profile worksheets. The Peak/Raman viewer supports horizontal, vertical, and mouse-picked arbitrary cuts of its selected parameter/quality metric.
+
 Reviewed on 2026-09-24 against the current repository state, session changelog, and automated test suite.
 
 ### Implemented or Started
@@ -138,6 +142,8 @@ Acceptance criteria:
 - Lint, diff integrity, automated tests, and manual smoke checks are documented as the standard preflight.
 
 ### Competitive Stage 1: Background Execution, Batch Processing, and Auditability
+
+First execution slice implemented: shared thread ownership/progress/cancellation, background text preflight and parsing, GUI-thread staged commits with rollback, stale-workspace guards, and deferred close. Native parser reads check cancellation and report byte progress. Excel, project I/O, and operation families below still need migration.
 
 Purpose: keep the application responsive while existing operations run on one or many worksheets, with safe commits, visible mappings, and auditable outputs. Moving long operations off the Qt UI thread is the highest-priority implementation item after the short Stage 0 gate.
 
@@ -513,10 +519,14 @@ Tasks:
 - Replace row-at-a-time/scalar clipboard paste with one block-oriented grow/normalize/assign path, and avoid parsing clipboard contents merely to construct a context menu. (implemented, including whole-column paste and Fill Range bulk growth)
 - Introduce bounded, operation-specific undo storage before encouraging edits on larger in-memory worksheets. (bounded 20-entry/256 MiB snapshot first pass implemented; compact delta commands remain)
 - Extend the Stage 1 background-job controller to large-data queries and decimated plot preparation.
-- Add a large-data backend based first on DuckDB plus PyArrow/Parquet, keeping Pandas as the default editable backend for small and medium worksheets.
+- Evaluate Polars lazy/streaming execution against DuckDB over Parquet before selecting the large-data backend; keep Pandas as the default editable backend for small and medium worksheets. Backend adoption must ship together with bounded table paging, not a complete in-memory replacement DataFrame.
 - Add lazy loading or chunked import for large text/Excel/HDF5 files.
 - Add row/column import limits, sampling previews, and user-selectable load strategies for very large delimited files.
-- Add a read-only paged table model for DuckDB/Parquet-backed datasets, then add limited materialize-to-Pandas workflows for selected rows/columns.
+- Add a read-only paged table model for disk-backed datasets with at most 1,000 resident data rows in its display cache, then add limited materialize-to-Pandas workflows for selected rows/columns. (first slice implemented through `LargeDataset`, `LargeDataView`, and explicit displayed-window extraction; continuous global scrollbar and arbitrary range/column selection remain)
+- Keep global row identities and column headers stable while asynchronous viewport/page requests replace the cached window. Debounce rapid scrolling, coalesce pending requests, and reject stale results after another page, filter, source revision, or dataset is selected; never perform disk queries from the model's cell-data callback.
+- Bound the display cache by bytes as well as rows for wide sheets or long strings, with column projection/windowing when needed. Evict old pages instead of accumulating visited rows; account separately for the bounded in-flight page and engine/import buffers. Provide global row counts/ranges, direct row navigation, and loading/error feedback without full-content column sizing.
+- Execute filters, sorts, summaries, plots, and analysis against the backend dataset or an explicit selection, never silently against the visible 1,000 rows. Large-data import and project loading must also avoid materializing the complete source; initially keep disk-backed sheets read-only so ordinary snapshot undo cannot copy the whole source.
+- Gate the backend/paged-view slice on bounded-memory tests across repeated scrolling and far-row jumps, correct global row labels and final/empty pages, stale-result rejection, responsive navigation, full-dataset query semantics, and bounded extraction for SciPy. (initial regression and million/four-million-row navigation benchmarks implemented; 10 GB/larger-than-RAM acceptance, full-source operation UI, and decoder/import budget hardening remain)
 - Add backend-aware operation dispatch: DuckDB/Polars-style query execution for simple filters, summaries, grouped statistics, and transforms; materialize selected columns for SciPy-heavy fitting/interpolation/statistical tests.
 - Add plot decimation/downsampling for interactive rendering.
 - Replace whole-DataFrame undo snapshots with delta-based or bounded-history undo for large sheets.
@@ -559,6 +569,6 @@ Acceptance criteria:
 9. Harden the implemented Peak/Raman Analysis composite and sequential batch/map slice with representative vendor-map fixtures, advanced bounds/fixed/tied parameters, explicit missing/extra-peak policies, and shared background/parallel execution.
 10. Add the remaining signal-analysis family: digital filter design and response previews, convolution/correlation, Hilbert transform, STFT, wavelets, and 2D FFT.
 11. Extend statistics, general/global fitting, plotting families, annotations, and multi-panel page layouts. Reusable templates remain excluded from this stage.
-12. After the main workflows are responsive and tested, continue DuckDB/PyArrow large-data mode, decimated plotting, delta undo, autosave/recovery, PyInstaller packaging, reporting, and plugin extension points.
+12. After the main workflows are responsive and tested, continue disk-backed large-data mode (Polars/DuckDB evaluation plus a bounded 1,000-row display window), decimated plotting, delta undo, autosave/recovery, PyInstaller packaging, reporting, and plugin extension points.
 
 Reusable graph/analysis templates are intentionally deferred to Competitive Stage 12 and must not displace the priorities above.

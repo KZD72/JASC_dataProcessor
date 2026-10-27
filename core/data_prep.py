@@ -395,7 +395,9 @@ def _strict_numeric_values(
             f"{operation} requires numeric values in '{label}', but that column is marked Text. "
             "Choose another column or update its metadata."
         )
-    meaningful = source.notna() & source.astype(str).str.strip().ne("")
+    meaningful = source.notna()
+    if not pd.api.types.is_numeric_dtype(source.dtype):
+        meaningful &= source.astype(str).str.strip().ne("")
     numeric = pd.to_numeric(source.where(meaningful), errors="coerce")
     invalid = meaningful & numeric.isna()
     if invalid.any():
@@ -418,7 +420,9 @@ def _fill_missing_value(
     if value_type == "text":
         return source.fillna(str(fill_value))
 
-    meaningful = source.notna() & source.astype(str).str.strip().ne("")
+    meaningful = source.notna()
+    if not pd.api.types.is_numeric_dtype(source.dtype):
+        meaningful &= source.astype(str).str.strip().ne("")
     existing_numeric = pd.to_numeric(source.where(meaningful), errors="coerce")
     inferred_numeric = bool(meaningful.any() and existing_numeric.loc[meaningful].notna().all())
     numeric_column = (

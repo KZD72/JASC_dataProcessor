@@ -230,6 +230,8 @@ def validate_numeric_column_metadata(frame: pd.DataFrame, column: object, values
         )
 
     source = frame[column]
+    if pd.api.types.is_numeric_dtype(source.dtype):
+        return
     meaningful = source.notna() & (source.astype(str).str.strip() != "")
     source_numeric = pd.to_numeric(source.where(meaningful), errors="coerce")
     invalid = meaningful & source_numeric.isna()

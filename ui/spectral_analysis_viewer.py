@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QLineEdit,
+    QMessageBox,
     QSizePolicy,
     QSpinBox,
     QTabWidget,
@@ -31,8 +32,10 @@ from PySide6.QtWidgets import (
 )
 
 from core.spectral_analysis import SpectralAnalysisSession
+from core.workspace import Workspace
+from ui.plot_canvas import PlotCanvas, PlotSeries
 from models.plot_settings import AxisSettings, LegendSettings
-from ui.plot_element_dialogs import PlotAxisEditDialog, PlotTextEditDialog
+from ui.plot_element_dialogs import PlotAxisEditDialog, PlotTextEditDialog, SurfaceAnalysisDialog
 
 
 _LEGEND_LOCATIONS: tuple[tuple[str, str], ...] = (
@@ -192,9 +195,12 @@ class SpectralAnalysisViewer(QWidget):
     """Display linked parameter maps, spectra, fit components, residuals, and QC."""
 
     export_requested = Signal(str)
+    map_analysis_created = Signal(object, str, str, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._cut_points: list[tuple[float, float]] | None = None
+        self._cut_artists: list[Any] = []
         self._analysis: SpectralAnalysisSession | None = None
         self._spectrum_keys: list[tuple[tuple[str, Any], ...]] = []
         self._map_axis = None
@@ -233,6 +239,15 @@ class SpectralAnalysisViewer(QWidget):
         self._export = QPushButton("Export Results to Worksheets...")
         self._export.clicked.connect(self._request_export)
 
+        self._map_cuts = QPushButton("Map Cuts...")
+        self._map_cuts.setEnabled(False)
+        self._map_cuts.clicked.connect(lambda: self._create_map_cut())
+        self._pick_cut = QPushButton("Pick Cut Line...")
+        self._pick_cut.setEnabled(False)
+        self._pick_cut.clicked.connect(self._start_map_cut)
+        self._cut_hint = QLabel("")
+        self._cut_hint.setWordWrap(True)
+
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Peak"))
         controls.addWidget(self._peak_selector)
@@ -254,6 +269,8 @@ class SpectralAnalysisViewer(QWidget):
         )
         self._toolbar = NavigationToolbar2QT(self._canvas, self)
         self._canvas.mpl_connect("button_press_event", self._map_clicked)
+        self._canvas.mpl_connect("key_press_event", self._cut_key_pressed)
+        self._canvas.mpl_connect("motion_notify_event", self._cut_motion)
         self._canvas.mpl_connect("button_press_event", self._canvas_double_clicked)
 
         self._residual_figure = Figure(figsize=(8.0, 2.0), constrained_layout=True)
@@ -271,6 +288,11 @@ class SpectralAnalysisViewer(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
+        cuts = QHBoxLayout()
+        cuts.addWidget(self._map_cuts)
+        cuts.addWidget(self._pick_cut)
+        cuts.addWidget(self._cut_hint, 1)
+        layout.addLayout(cuts)
         layout.addWidget(self._toolbar)
         layout.addWidget(self._canvas, 1)
         layout.addWidget(self._detail_tabs)
@@ -383,6 +405,7 @@ class SpectralAnalysisViewer(QWidget):
         self._redraw()
 
     def _redraw(self) -> None:
+        self._cancel_map_cut()
         self._figure.clear()
         self._residual_figure.clear()
         self._distribution_figure.clear()
@@ -392,6 +415,8 @@ class SpectralAnalysisViewer(QWidget):
         self._map_key_indices = []
         analysis = self._analysis
         if analysis is None:
+            self._map_cuts.setEnabled(False)
+            self._pick_cut.setEnabled(False)
             self._qc.clear()
             self._canvas.draw_idle()
             self._residual_canvas.draw_idle()
@@ -405,6 +430,8 @@ class SpectralAnalysisViewer(QWidget):
         residual_axis = self._residual_figure.add_subplot(111)
         distribution_axis = self._distribution_figure.add_subplot(111)
         self._draw_map(map_axis)
+        self._map_cuts.setEnabled(self._map_axis is not None)
+        self._pick_cut.setEnabled(self._map_axis is not None)
         self._draw_spectrum(spectrum_axis)
         self._draw_residual(residual_axis)
         self._draw_distribution(distribution_axis)
@@ -625,6 +652,8 @@ class SpectralAnalysisViewer(QWidget):
 
     def _canvas_double_clicked(self, event) -> None:
         """Open focused title, axis, or legend editors from the main canvas."""
+        if self._cut_points is not None:
+            return
         if not bool(getattr(event, "dblclick", False)):
             return
         button = getattr(event, "button", None)
@@ -826,6 +855,21 @@ class SpectralAnalysisViewer(QWidget):
         self._qc.setText(" · ".join(fields))
 
     def _map_clicked(self, event) -> None:
+        if self._cut_points is not None:
+            if event.button == 3:
+                self._cancel_map_cut()
+                return
+            if (event.button != 1 or event.inaxes is not self._map_axis
+                    or event.xdata is None or event.ydata is None):
+                return
+            self._cut_points.append((float(event.xdata), float(event.ydata)))
+            if len(self._cut_points) == 2:
+                start, end = self._cut_points
+                self._cancel_map_cut()
+                self._create_map_cut((*start, *end))
+            return
+        if event.button != 1 or self._toolbar.mode:
+            return
         if event.inaxes is not self._map_axis or event.xdata is None or event.ydata is None:
             return
         if not len(self._map_points) or self._analysis is None:
@@ -845,6 +889,91 @@ class SpectralAnalysisViewer(QWidget):
             if all(values.get(name) == value for name, value in target.items()):
                 self._spectrum_selector.setCurrentIndex(index)
                 return
+
+    def _start_map_cut(self) -> None:
+        """Pick a spatial cut without changing the linked spectrum selection."""
+        if self._map_axis is None:
+            return
+        if self._toolbar.mode == "pan/zoom":
+            self._toolbar.pan()
+        elif self._toolbar.mode == "zoom rect":
+            self._toolbar.zoom()
+        self._cancel_map_cut()
+        self._cut_points = []
+        self._cut_hint.setText("Click the cut start and end on the map; right-click or Esc cancels.")
+        self._canvas.setFocus()
+
+    def _cancel_map_cut(self) -> None:
+        self._cut_points = None
+        for artist in self._cut_artists:
+            artist.remove()
+        self._cut_artists.clear()
+        self._cut_hint.clear()
+        self._canvas.draw_idle()
+
+    def _cut_key_pressed(self, event: Any) -> None:
+        if event.key == "escape":
+            self._cancel_map_cut()
+
+    def _cut_motion(self, event: Any) -> None:
+        if (self._cut_points is None or len(self._cut_points) != 1
+                or event.inaxes is not self._map_axis
+                or event.xdata is None or event.ydata is None):
+            return
+        for artist in self._cut_artists:
+            artist.remove()
+        start = self._cut_points[0]
+        self._cut_artists = self._map_axis.plot(
+            [start[0], event.xdata], [start[1], event.ydata], "r--", marker="o"
+        )
+        self._canvas.draw_idle()
+
+    def _create_map_cut(
+        self, endpoints: tuple[float, float, float, float] | None = None,
+    ) -> None:
+        """Extract the selected fit metric with the ordinary map profile engine."""
+        analysis = self._analysis
+        metric = self.selected_metric()
+        if analysis is None or len(analysis.coordinate_columns) < 2 or not metric:
+            return
+        self._cancel_map_cut()
+        x_name, y_name = analysis.coordinate_columns[:2]
+        workspace = Workspace()
+        source = workspace.add_dataset(analysis.name, self._filtered_metrics()[[x_name, y_name, metric]])
+        series = PlotSeries(
+            source.name, x_name, source.name, y_name,
+            z_dataset=source.name, z_column=metric, plot_type="heatmap",
+            colorbar_label=self._metric_label(metric), mask_outside_boundary=True,
+        )
+        canvas = PlotCanvas(self)
+        canvas.hide()
+        try:
+            grid = canvas.surface_grid_frame(workspace, series)
+            bounds = (float(grid.x.min()), float(grid.x.max()),
+                      float(grid.y.min()), float(grid.y.max()))
+            dialog = SurfaceAnalysisDialog(
+                f"{analysis.name}_{metric}_cut", bounds, self, profiles_only=True,
+            )
+            if endpoints is not None:
+                dialog.configure_line_profile(*endpoints)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            name = dialog.output_name()
+            if not name:
+                raise ValueError("Enter a result sheet name.")
+            operation = dialog.operation()
+            if operation == "line":
+                frame = canvas.surface_line_profile_frame(workspace, series, *dialog.line_profile())
+            else:
+                frame = canvas.surface_profile_frame(workspace, series, operation, dialog.coordinate())
+            if frame.empty:
+                raise ValueError("This cut contains no finite map values. Choose a line within the map.")
+            self.map_analysis_created.emit(series, operation, name, frame)
+            self._cut_hint.setText("Created cut worksheet and saved plot in Workspace > Plots.")
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "Map Cuts", str(exc))
+        finally:
+            canvas.deleteLater()
 
     def _request_export(self) -> None:
         if self._analysis is not None:

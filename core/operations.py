@@ -362,6 +362,8 @@ def coerce_expression_values_for_target(
         result.loc[meaningful] = result.loc[meaningful].map(str)
         return result
 
+    if pd.api.types.is_numeric_dtype(values.dtype):
+        return values
     meaningful = selected.notna() & selected.astype(str).str.strip().ne("")
     numeric_selected = pd.to_numeric(selected.where(meaningful), errors="coerce")
     invalid = meaningful & numeric_selected.isna()
@@ -396,7 +398,10 @@ def evaluate_expression(
     except SyntaxError as exc:
         raise ExpressionError(f"Expression syntax error: {exc.msg}") from exc
 
-    environment = _build_environment(frame, worksheet_frames=worksheet_frames)
+    environment = _build_environment(
+        frame, worksheet_frames=worksheet_frames,
+        referenced_names={node.id for node in ast.walk(tree) if isinstance(node, ast.Name)},
+    )
     validator = _ExpressionValidator(
         allowed_names=set(environment),
         callable_names=_callable_names(environment),
@@ -424,21 +429,32 @@ def evaluate_expression(
 def _build_environment(
     frame: pd.DataFrame,
     worksheet_frames: Mapping[str, pd.DataFrame] | None = None,
+    referenced_names: set[str] | None = None,
 ) -> dict[str, object]:
     """Build the names visible to the expression evaluator."""
     numpy_namespace = _build_numpy_namespace()
     scipy_namespace = _build_scipy_namespace()
 
+    prepared: dict[str, pd.Series] = {}
+
+    def column_values(name: object) -> pd.Series:
+        name = str(name)
+        if name not in prepared:
+            prepared[name] = _column_by_name(frame, name)
+        return prepared[name]
+
     environment: dict[str, object] = {
-        "col": lambda name: _column_by_name(frame, name),
+        "col": column_values,
         "e": np.e,
         "inf": np.inf,
         "integrate": scipy_namespace.integrate,
-        "index": pd.Series(frame.index, index=frame.index),
+        "index": (pd.Series(frame.index, index=frame.index)
+                  if referenced_names is None or "index" in referenced_names else None),
         "nan": np.nan,
         "np": numpy_namespace,
         "pi": np.pi,
-        "row": pd.Series(np.arange(1, len(frame) + 1), index=frame.index),
+        "row": (pd.Series(np.arange(1, len(frame) + 1), index=frame.index)
+                if referenced_names is None or "row" in referenced_names else None),
         "sheet": lambda sheet_name, column_name: _worksheet_column_by_name(
             frame,
             worksheet_frames,
@@ -456,13 +472,16 @@ def _build_environment(
         environment[name] = getattr(np, name)
 
     for column_name in frame.columns:
-        if _is_safe_identifier(str(column_name)) and str(column_name) not in environment:
-            environment[str(column_name)] = _formula_column_values(frame, str(column_name))
+        if (_is_safe_identifier(str(column_name)) and str(column_name) not in environment
+                and (referenced_names is None or str(column_name) in referenced_names)):
+            environment[str(column_name)] = column_values(str(column_name))
 
     for index, column_name in enumerate(frame.columns, start=1):
         alias = f"col{index}"
+        if referenced_names is not None and alias not in referenced_names:
+            continue
         if alias not in environment or str(column_name) == alias:
-            environment[alias] = _formula_column_values(frame, str(column_name))
+            environment[alias] = column_values(str(column_name))
 
     return environment
 
@@ -594,6 +613,8 @@ def _formula_column_values(frame: pd.DataFrame, column_name: str) -> pd.Series:
 
 def _validate_expression_result_type(tree: ast.Expression, values: pd.Series) -> None:
     """Reject accidental string arithmetic while retaining deliberate text formulas."""
+    if pd.api.types.is_numeric_dtype(values.dtype):
+        return
     meaningful = values.notna() & values.astype(str).str.strip().ne("")
     if not meaningful.any():
         return

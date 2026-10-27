@@ -1,0 +1,21 @@
+{
+  "rows": 1000000,
+  "columns": 10,
+  "polars_version": "1.44.2",
+  "csv_mib": 88.29488754272461,
+  "parquet_mib": 7.602051734924316,
+  "import_s": 3.5891637000004266,
+  "windows_visited": 60,
+  "page_median_s": 0.08724425000036717,
+  "page_max_s": 0.10704330000044138,
+  "max_cached_rows": 1000,
+  "max_cached_bytes": 91200,
+  "heartbeat_p95_gap_s": 0.0128523999992467,
+  "heartbeat_max_gap_s": 0.023975399999471847,
+  "rss_before_import_mib": 164.3046875,
+  "max_sampled_rss_mib": 483.7265625,
+  "navigation_rss_after_warmup_min_mib": 302.01171875,
+  "navigation_rss_after_warmup_max_mib": 333.98828125,
+  "engine_buffers_separate_from_display_cache": true,
+  "errors": []
+}

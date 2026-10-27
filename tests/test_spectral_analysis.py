@@ -61,6 +61,100 @@ class SpectralAnalysisSessionTests(unittest.TestCase):
             peaks_frame=pd.DataFrame({"center": [520.1], "enabled": [True]}),
         )
 
+    def test_raman_cut_creates_saved_plot_without_exporting_internal_tables(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QDialog
+        from ui.plot_element_dialogs import SurfaceAnalysisDialog
+
+        window = MainWindow()
+        viewer = window._spectral_analysis_viewer
+        window._show_spectral_analysis(self.session())
+        metric = viewer._metric_selector.findData("peak_1_area")
+        viewer._metric_selector.setCurrentIndex(metric)
+        original = viewer.selected_spectrum_key()
+        try:
+            def accept(dialog):
+                dialog._line_samples.setValue(3)
+                return QDialog.Accepted
+            viewer._start_map_cut()
+            viewer._map_clicked(SimpleNamespace(
+                button=1, inaxes=viewer._map_axis, xdata=0.0, ydata=0.0,
+            ))
+            with patch.object(SurfaceAnalysisDialog, "exec", accept):
+                viewer._map_clicked(SimpleNamespace(
+                    button=1, inaxes=viewer._map_axis, xdata=1.0, ydata=0.0,
+                ))
+            self.assertIs(window._tabs.currentWidget(), viewer)
+            self.assertEqual(viewer.selected_spectrum_key(), original)
+            self.assertEqual(len(window._workspace.dataset_names()), 1)
+            self.assertEqual(len(window._workspace.plot_names()), 1)
+            dataset = window._workspace.list_datasets()[0]
+            self.assertEqual(dataset.metadata_for_column("z").role, "y")
+            self.assertIn("Raman map fit:peak_1_area", dataset.metadata_for_column("z").comment)
+            self.assertEqual(dataset.frame.z.tolist(), [12.5, 12.75, 13.0])
+            self.assertEqual(window._plot_list.count(), 2)
+            self.assertIsNone(viewer._cut_points)
+            saved = window._workspace.list_plots()[0]
+            window._plot_tab_widget.load_plot_state(saved.state)
+            self.assertEqual(len(window._plot_tab_widget._plot_canvas.axes.lines), 1)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_raman_horizontal_and_vertical_cuts_use_selected_metric(self) -> None:
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QDialog
+        from ui.plot_element_dialogs import SurfaceAnalysisDialog
+
+        viewer = SpectralAnalysisViewer()
+        viewer.set_analysis(self.session())
+        viewer._metric_selector.setCurrentIndex(viewer._metric_selector.findData("peak_1_area"))
+        created = []
+        viewer.map_analysis_created.connect(lambda *args: created.append(args))
+        try:
+            for operation, expected in (("horizontal", [12.5, 13.0]),
+                                        ("vertical", [12.5, 11.5])):
+                def accept(dialog):
+                    dialog._operation.setCurrentIndex(dialog._operation.findData(operation))
+                    dialog._coordinate.setValue(0.0)
+                    return QDialog.Accepted
+                with patch.object(SurfaceAnalysisDialog, "exec", accept):
+                    viewer._create_map_cut()
+                series, result_operation, _name, frame = created[-1]
+                self.assertEqual(result_operation, operation)
+                self.assertEqual(series.z_column, "peak_1_area")
+                self.assertEqual(frame.z.tolist(), expected)
+            self.assertEqual(len(created), 2)
+        finally:
+            viewer.deleteLater()
+
+    def test_map_cut_cancels_on_escape_metric_change_and_dialog_cancel(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QDialog
+        from ui.plot_element_dialogs import SurfaceAnalysisDialog
+
+        viewer = SpectralAnalysisViewer()
+        viewer.set_analysis(self.session())
+        created = []
+        viewer.map_analysis_created.connect(lambda *args: created.append(args))
+        try:
+            viewer._start_map_cut()
+            viewer._cut_key_pressed(SimpleNamespace(key="escape"))
+            self.assertIsNone(viewer._cut_points)
+            viewer._start_map_cut()
+            viewer._metric_selector.setCurrentIndex(1)
+            self.assertIsNone(viewer._cut_points)
+            with patch.object(SurfaceAnalysisDialog, "exec", return_value=QDialog.Rejected):
+                viewer._create_map_cut((0.0, 0.0, 1.0, 1.0))
+            self.assertEqual(created, [])
+            viewer.set_analysis(None)
+            self.assertFalse(viewer._map_cuts.isEnabled())
+            self.assertFalse(viewer._pick_cut.isEnabled())
+        finally:
+            viewer.deleteLater()
+
     def test_workspace_keeps_analyses_outside_dataset_registry(self) -> None:
         workspace = Workspace()
         workspace.add_dataset("Map", pd.DataFrame({"X": [0.0], "Y": [1.0]}))

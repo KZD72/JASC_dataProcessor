@@ -5,15 +5,18 @@ from __future__ import annotations
 import csv
 from collections import Counter
 from dataclasses import dataclass, replace
-from io import StringIO
+from io import BufferedReader, FileIO, StringIO
 from pathlib import Path
 import posixpath
 import re
+import time
 from zipfile import BadZipFile, ZipFile
 from xml.etree import ElementTree
 
 import numpy as np
 import pandas as pd
+
+from core.jobs import JobContext
 
 
 SUPPORTED_EXTENSIONS = {".csv", ".dat", ".txt"}
@@ -144,8 +147,12 @@ class DelimitedMetadata:
     fields: tuple[tuple[str, str], ...]
 
 
-def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
+def read_tabular_file(
+    path: str | Path, options: ImportOptions, *, context: JobContext | None = None,
+) -> pd.DataFrame:
     """Read a CSV/TXT file into a DataFrame using the selected import options."""
+    if context is not None:
+        context.check_cancelled()
     validate_import_profile(options.data_kind, options.spectrometer)
     validate_number_format(options.number_format)
     if options.data_kind == DATA_KIND_SPECTRAL_MAP and options.has_header is False:
@@ -194,6 +201,7 @@ def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
             inspection,
             encoding=resolved_encoding,
             number_format=options.number_format,
+            context=context,
         )
 
     read_kwargs = _build_read_csv_kwargs(
@@ -204,7 +212,9 @@ def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
     )
 
     try:
-        frame = pd.read_csv(file_path, **read_kwargs)
+        frame = _read_standard_numeric_table(file_path, read_kwargs, options.number_format, context=context)
+        if frame is None:
+            frame = _read_csv_with_context(file_path, read_kwargs, context)
     except UnicodeDecodeError as exc:
         raise ValueError(
             f"Could not decode the file with the selected {resolved_encoding} encoding."
@@ -222,6 +232,7 @@ def read_tabular_file(path: str | Path, options: ImportOptions) -> pd.DataFrame:
         frame,
         delimiter,
         number_format=options.number_format,
+        context=context,
     )
 
 
@@ -644,6 +655,7 @@ def _read_spectral_map_matrix(
     *,
     encoding: str,
     number_format: str,
+    context: JobContext | None = None,
 ) -> pd.DataFrame:
     """Normalize a wide spectral map into X/Y/shift/intensity rows."""
     read_kwargs: dict[str, object] = {
@@ -656,7 +668,7 @@ def _read_spectral_map_matrix(
     if inspection.delimiter == " ":
         read_kwargs.update({"sep": r"\s+", "engine": "python"})
     try:
-        wide_frame = pd.read_csv(file_path, **read_kwargs)
+        wide_frame = _read_csv_with_context(file_path, read_kwargs, context)
     except UnicodeDecodeError as exc:
         raise ValueError(
             f"Could not decode the spectral map with the selected {encoding} encoding."
@@ -676,6 +688,7 @@ def _read_spectral_map_matrix(
         wide_frame,
         inspection.delimiter,
         number_format=number_format,
+        context=context,
     )
     if not all(pd.api.types.is_numeric_dtype(dtype) for dtype in wide_frame.dtypes):
         raise ValueError("The spectral map contains non-numeric coordinate or intensity values.")
@@ -696,6 +709,8 @@ def _read_spectral_map_matrix(
     except (TypeError, ValueError) as exc:
         raise ValueError("The spectral map header contains a non-numeric Raman shift.") from exc
 
+    if context is not None:
+        context.report(0, 0, f"Normalizing spectral map: {file_path.name}")
     pixel_count = len(wide_frame)
     shift_count = len(shifts)
     coordinates = wide_frame.iloc[:, :2].to_numpy(dtype="float64", copy=False)
@@ -816,38 +831,199 @@ _COMMA_DECIMAL_NUMBER_PATTERN = re.compile(
 _GROUPING_SPACES = " '\u00a0\u202f’"
 
 
+class _JobReader(BufferedReader):
+    """Check cancellation at parser reads and throttle byte progress updates."""
+
+    def __init__(self, path: Path, context: JobContext) -> None:
+        super().__init__(FileIO(path, "r"))
+        self._context = context
+        self._total = path.stat().st_size
+        self._name = path.name
+        self._last_report = 0.0
+
+    def _report_read(self) -> None:
+        self._context.check_cancelled()
+        now = time.monotonic()
+        if now - self._last_report >= 0.05:
+            self._last_report = now
+            self._context.report(self.tell(), self._total, f"Reading {self._name}")
+
+    def read(self, size: int = -1) -> bytes:
+        self._context.check_cancelled()
+        data = super().read(size)
+        self._report_read()
+        return data
+
+    def read1(self, size: int = -1) -> bytes:
+        self._context.check_cancelled()
+        data = super().read1(size)
+        self._report_read()
+        return data
+
+    def readinto(self, buffer: object) -> int:
+        self._context.check_cancelled()
+        count = super().readinto(buffer)
+        self._report_read()
+        return count
+
+
+def _read_csv_with_context(
+    path: Path, kwargs: dict[str, object], context: JobContext | None,
+) -> pd.DataFrame:
+    """Keep normal parser behavior, optionally with cancellable byte reads."""
+    if context is None:
+        return pd.read_csv(path, **kwargs)
+    context.report(0, 0, f"Reading {path.name}")
+    with _JobReader(path, context) as stream:
+        frame = pd.read_csv(stream, **kwargs)
+    context.check_cancelled()
+    return frame
+
+
+def _read_standard_numeric_table(
+    file_path: Path,
+    read_kwargs: dict[str, object],
+    number_format: str,
+    *,
+    context: JobContext | None = None,
+) -> pd.DataFrame | None:
+    """Try the native float parser, falling back losslessly for other tables.
+
+    The bounded probe only chooses a parser. The entire file must parse as
+    floats, with no infinities or empty columns, before accepting its result.
+    Reject inferred Boolean columns: Pandas' explicit float parser would turn
+    True/False into 1/0. Mixed, localized, and late-invalid columns always go
+    through the original raw-token path. Float parsing retains signed zero.
+    """
+    if number_format == NUMBER_FORMAT_COMMA_DECIMAL or read_kwargs.get("engine", "c") != "c":
+        return None
+    probe_kwargs = dict(read_kwargs)
+    probe_kwargs.pop("dtype", None)
+    probe_kwargs["nrows"] = 128
+    probe = _read_csv_with_context(file_path, probe_kwargs, context)
+    if probe.empty or any(
+        not pd.api.types.is_numeric_dtype(probe[column].dtype)
+        or pd.api.types.is_bool_dtype(probe[column].dtype)
+        or not probe[column].notna().any()
+        for column in probe.columns
+    ):
+        return None
+    numeric_kwargs = dict(read_kwargs)
+    numeric_kwargs["dtype"] = "float64"
+    numeric_kwargs["float_precision"] = "round_trip"
+    # Prevent an isolated all-Boolean parser chunk from becoming numeric 1/0
+    # after earlier chunks in the same column contained ordinary numbers.
+    numeric_kwargs["low_memory"] = False
+    try:
+        frame = _read_csv_with_context(file_path, numeric_kwargs, context)
+    except (ValueError, OverflowError):
+        return None
+    if any(
+        not frame[column].notna().any() or np.isinf(frame[column].to_numpy()).any()
+        for column in frame.columns
+    ):
+        return None
+    return frame
+
+
+def _localized_numeric_tokens(tokens: pd.Series, number_format: str) -> pd.Series:
+    """Parse one complete token column, retaining NaN for invalid/nonfinite tokens.
+
+    Grammar validation keeps grouping and locale rules identical to the scalar
+    parser. Array conversion avoids invoking the locale parser for every cell;
+    exceptional conversions fall back to its existing scalar behavior.
+    """
+    comma = number_format == NUMBER_FORMAT_COMMA_DECIMAL
+    pattern = _COMMA_DECIMAL_NUMBER_PATTERN if comma else _DOT_DECIMAL_NUMBER_PATTERN
+    valid = tokens.str.fullmatch(pattern).fillna(False)
+    separators = ("." if comma else ",") + _GROUPING_SPACES
+    normalized = tokens.str.translate(str.maketrans("", "", separators))
+    if comma:
+        normalized = normalized.str.replace(",", ".", regex=False)
+    # Convert directly to float, retaining signed zero and Python-float rounding.
+    # to_numeric can infer integers first (losing -0) or round long decimals.
+    try:
+        numeric = pd.Series(
+            normalized.where(valid).to_numpy(dtype="float64", na_value=np.nan),
+            index=tokens.index,
+        )
+    except (ValueError, OverflowError):
+        numeric = pd.to_numeric(normalized.where(valid), errors="coerce").astype("float64")
+    fallback = valid & numeric.isna()
+    if fallback.any():
+        numeric.loc[fallback] = [
+            _parse_localized_number(str(value), number_format)
+            for value in tokens.loc[fallback]
+        ]
+    return numeric.where(np.isfinite(numeric))
+
+
+def _number_format_evidence(dot: pd.Series, comma: pd.Series) -> str | None:
+    """Resolve a convention only from finite, unambiguous tokens."""
+    dot_valid, comma_valid = dot.notna(), comma.notna()
+    has_dot = bool((dot_valid & ~comma_valid).any())
+    has_comma = bool((comma_valid & ~dot_valid).any())
+    if has_dot == has_comma:
+        return None
+    return NUMBER_FORMAT_DOT_DECIMAL if has_dot else NUMBER_FORMAT_COMMA_DECIMAL
+
+
 def _convert_localized_numeric_columns(
     frame: pd.DataFrame,
     delimiter: str,
     *,
     number_format: str = AUTO_NUMBER_FORMAT,
+    context: JobContext | None = None,
 ) -> pd.DataFrame:
-    """Convert wholly numeric columns using safe locale-aware token parsing."""
+    """Convert complete numeric columns without reparsing locale evidence.
+
+    Unambiguous columns commit immediately. Only ambiguous columns wait for
+    table-level evidence, avoiding a second inference pass over every token.
+    A single invalid nonblank token preserves the entire original text column.
+    """
     validate_number_format(number_format)
-    frame_format = _infer_frame_number_format(frame, delimiter, number_format)
-    for column in frame.columns:
+    evidence: set[str] = set()
+    pending: list[tuple[object, pd.Series, pd.Series, pd.Series]] = []
+
+    def commit(column: object, meaningful: pd.Series, values: pd.Series) -> None:
+        result = pd.Series(float("nan"), index=frame.index, dtype="float64")
+        result.loc[meaningful] = values.to_numpy()
+        frame[column] = result
+
+    for position, column in enumerate(frame.columns):
+        if context is not None:
+            context.report(position, len(frame.columns), f"Validating column {column}")
         series = frame[column]
         if pd.api.types.is_numeric_dtype(series.dtype):
             continue
         text = series.astype("string").str.strip()
-        meaningful = text.notna() & (text != "")
+        meaningful = text.notna() & text.ne("")
         if not meaningful.any():
             continue
-        tokens = text[meaningful]
-        resolved_format = (
-            number_format
-            if number_format != AUTO_NUMBER_FORMAT
-            else _infer_number_format(tokens) or frame_format
-        )
-        converted_values = [
-            _parse_localized_number(str(value), resolved_format)
-            for value in tokens
-        ]
-        if any(value is None for value in converted_values):
+        tokens = text.loc[meaningful]
+        if number_format != AUTO_NUMBER_FORMAT:
+            values = _localized_numeric_tokens(tokens, number_format)
+            if values.notna().all():
+                commit(column, meaningful, values)
             continue
-        numeric_series = pd.Series(float("nan"), index=series.index, dtype="float64")
-        numeric_series.loc[meaningful] = np.asarray(converted_values, dtype="float64")
-        frame[column] = numeric_series
+        dot = _localized_numeric_tokens(tokens, NUMBER_FORMAT_DOT_DECIMAL)
+        comma = _localized_numeric_tokens(tokens, NUMBER_FORMAT_COMMA_DECIMAL)
+        inferred = _number_format_evidence(dot, comma)
+        if inferred is not None:
+            evidence.add(inferred)
+            values = comma if inferred == NUMBER_FORMAT_COMMA_DECIMAL else dot
+            if values.notna().all():
+                commit(column, meaningful, values)
+        elif dot.notna().all() and comma.notna().all():
+            if dot.equals(comma):
+                commit(column, meaningful, dot)
+            else:
+                pending.append((column, meaningful, dot, comma))
+        # Conflicting or invalid columns stay verbatim, just as before.
+
+    fallback = next(iter(evidence)) if len(evidence) == 1 else NUMBER_FORMAT_DOT_DECIMAL
+    for column, meaningful, dot, comma in pending:
+        commit(column, meaningful, comma if fallback == NUMBER_FORMAT_COMMA_DECIMAL else dot)
     return frame
 
 
@@ -892,16 +1068,11 @@ def _resolved_number_format(
 
 def _infer_number_format(tokens: pd.Series) -> str | None:
     """Infer decimal convention only when at least one token is unambiguous."""
-    evidence: set[str] = set()
-    for value in tokens:
-        token = str(value).strip()
-        dot_value = _parse_localized_number(token, NUMBER_FORMAT_DOT_DECIMAL)
-        comma_value = _parse_localized_number(token, NUMBER_FORMAT_COMMA_DECIMAL)
-        if dot_value is not None and comma_value is None:
-            evidence.add(NUMBER_FORMAT_DOT_DECIMAL)
-        elif comma_value is not None and dot_value is None:
-            evidence.add(NUMBER_FORMAT_COMMA_DECIMAL)
-    return next(iter(evidence)) if len(evidence) == 1 else None
+    tokens = tokens.astype("string").str.strip()
+    return _number_format_evidence(
+        _localized_numeric_tokens(tokens, NUMBER_FORMAT_DOT_DECIMAL),
+        _localized_numeric_tokens(tokens, NUMBER_FORMAT_COMMA_DECIMAL),
+    )
 
 
 def _parse_localized_number(value: str, number_format: str) -> float | None:
@@ -984,7 +1155,8 @@ def resolve_text_encoding(path: str | Path, requested: str = AUTO_ENCODING) -> s
     if normalized != AUTO_ENCODING:
         return normalized
 
-    sample = file_path.read_bytes()[:_DELIMITER_SAMPLE_SIZE]
+    with file_path.open("rb") as stream:
+        sample = stream.read(_DELIMITER_SAMPLE_SIZE)
     if sample.startswith(b"\xef\xbb\xbf"):
         return "utf-8-sig"
     if sample.startswith((b"\xff\xfe", b"\xfe\xff")):

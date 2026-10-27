@@ -1,0 +1,530 @@
+[
+  {
+    "case": "table",
+    "rows": 100000,
+    "columns": 10,
+    "data_mib": 7.629520416259766,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "editor_attach": {
+      "median_s": 0.017699099999845203,
+      "samples_s": [
+        0.03138229999967734,
+        0.017699099999845203,
+        0.017386500000156957
+      ],
+      "rss_mib": 251.21484375,
+      "peak_rss_mib": 253.203125
+    },
+    "snapshot": {
+      "median_s": 0.004124800000226969,
+      "samples_s": [
+        0.004124800000226969
+      ],
+      "rss_mib": 251.21484375,
+      "peak_rss_mib": 258.84765625
+    },
+    "single_cell_edit": {
+      "median_s": 0.003930400000172085,
+      "samples_s": [
+        0.0035364999998819258,
+        0.003930400000172085,
+        0.004960199999914039
+      ],
+      "rss_mib": 274.17578125,
+      "peak_rss_mib": 274.17578125
+    },
+    "undo_entries": 3,
+    "undo_buffer_mib": 22.888561248779297,
+    "undo": {
+      "median_s": 0.006124800000179675,
+      "samples_s": [
+        0.006124800000179675
+      ],
+      "rss_mib": 281.8125,
+      "peak_rss_mib": 289.4453125
+    },
+    "final_memory": {
+      "rss_mib": 281.91015625,
+      "peak_rss_mib": 289.4453125
+    }
+  },
+  {
+    "case": "plot",
+    "rows": 100000,
+    "columns": 10,
+    "data_mib": 7.629520416259766,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "prepare_xy": {
+      "median_s": 0.001946599999882892,
+      "samples_s": [
+        0.002326599999832979,
+        0.001946599999882892,
+        0.0019373000000086904
+      ],
+      "rss_mib": 221.73828125,
+      "peak_rss_mib": 225.88671875
+    },
+    "raw_numpy_xy": {
+      "median_s": 0.0006294999998317508,
+      "samples_s": [
+        0.0006294999998317508,
+        0.0014889999997649284,
+        0.0006081999999878462
+      ],
+      "rss_mib": 221.73828125,
+      "peak_rss_mib": 225.88671875
+    },
+    "render_line": {
+      "median_s": 0.0445756999997684,
+      "samples_s": [
+        0.0445756999997684
+      ],
+      "rss_mib": 230.51953125,
+      "peak_rss_mib": 235.1015625
+    },
+    "paint_line": {
+      "median_s": 0.025989100000060716,
+      "samples_s": [
+        0.025989100000060716
+      ],
+      "rss_mib": 230.51953125,
+      "peak_rss_mib": 235.1015625
+    },
+    "rendered_points": 100000,
+    "final_memory": {
+      "rss_mib": 230.546875,
+      "peak_rss_mib": 235.1015625
+    }
+  },
+  {
+    "case": "formula",
+    "rows": 100000,
+    "columns": 10,
+    "data_mib": 7.629520416259766,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "numeric_validation": {
+      "median_s": 0.00013579999995272374,
+      "samples_s": [
+        0.00013579999995272374,
+        0.00023640000017621787,
+        9.720000025481568e-05
+      ],
+      "rss_mib": 217.75390625,
+      "peak_rss_mib": 225.30078125
+    },
+    "formula_sin": {
+      "median_s": 0.0008612000001448905,
+      "samples_s": [
+        0.006734399999913876,
+        0.0008612000001448905,
+        0.0007947999997668376
+      ],
+      "rss_mib": 220.72265625,
+      "peak_rss_mib": 225.30078125
+    },
+    "numpy_sin": {
+      "median_s": 0.0005983000000924221,
+      "samples_s": [
+        0.0003588000004128844,
+        0.0007623000001331093,
+        0.0005983000000924221
+      ],
+      "rss_mib": 220.72265625,
+      "peak_rss_mib": 225.30078125
+    },
+    "gui_max_timer_gap_s": 0.01065790000029665,
+    "final_memory": {
+      "rss_mib": 221.12890625,
+      "peak_rss_mib": 225.30078125
+    }
+  },
+  {
+    "case": "table",
+    "rows": 1000000,
+    "columns": 10,
+    "data_mib": 76.29407119750977,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "editor_attach": {
+      "median_s": 0.0685803000001215,
+      "samples_s": [
+        0.08701990000008664,
+        0.0685803000001215,
+        0.06777840000040669
+      ],
+      "rss_mib": 319.32421875,
+      "peak_rss_mib": 361.890625
+    },
+    "snapshot": {
+      "median_s": 0.024643700000069657,
+      "samples_s": [
+        0.024643700000069657
+      ],
+      "rss_mib": 319.32421875,
+      "peak_rss_mib": 395.62109375
+    },
+    "single_cell_edit": {
+      "median_s": 0.025049699999726727,
+      "samples_s": [
+        0.024807499999951688,
+        0.025904699999955483,
+        0.025049699999726727
+      ],
+      "rss_mib": 548.27734375,
+      "peak_rss_mib": 548.27734375
+    },
+    "undo_entries": 3,
+    "undo_buffer_mib": 228.8822135925293,
+    "undo": {
+      "median_s": 0.049326400000154536,
+      "samples_s": [
+        0.049326400000154536
+      ],
+      "rss_mib": 624.578125,
+      "peak_rss_mib": 700.875
+    },
+    "final_memory": {
+      "rss_mib": 624.65625,
+      "peak_rss_mib": 700.875
+    }
+  },
+  {
+    "case": "plot",
+    "rows": 1000000,
+    "columns": 10,
+    "data_mib": 76.29407119750977,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "prepare_xy": {
+      "median_s": 0.01689429999987624,
+      "samples_s": [
+        0.020401399999627756,
+        0.01586600000018734,
+        0.01689429999987624
+      ],
+      "rss_mib": 289.76953125,
+      "peak_rss_mib": 362.12890625
+    },
+    "raw_numpy_xy": {
+      "median_s": 0.004249000000072556,
+      "samples_s": [
+        0.004231200000049284,
+        0.004249000000072556,
+        0.005141600000115432
+      ],
+      "rss_mib": 289.76953125,
+      "peak_rss_mib": 362.12890625
+    },
+    "render_line": {
+      "median_s": 0.2152155999997376,
+      "samples_s": [
+        0.2152155999997376
+      ],
+      "rss_mib": 353.1015625,
+      "peak_rss_mib": 414.15234375
+    },
+    "paint_line": {
+      "median_s": 0.14794100000017352,
+      "samples_s": [
+        0.14794100000017352
+      ],
+      "rss_mib": 353.109375,
+      "peak_rss_mib": 414.15234375
+    },
+    "rendered_points": 1000000,
+    "final_memory": {
+      "rss_mib": 353.13671875,
+      "peak_rss_mib": 414.15234375
+    }
+  },
+  {
+    "case": "formula",
+    "rows": 1000000,
+    "columns": 10,
+    "data_mib": 76.29407119750977,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "numeric_validation": {
+      "median_s": 0.0001216000000567874,
+      "samples_s": [
+        0.00012250000008862116,
+        0.0001216000000567874,
+        0.00011519999998199637
+      ],
+      "rss_mib": 286.35546875,
+      "peak_rss_mib": 361.84765625
+    },
+    "formula_sin": {
+      "median_s": 0.0067023000001427135,
+      "samples_s": [
+        0.012078699999619857,
+        0.0067023000001427135,
+        0.004961599999660393
+      ],
+      "rss_mib": 289.234375,
+      "peak_rss_mib": 361.84765625
+    },
+    "numpy_sin": {
+      "median_s": 0.003943600000184233,
+      "samples_s": [
+        0.004803999999694497,
+        0.003943600000184233,
+        0.0035404999998718267
+      ],
+      "rss_mib": 289.234375,
+      "peak_rss_mib": 361.84765625
+    },
+    "gui_max_timer_gap_s": 0.01480889999993451,
+    "final_memory": {
+      "rss_mib": 289.64453125,
+      "peak_rss_mib": 361.84765625
+    }
+  },
+  {
+    "case": "table",
+    "rows": 4000000,
+    "columns": 10,
+    "data_mib": 305.17590713500977,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "editor_attach": {
+      "median_s": 0.5155589000000873,
+      "samples_s": [
+        0.5249398000000838,
+        0.5152153000003636,
+        0.5155589000000873
+      ],
+      "rss_mib": 546.47265625,
+      "peak_rss_mib": 820.03125
+    },
+    "snapshot": {
+      "median_s": 0.0006084999999984575,
+      "samples_s": [
+        0.0006084999999984575
+      ],
+      "rss_mib": 546.47265625,
+      "peak_rss_mib": 820.03125
+    },
+    "single_cell_edit": {
+      "median_s": 0.0009832999999161984,
+      "samples_s": [
+        0.0009832999999161984,
+        0.0009225999997397594,
+        0.00152189999971597
+      ],
+      "rss_mib": 546.53515625,
+      "peak_rss_mib": 820.03125
+    },
+    "undo_entries": 0,
+    "undo_buffer_mib": 0.0,
+    "undo": {
+      "median_s": 6.600000233447645e-06,
+      "samples_s": [
+        6.600000233447645e-06
+      ],
+      "rss_mib": 546.53515625,
+      "peak_rss_mib": 820.03125
+    },
+    "final_memory": {
+      "rss_mib": 546.81640625,
+      "peak_rss_mib": 820.03125
+    }
+  },
+  {
+    "case": "import",
+    "rows": 100000,
+    "columns": 10,
+    "data_mib": 7.629520416259766,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "csv_mib": 8.16031551361084,
+    "pandas_typed_csv": {
+      "median_s": 0.05329490000031001,
+      "samples_s": [
+        0.058474500000102125,
+        0.052259999999932916,
+        0.05329490000031001
+      ],
+      "rss_mib": 219.61328125,
+      "peak_rss_mib": 247.33203125
+    },
+    "jasc_auto_csv": {
+      "median_s": 0.1732105999999476,
+      "samples_s": [
+        0.1732105999999476
+      ],
+      "rss_mib": 219.6875,
+      "peak_rss_mib": 254.16015625
+    },
+    "jasc_explicit_csv": {
+      "median_s": 0.16419959999984712,
+      "samples_s": [
+        0.16419959999984712
+      ],
+      "rss_mib": 221.22265625,
+      "peak_rss_mib": 254.16015625
+    },
+    "project_save": {
+      "median_s": 0.4579816000000392,
+      "samples_s": [
+        0.4579816000000392
+      ],
+      "rss_mib": 226.546875,
+      "peak_rss_mib": 254.16015625
+    },
+    "project_load": {
+      "median_s": 0.08898129999988669,
+      "samples_s": [
+        0.08898129999988669
+      ],
+      "rss_mib": 222.40625,
+      "peak_rss_mib": 254.16015625
+    },
+    "project_mib": 0.5598592758178711,
+    "final_memory": {
+      "rss_mib": 222.56640625,
+      "peak_rss_mib": 254.16015625
+    }
+  },
+  {
+    "case": "import",
+    "rows": 1000000,
+    "columns": 2,
+    "data_mib": 15.258914947509766,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "csv_mib": 18.605223655700684,
+    "pandas_typed_csv": {
+      "median_s": 0.11834049999970375,
+      "samples_s": [
+        0.123209400000178,
+        0.11834049999970375,
+        0.11647760000005292
+      ],
+      "rss_mib": 231.11328125,
+      "peak_rss_mib": 265.28125
+    },
+    "jasc_auto_csv": {
+      "median_s": 0.3665138000001207,
+      "samples_s": [
+        0.3665138000001207
+      ],
+      "rss_mib": 230.12109375,
+      "peak_rss_mib": 309.09375
+    },
+    "jasc_explicit_csv": {
+      "median_s": 0.3495248999997784,
+      "samples_s": [
+        0.3495248999997784
+      ],
+      "rss_mib": 231.078125,
+      "peak_rss_mib": 309.09375
+    },
+    "project_save": {
+      "median_s": 1.2858375999999225,
+      "samples_s": [
+        1.2858375999999225
+      ],
+      "rss_mib": 234.7890625,
+      "peak_rss_mib": 309.09375
+    },
+    "project_load": {
+      "median_s": 0.18328299999984665,
+      "samples_s": [
+        0.18328299999984665
+      ],
+      "rss_mib": 235.02734375,
+      "peak_rss_mib": 309.09375
+    },
+    "project_mib": 4.651163101196289,
+    "final_memory": {
+      "rss_mib": 235.06640625,
+      "peak_rss_mib": 309.09375
+    }
+  },
+  {
+    "case": "spectral",
+    "rows": 1000000,
+    "columns": 4,
+    "data_mib": 30.517704010009766,
+    "environment": {
+      "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+      "pandas": "3.0.3",
+      "numpy": "2.4.4",
+      "qt": "6.11.0"
+    },
+    "spectral_slice": {
+      "median_s": 0.07344530000000304,
+      "samples_s": [
+        0.07154880000007324,
+        0.07344530000000304,
+        0.07399250000025859
+      ],
+      "rss_mib": 285.2109375,
+      "peak_rss_mib": 392.2109375
+    },
+    "selected_spectrum_scan": {
+      "median_s": 0.0012455999999474443,
+      "samples_s": [
+        0.0012612000000444823,
+        0.0012455999999474443,
+        0.0012019000000691449
+      ],
+      "rss_mib": 289.88671875,
+      "peak_rss_mib": 392.2109375
+    },
+    "viewer_redraw": {
+      "median_s": 0.04886629999964498,
+      "samples_s": [
+        0.04886629999964498,
+        0.04976910000004864,
+        0.04787690000011935
+      ],
+      "rss_mib": 291.16796875,
+      "peak_rss_mib": 392.2109375
+    },
+    "final_memory": {
+      "rss_mib": 294.7265625,
+      "peak_rss_mib": 392.2109375
+    }
+  }
+]

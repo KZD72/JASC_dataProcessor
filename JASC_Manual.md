@@ -33,7 +33,7 @@ JASC Data Processor is a desktop application for scientific worksheet editing, d
 
 - Python 3.10 or later.
 - A desktop environment capable of displaying a Qt application.
-- The packages in `requirements.txt`: PySide6, pandas, NumPy, Matplotlib, SciPy, odrpack, SciencePlots, and statsmodels.
+- The packages in `requirements.txt`, including PySide6, pandas, Polars, NumPy, Matplotlib, and SciPy.
 
 ### Install dependencies
 
@@ -248,6 +248,8 @@ Because worksheet payloads are CSV, specialized pandas dtypes are reconstructed 
 ## 4. Importing and Creating Data
 
 ### Import CSV, DAT, or TXT data
+
+Text-file inspection and reading run in the background. The status bar shows the current file and phase, byte progress while reading ordinary tables, and a **Cancel** button. Existing worksheets and plots remain available while files are being prepared. Cancellation discards the pending batch without adding partial worksheets; it may wait for the current parsing or conversion work unit to finish. Successfully prepared files are added together after any size warnings are resolved. If an individual file fails, the completed import identifies it in a warning and can still add the other successful files. Switching projects discards stale import results, and closing JASC waits for the worker to stop safely.
 
 1. Choose **File > Import Data...** (`Ctrl+I`) or use the toolbar action.
 2. Select one or several `.csv`, `.dat`, or `.txt` files. Every successfully imported file becomes an independent dataset named from its filename.
@@ -1265,6 +1267,11 @@ Select a committed map and click **Map Details...**, or double-click the map, fo
 
 Click **Analyse Map...** to create an ordinary reusable worksheet containing the rendered X/Y/Z grid, a closest horizontal or vertical profile, an arbitrary point-to-point profile, rectangular ROI statistics, or contour vertices and enclosed areas. ROI output includes cell count, mean, median, standard deviation, extrema with coordinates, and a grid-spacing-weighted integral. The repository includes analytically defined regular-grid and irregular point-cloud examples under `Test_Data`.
 
+Horizontal, vertical, and arbitrary line cuts also create named, editable plots under **Workspace > Plots**, backed by the generated profile worksheet. They are saved with the project. The source map stays active, so you can create several cuts before opening their plots. Use **Pick Cut Line...** to click the start and end directly on an ordinary or spectral map, then confirm the endpoints and sample count.
+
+Peak/Raman result maps provide **Map Cuts...** for horizontal, vertical, or arbitrary cuts of the currently selected parameter or quality metric, and **Pick Cut Line...** for mouse-picked endpoints. These cuts respect **Hide failed pixels** and publish only the cut worksheet and saved plot, without exporting the complete internal result tables. Right-click or press Esc to cancel picking; changing the metric or analysis also cancels it. Arbitrary-line values are spatially interpolated, rather than additional measured pixels.
+
+
 A dedicated row above the canvas follows the mouse and reports `x`, `y`, and interpolated Z/intensity for ordinary and spectral maps; masked interpolation edges fall back to the closest measured map pixel. Maps require numeric Z values and at least three distinct non-collinear X/Y coordinate points. Rendering failures appear as a message on the canvas instead of a blank plot.
 
 For an imported hyperspectral map, choose **Spectra Plot** and select its worksheet. JASC automatically proposes `X`, `Y`, `Raman Shift` (or a frequency/wavenumber equivalent), and `Intensity`. Enter the target center and choose **Closest measured shift** to take the nearest available spectral sample independently at every pixel, or **Linear spectral interpolation** to interpolate between the two surrounding samples in every pixel spectrum. The separate 2D-map interpolation control then determines how those sampled XY intensities are drawn on the spatial grid. Target center, spectral column, sampling method, spatial interpolation, and grid resolution are retained in saved plots.
@@ -1446,7 +1453,28 @@ An exported image is static. Save the plot definition and project when later edi
 - `.jasc` worksheet CSV entries stream from the ZIP archive during project load.
 - Undo/redo retains at most 20 snapshots and approximately 256 MiB per stack.
 
-All datasets are currently held in memory by pandas. CSV/TXT/Excel import and much project parsing still run synchronously, so very large files can pause the interface even after confirmation. Background import, paged/out-of-core datasets, autosave, and recovery are not implemented.
+Ordinary editable worksheets remain in Pandas memory. Text inspection/parsing runs in the background; Excel and project I/O still run synchronously. Autosave and recovery are not implemented.
+
+### Open a disk-backed large dataset
+
+Choose **File > Open Large Dataset...** or **Workspace > Large Data > Open Large Dataset**. Select a regular comma-, semicolon-, tab-, or pipe-separated `.csv`, `.dat`, or `.txt` table, or an existing `.parquet` file. Text files use the usual import preflight and parser options. Large-data mode currently rejects whitespace-separated tables and vendor-specific spectrum/map layouts; use ordinary **Import Data** for these.
+
+JASC creates a private Parquet snapshot on disk through Polars rather than retaining a complete source DataFrame. Text values remain strings, including numeric-looking values, identifiers with leading zeros, and late mixed tokens. Number-format choices are retained as provenance; this mode does not perform whole-column numeric inference. Existing Parquet types are retained. The original file is not modified, and later changes to it do not affect the snapshot.
+
+The central **Large Data** tab is read-only and shows one window of at most **1,000 rows and 32 columns**, with an **8 MiB data-buffer limit**. Oversized windows shrink; a row exceeding the limit produces a controlled error. Column widths are fixed initially. This budget covers the displayed data, not all process memory: workers, Parquet decoders, Qt, and import buffers require additional memory.
+
+- Scroll past the bottom/top edge to load adjacent rows, or use **Previous rows / Next rows**.
+- Enter a global, one-based row number and choose **Go to row** to jump directly.
+- Use **Previous columns / Next columns** to browse wide tables in bounded column windows.
+- The summary and row labels retain positions in the complete source. Copy (`Ctrl+C`) copies only selected cells in the current window.
+- Reads run in a worker. Old windows are evicted, rapid requests coalesce, and stale results cannot replace a newer source/window. **Retry** is available after a read failure.
+- **Create worksheet from this window** explicitly copies the displayed rows/columns into an ordinary editable worksheet with source-range provenance. This is a subset; analysis on that worksheet covers that subset. Text-import values remain strings; ordinary numeric-string validation is available in the analysis workflows.
+
+Large datasets appear separately from ordinary worksheets, so existing formulas, plotting, batch analysis, and snapshot undo cannot silently operate on a partial source. Full-source filtering, sorting, aggregation controls, reduced plots, and bounded spectrum extraction remain future work; the backend exposes a lazy full-source query boundary for those operations.
+
+Save the project to retain large sources. Projects containing them use version 9 and embed Parquet members; load streams those members back to private disk snapshots. Original source files are not needed to reopen the project. Ordinary-only projects continue to use version 8. Package seals, signatures, and encryption cover the embedded data as usual. Project save/load remains synchronous, so very large packages can pause the interface despite bounded payload memory.
+
+Opening requires temporary disk space for the snapshot and, for text, an intermediate UTF-8 copy. Snapshots are unencrypted files in the operating system's temporary directory while open, including sources loaded from encrypted projects. Removing a source releases its snapshot once any active reader finishes. Import Cancel checks streaming-copy boundaries and rejects pending results; native Polars conversion cancels after that phase finishes. Closing waits safely for active workers.
 
 ---
 
@@ -1521,7 +1549,7 @@ The current version does not provide:
 - Multi-condition filters, pivot tables, resampling, date/time tooling, or reusable preparation recipes.
 - Multi-panel pages, true 3D plots, polar/ternary plots, annotation objects, or general graph templates.
 - Global multi-dataset fitting, automated model ranking, peak deconvolution, or surface fitting.
-- A scripting console, macro recorder, plugins, autosave/recovery, installer, or true out-of-core data backend.
+- A scripting console, macro recorder, plugins, autosave/recovery, or installer. Disk-backed large-table browsing is available, but full-source analysis controls, direct large-table editing, and vendor-map disk storage are not yet implemented.
 
 Consult `Roadmap.md` for planned work; roadmap entries are not instructions for currently available features.
 

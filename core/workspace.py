@@ -11,6 +11,7 @@ import pandas as pd
 from core.data_backends import PANDAS_BACKEND, normalize_backend
 from core.operations import rename_worksheet_references
 from core.spectral_analysis import SpectralAnalysisSession
+from core.large_data import LargeDataset
 from models.fit_functions import CustomFitModel
 
 
@@ -235,12 +236,38 @@ class Workspace:
     def __init__(self) -> None:
         """Initialize empty dataset and saved-plot registries."""
         self._datasets: dict[str, Dataset] = {}
+        # Large sources never masquerade as a Dataset with a partial frame.
+        self._large_datasets: dict[str, LargeDataset] = {}
         self._plots: dict[str, SavedPlot] = {}
         self._spectral_analyses: dict[str, SpectralAnalysisSession] = {}
         self._custom_fit_models: dict[str, CustomFitModel] = {}
         self.project_signature_status = "unsigned"
         self.project_signer_fingerprint: str | None = None
         self.project_signer_name: str | None = None
+
+    def add_large_dataset(self, dataset: LargeDataset) -> LargeDataset:
+        """Adopt an immutable disk snapshot outside the editable-sheet registry."""
+        base = dataset.name.strip() or "Large Dataset"
+        name, index = base, 2
+        while name in self._large_datasets:
+            name = f"{base} ({index})"
+            index += 1
+        dataset.name = name
+        self._large_datasets[name] = dataset
+        return dataset
+
+    def large_dataset_names(self) -> list[str]:
+        return list(self._large_datasets)
+
+    def list_large_datasets(self) -> list[LargeDataset]:
+        return list(self._large_datasets.values())
+
+    def get_large_dataset(self, name: str) -> LargeDataset:
+        return self._large_datasets[name]
+
+    def remove_large_dataset(self, name: str) -> None:
+        """Release workspace ownership; readers retain their own safe reference."""
+        del self._large_datasets[name]
 
     def add_dataset(
         self,

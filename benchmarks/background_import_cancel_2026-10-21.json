@@ -1,0 +1,20 @@
+{
+  "rows": 1000000,
+  "columns": 10,
+  "csv_mib": 89.24856281280518,
+  "elapsed_s": 0.08031369999935123,
+  "heartbeat_ticks": 8,
+  "heartbeat_p95_gap_s": 0.02180423999971025,
+  "heartbeat_max_gap_s": 0.0265358999995442,
+  "cancel_requested": true,
+  "cancel_completion_s": 0.010645499999554886,
+  "published_datasets": [],
+  "published_rows": 0,
+  "progress_messages": [
+    "Inspecting large.csv",
+    "Preparing large.csv (1/1)",
+    "Reading large.csv"
+  ],
+  "errors": [],
+  "qt_offscreen": true
+}

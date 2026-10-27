@@ -1117,7 +1117,9 @@ def _numeric_series(series: pd.Series | None, label: str, minimum_points: int) -
     """Coerce a source series to numeric values while preserving row indexes."""
     if series is None:
         raise MathOperationError(f"Choose a data column for {label}.")
-    meaningful = series.notna() & series.astype(str).str.strip().ne("")
+    meaningful = series.notna()
+    if not pd.api.types.is_numeric_dtype(series.dtype):
+        meaningful &= series.astype(str).str.strip().ne("")
     values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
     invalid = meaningful & values.isna()
     if invalid.any():

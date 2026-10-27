@@ -202,6 +202,8 @@ class SurfaceAnalysisDialog(QDialog):
         default_name: str,
         bounds: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 1.0),
         parent: QWidget | None = None,
+        *,
+        profiles_only: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Analyse 2D Map")
@@ -216,6 +218,10 @@ class SurfaceAnalysisDialog(QDialog):
             ("Rectangular ROI statistics", "roi"),
             ("Extract contour vertices", "contours"),
         ], "grid")
+        if profiles_only:
+            for index in range(self._operation.count() - 1, -1, -1):
+                if self._operation.itemData(index) not in {"horizontal", "vertical", "line"}:
+                    self._operation.removeItem(index)
         self._coordinate = SurfacePlotDetailsDialog._float_spin(
             -1e15, 1e15, (y_minimum + y_maximum) / 2.0, 0.1
         )
@@ -242,10 +248,11 @@ class SurfaceAnalysisDialog(QDialog):
         form.addRow("Line end X", self._line_x2)
         form.addRow("Line end Y", self._line_y2)
         form.addRow("Line samples", self._line_samples)
-        form.addRow("ROI X minimum", self._x_min)
-        form.addRow("ROI X maximum", self._x_max)
-        form.addRow("ROI Y minimum", self._y_min)
-        form.addRow("ROI Y maximum", self._y_max)
+        if not profiles_only:
+            form.addRow("ROI X minimum", self._x_min)
+            form.addRow("ROI X maximum", self._x_max)
+            form.addRow("ROI Y minimum", self._y_min)
+            form.addRow("ROI Y maximum", self._y_max)
         form.addRow("Result sheet", self._name)
         form.addRow(buttons)
 

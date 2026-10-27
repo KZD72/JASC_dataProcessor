@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Callable
 import json
 import re
 import time
@@ -22,7 +23,7 @@ from PySide6.QtCore import (
     QTimer,
     Qt,
 )
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPalette, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -48,6 +49,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from core.import_jobs import PreparedTextBatch, inspect_text_files, prepare_text_files
+from core.jobs import JobContext, JobProgress
+from core.large_data import LargeDataset, TablePage, open_large_dataset
+from ui.large_data_view import LargeDataView
+from ui.background_jobs import BackgroundJobController, JobProgressWidget
 
 from core import project_io
 from core.batch_processing import (
@@ -90,9 +97,7 @@ from core.file_io import (
     export_tabular_file,
     inspect_delimited_file,
     inspect_excel_workbook,
-    read_leading_metadata,
     read_excel_sheets,
-    read_tabular_file,
 )
 from core.operations import (
     ExpressionError,
@@ -202,6 +207,14 @@ class MainWindow(QMainWindow):
         """Create the main window, shared workspace, and primary UI regions."""
         super().__init__()
         self._workspace = Workspace()
+        self._jobs = BackgroundJobController(self)
+        self._jobs.progress.connect(self._update_import_progress)
+        self._jobs.finished.connect(self._finish_deferred_close)
+        self._text_import_token: object | None = None
+        self._text_import_workspace: Workspace | None = None
+        self._text_import_progress: JobProgressWidget | None = None
+        self._text_import_cancel_requested = False
+        self._closing_when_idle = False
         self._project_path: Path | None = None
         self._project_password: str | None = None
         self._project_signing_identity: project_io.SigningPrivateIdentity | None = None
@@ -230,6 +243,8 @@ class MainWindow(QMainWindow):
         self._dataset_list.currentTextChanged.connect(self._show_dataset_editor)
         self._dataset_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self._dataset_list.customContextMenuRequested.connect(self._show_dataset_context_menu)
+        self._large_dataset_list = QListWidget()
+        self._large_dataset_list.currentTextChanged.connect(self._show_large_dataset)
 
         self._plot_list = QListWidget()
         self._plot_list.itemDoubleClicked.connect(lambda _item: self._load_selected_plot())
@@ -281,12 +296,19 @@ class MainWindow(QMainWindow):
         self._plot_tab_widget.load_plot_requested.connect(self._load_selected_plot)
         self._plot_tab_widget.remove_plot_requested.connect(self._delete_selected_plot)
         self._plot_tab_widget.options_visibility_changed.connect(self._handle_plot_options_visibility_changed)
-        self._plot_tab_widget.dataset_created.connect(self._refresh_dataset_list)
+        self._plot_tab_widget.dataset_created.connect(self._refresh_map_analysis_dataset)
+        self._plot_tab_widget.plot_created.connect(lambda _name: self._refresh_plot_list())
         self._tabs.addTab(self._plot_tab_widget, "Plot")
         self._spectral_analysis_viewer = SpectralAnalysisViewer(self)
+        self._spectral_analysis_viewer.map_analysis_created.connect(
+            self._plot_tab_widget._commit_surface_analysis
+        )
         self._spectral_analysis_viewer.export_requested.connect(
             self._export_spectral_analysis
         )
+        self._large_data_view = LargeDataView(self)
+        self._large_data_view.worksheet_requested.connect(self._materialize_large_window)
+        self._large_data_view.idle.connect(self._finish_deferred_close)
 
         self.setCentralWidget(self._tabs)
         self._build_workspace_dock()
@@ -471,6 +493,16 @@ class MainWindow(QMainWindow):
 
         self._workspace_nav_tabs.addTab(dataset_page, "Datasets")
         self._workspace_nav_tabs.addTab(plot_page, "Plots")
+        self._large_nav_page = QWidget()
+        large_layout = QVBoxLayout(self._large_nav_page)
+        large_layout.addWidget(self._large_dataset_list)
+        open_large = QPushButton("Open Large Dataset")
+        open_large.clicked.connect(self._open_large_data)
+        remove_large = QPushButton("Remove")
+        remove_large.clicked.connect(self._remove_large_dataset)
+        large_layout.addWidget(open_large)
+        large_layout.addWidget(remove_large)
+        self._workspace_nav_tabs.addTab(self._large_nav_page, "Large Data")
         analysis_page = QWidget()
         self._analysis_nav_page = analysis_page
         analysis_layout = QVBoxLayout(analysis_page)
@@ -1351,6 +1383,10 @@ class MainWindow(QMainWindow):
         import_action = file_menu.addAction("&Import Data...")
         import_action.setShortcut("Ctrl+I")
         import_action.triggered.connect(self._import_data_file)
+        self._import_action = import_action
+
+        large_data_action = file_menu.addAction("Open &Large Dataset...")
+        large_data_action.triggered.connect(self._open_large_data)
 
         import_figure_action = file_menu.addAction("Import From &Figure...")
         import_figure_action.triggered.connect(self._import_from_figure)
@@ -2151,8 +2187,132 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def _open_large_data(self) -> None:
+        """Explicit disk-backed import; never route the source through Pandas."""
+        if self._jobs.is_running or self._text_import_token is not None:
+            self.statusBar().showMessage("Wait for the current import to finish")
+            return
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Open Large Dataset", "",
+            "Large Tables (*.csv *.dat *.txt *.parquet);;All Files (*)",
+        )
+        if not file_name:
+            return
+        path = Path(file_name)
+        token = object()
+        self._text_import_token = token
+        self._text_import_workspace = self._workspace
+        self._text_import_cancel_requested = False
+        self._import_action.setEnabled(False)
+        progress = JobProgressWidget(self)
+        self.statusBar().addPermanentWidget(progress)
+        progress.canceled.connect(self._cancel_text_import)
+        self._text_import_progress = progress
+        if path.suffix.lower() == ".parquet":
+            self._start_large_data_import(token, path, ImportOptions())
+        else:
+            self._run_text_import_job(
+                token, lambda context: inspect_text_files(context, [path]),
+                lambda inspections: self._choose_large_data_options(token, path, inspections),
+            )
+
+    def _choose_large_data_options(
+        self, token: object, path: Path, inspections: list[DelimitedFileInspection],
+    ) -> None:
+        self._text_import_progress.hide()
+        dialog = ImportOptionsDialog(self, inspections=inspections)
+        dialog.setWindowTitle("Large Dataset Options - text values are preserved")
+        if dialog.exec() != ImportOptionsDialog.Accepted:
+            self._finish_text_import("Large dataset opening cancelled")
+            return
+        if self._text_import_is_current(token):
+            self._start_large_data_import(token, path, dialog.options())
+
+    def _start_large_data_import(self, token: object, path: Path, options: ImportOptions) -> None:
+        self._run_text_import_job(
+            token, lambda context: open_large_dataset(path, options, context),
+            lambda dataset: self._commit_large_data_import(token, dataset),
+        )
+
+    def _commit_large_data_import(self, token: object, dataset: LargeDataset) -> None:
+        if not self._text_import_is_current(token):
+            return
+        self._workspace.add_large_dataset(dataset)
+        self._finish_text_import(f"Opened large dataset {dataset.name}")
+        self._refresh_large_dataset_list(dataset.name)
+
+    def _refresh_large_dataset_list(self, selected_name: str | None = None) -> None:
+        names = self._workspace.large_dataset_names()
+        if selected_name is None and names:
+            selected_name = names[0]
+        self._large_dataset_list.blockSignals(True)
+        try:
+            self._large_dataset_list.clear()
+            self._large_dataset_list.addItems(names)
+            if selected_name in names:
+                self._large_dataset_list.setCurrentRow(names.index(selected_name))
+        finally:
+            self._large_dataset_list.blockSignals(False)
+        if selected_name in names:
+            self._show_large_dataset(selected_name)
+        elif not names:
+            self._large_data_view.set_source(None)
+            index = self._tabs.indexOf(self._large_data_view)
+            if index >= 0:
+                self._tabs.removeTab(index)
+        self._update_dataset_summary()
+
+    def _show_large_dataset(self, name: str) -> None:
+        if name not in self._workspace.large_dataset_names():
+            return
+        self._dataset_list.blockSignals(True)
+        self._dataset_list.setCurrentRow(-1)
+        self._dataset_list.blockSignals(False)
+        self._dataset_model.set_dataset(None)
+        self._dataset_table.clearSelection()
+        self._large_data_view.set_source(self._workspace.get_large_dataset(name))
+        if self._tabs.indexOf(self._large_data_view) < 0:
+            self._tabs.addTab(self._large_data_view, "Large Data")
+        self._tabs.setCurrentWidget(self._large_data_view)
+        self._workspace_nav_tabs.setCurrentWidget(self._large_nav_page)
+        self._update_dataset_summary()
+
+    def _remove_large_dataset(self) -> None:
+        item = self._large_dataset_list.currentItem()
+        if item is None:
+            return
+        self._large_data_view.set_source(None)
+        self._workspace.remove_large_dataset(item.text())
+        names = self._workspace.large_dataset_names()
+        self._refresh_large_dataset_list(names[0] if names else None)
+
+    def _materialize_large_window(self, source: LargeDataset, page: TablePage) -> None:
+        """Publish only an explicitly chosen window as a normal editable sheet."""
+        if source is not self._large_data_view.source or page is not self._large_data_view.model.page:
+            return
+        try:
+            frame = source.materialize_page(page)
+            dataset = self._workspace.add_dataset(
+                f"{source.name} rows {page.row_start + 1}-{page.row_start + len(frame)}",
+                frame, source_path=source.source_path, copy_frame=False,
+            )
+            dataset.worksheet_metadata.import_details = {
+                "Large source": source.name,
+                "Source rows (1-based)": f"{page.row_start + 1}-{page.row_start + len(frame)}",
+                "Source columns (1-based)": f"{page.column_start + 1}-{page.column_start + len(frame.columns)}",
+                "Scope": "Explicit display-window extraction; not the complete source",
+            }
+        except Exception as exc:
+            QMessageBox.critical(self, "Worksheet Extraction Failed", str(exc))
+            return
+        self._refresh_dataset_list(dataset.name)
+        self.statusBar().showMessage(f"Created {dataset.name} from the displayed window")
+
     def _import_data_file(self) -> None:
-        """Open one workbook or batch-import delimited files with shared rules."""
+        """Open a workbook or prepare text imports without blocking the GUI."""
+        if self._text_import_token is not None or self._jobs.is_running:
+            self.statusBar().showMessage("An import is already in progress")
+            return
         file_names, _selected_filter = QFileDialog.getOpenFileNames(
             self,
             "Import Data File(s)",
@@ -2193,182 +2353,181 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Batch import cancelled")
                 return
 
-        inspections: list[DelimitedFileInspection] = []
-        inspection_errors: list[str] = []
-        for path in paths:
-            try:
-                inspections.append(inspect_delimited_file(path))
-            except Exception as exc:
-                inspection_errors.append(f"{path.name}: {exc}")
-        if inspection_errors:
-            QMessageBox.critical(
-                self,
-                "Import Preflight Failed",
-                "One or more files could not be inspected:\n\n" + "\n".join(inspection_errors),
-            )
-            self.statusBar().showMessage("Batch import preflight failed")
-            return
+        token = object()
+        self._text_import_token = token
+        self._text_import_workspace = self._workspace
+        self._text_import_cancel_requested = False
+        self._import_action.setEnabled(False)
+        progress = JobProgressWidget(self)
+        self.statusBar().addPermanentWidget(progress)
+        progress.canceled.connect(self._cancel_text_import)
+        self._text_import_progress = progress
+        self._run_text_import_job(
+            token, lambda context: inspect_text_files(context, paths),
+            lambda inspections: self._choose_text_import_options(token, paths, inspections),
+            "Import Preflight Failed",
+        )
 
+    def _run_text_import_job(
+        self, token: object, operation: Callable[[JobContext], object],
+        ready: Callable[[object], None], error_title: str = "Import Failed",
+    ) -> None:
+        """Start a detached phase and deliver it only to the original workspace."""
+        if not self._text_import_is_current(token):
+            return
+        self._text_import_progress.show()
+
+        def succeeded(result: object) -> None:
+            if self._text_import_is_current(token):
+                ready(result)
+
+        def failed(message: str) -> None:
+            if self._text_import_is_current(token):
+                self._finish_text_import("Import failed")
+                QMessageBox.critical(self, error_title, message)
+
+        self._jobs.start(
+            operation, on_success=succeeded, on_error=failed,
+            on_cancelled=lambda: self._finish_text_import("Import cancelled"),
+        )
+
+    def _text_import_is_current(self, token: object) -> bool:
+        """Reject cancelled or stale results before prompts and before commit."""
+        if token is not self._text_import_token:
+            return False
+        if (self._text_import_cancel_requested or self._closing_when_idle
+                or self._workspace is not self._text_import_workspace):
+            self._finish_text_import("Import cancelled; no datasets were added")
+            return False
+        return True
+
+    def _choose_text_import_options(
+        self, token: object, paths: list[Path], inspections: list[DelimitedFileInspection],
+    ) -> None:
+        self._text_import_progress.hide()
         dialog = ImportOptionsDialog(self, inspections=inspections)
         if dialog.exec() != ImportOptionsDialog.Accepted:
+            self._finish_text_import("Import cancelled")
+            return
+        if not self._text_import_is_current(token):
             return
         options = dialog.options()
+        if (options.delimiter != AUTO_DELIMITER or options.encoding != AUTO_ENCODING
+                or options.skip_rows is not None or options.data_kind != AUTO_DATA_KIND
+                or options.spectrometer != AUTO_SPECTROMETER):
+            self._run_text_import_job(
+                token, lambda context: inspect_text_files(context, paths, options),
+                lambda effective: self._start_text_import_parse(token, paths, effective, options),
+                "Import Preflight Failed",
+            )
+        else:
+            self._start_text_import_parse(token, paths, inspections, options)
 
-        effective_inspections = inspections
-        try:
-            if (
-                options.delimiter != AUTO_DELIMITER
-                or options.encoding != AUTO_ENCODING
-                or options.skip_rows is not None
-                or options.data_kind != AUTO_DATA_KIND
-                or options.spectrometer != AUTO_SPECTROMETER
-            ):
-                effective_inspections = [
-                    inspect_delimited_file(
-                        path,
-                        delimiter=options.delimiter,
-                        encoding=options.encoding,
-                        skip_rows=options.skip_rows,
-                        data_kind=options.data_kind,
-                        spectrometer=options.spectrometer,
-                    )
-                    for path in paths
-                ]
-        except Exception as exc:
-            QMessageBox.critical(self, "Import Preflight Failed", str(exc))
-            self.statusBar().showMessage("Batch import preflight failed")
+    def _start_text_import_parse(
+        self, token: object, paths: list[Path], inspections: list[DelimitedFileInspection],
+        options: ImportOptions,
+    ) -> None:
+        if not self._text_import_is_current(token):
             return
-
+        self._text_import_progress.hide()
         pattern_choice = "keep"
         if len(paths) > 1 and options.has_header is None:
-            pattern_choice = self._confirm_delimited_batch_pattern(effective_inspections)
-            if pattern_choice == "cancel":
-                self.statusBar().showMessage("Batch import cancelled")
-                return
-
-        imported: list[Dataset] = []
-        import_errors: list[str] = []
-        for path, inspection in zip(paths, effective_inspections, strict=True):
-            file_options = ImportOptions(
-                delimiter=options.delimiter,
-                has_header=options.has_header,
-                encoding=inspection.encoding,
-                skip_rows=options.skip_rows,
-                data_kind=options.data_kind,
-                spectrometer=options.spectrometer,
-                number_format=options.number_format,
-            )
-            if pattern_choice == "generic":
-                metadata_rows = (
-                    inspection.metadata_rows
-                    if options.skip_rows is None
-                    else options.skip_rows
-                )
-                file_options = ImportOptions(
-                    delimiter=inspection.delimiter,
-                    has_header=False,
-                    encoding=inspection.encoding,
-                    skip_rows=metadata_rows + (1 if inspection.has_header else 0),
-                    data_kind=options.data_kind,
-                    spectrometer=options.spectrometer,
-                    number_format=options.number_format,
-                )
-            try:
-                frame = read_tabular_file(path, file_options)
-                if not self._confirm_large_dataset(
-                    frame,
-                    title="Large Dataset",
-                    source_label=path.name,
-                ):
-                    import_errors.append(f"{path.name}: skipped after large-dataset warning")
-                    continue
-                dataset = self._workspace.add_dataset(
-                    path.stem,
-                    frame,
-                    source_path=path,
-                    copy_frame=False,
-                )
-                preamble = read_leading_metadata(
-                    path,
-                    inspection.metadata_rows,
-                    encoding=inspection.encoding,
-                )
-                dataset.worksheet_metadata = WorksheetMetadata(
-                    fields=list(preamble.fields),
-                    raw_lines=list(preamble.raw_lines),
-                    import_details={
-                        "Requested data type": {
-                            "auto": "Auto",
-                            "table": "General table",
-                            "spectrum": "Single spectrum",
-                            "spectral_map": "Spectroscopy map",
-                        }.get(options.data_kind, options.data_kind),
-                        "Spectrometer profile": {
-                            "auto": "Auto / generic",
-                            "horiba": "Horiba LabSpec",
-                            "bwtek": "B&W Tek",
-                        }.get(options.spectrometer, options.spectrometer),
-                        "Number format": {
-                            "auto": "Auto",
-                            "dot_decimal": "Decimal point (1,234.56)",
-                            "comma_decimal": "Decimal comma (1.234,56)",
-                        }.get(options.number_format, options.number_format),
-                        "Format": (
-                            "Bruker IR text export"
-                            if inspection.format_name == "bruker_ir"
-                            else (
-                                "Spectral map matrix"
-                                if inspection.format_name == "spectral_map_matrix"
-                                else "Delimited text"
-                            )
-                        ),
-                        "Delimiter": inspection.delimiter_label,
-                        "Header": "Present" if inspection.has_header else "Not present",
-                        "Encoding": inspection.encoding,
-                        "Leading metadata rows": str(inspection.metadata_rows),
-                    },
-                )
-                if inspection.format_name == "spectral_map_matrix":
-                    spectral_columns = list(inspection.spectral_axis)
-                    pixel_count = (
-                        len(frame) // len(spectral_columns)
-                        if spectral_columns
-                        else 0
-                    )
-                    dataset.worksheet_metadata.import_details.update({
-                        "Source layout": "Wide matrix: one spatial pixel per row",
-                        "Worksheet layout": "Long form: X, Y, Raman Shift, Intensity",
-                        "Spatial coordinate columns": "X, Y",
-                        "Spatial pixels": str(pixel_count),
-                        "Raman shifts per pixel": str(len(spectral_columns)),
-                        "Spectral axis unit": "cm^-1",
-                    })
-                    if spectral_columns:
-                        dataset.worksheet_metadata.import_details["Spectral axis range"] = (
-                            f"{spectral_columns[0]} to {spectral_columns[-1]} cm^-1"
-                        )
-                self._apply_imported_column_hints(dataset, inspection)
-                imported.append(dataset)
-            except Exception as exc:
-                import_errors.append(f"{path.name}: {exc}")
-
-        if not imported:
-            detail = "\n".join(import_errors) or "No files were imported."
-            QMessageBox.critical(self, "Import Failed", detail)
-            self.statusBar().showMessage("Import failed")
+            pattern_choice = self._confirm_delimited_batch_pattern(inspections)
+        if pattern_choice == "cancel":
+            self._finish_text_import("Batch import cancelled")
             return
-
-        self._refresh_dataset_list(imported[-1].name)
-        if import_errors:
-            QMessageBox.warning(
-                self,
-                "Batch Import Completed with Warnings",
-                "\n".join(import_errors),
-            )
-        total_rows = sum(len(dataset.frame) for dataset in imported)
-        self.statusBar().showMessage(
-            f"Imported {len(imported)} file(s) as datasets, {total_rows} total row(s)"
+        self._run_text_import_job(
+            token, lambda context: prepare_text_files(context, paths, inspections, options, pattern_choice),
+            lambda batch: self._commit_text_import(token, batch),
         )
+
+    def _commit_text_import(self, token: object, batch: PreparedTextBatch) -> None:
+        """Approve staged frames, then commit atomically on the GUI thread."""
+        self._text_import_progress.hide()
+        staged: list[Dataset] = []
+        errors = list(batch.errors)
+        for prepared in batch.files:
+            if not self._text_import_is_current(token):
+                return
+            if not self._confirm_large_dataset(
+                prepared.frame, title="Large Dataset", source_label=prepared.path.name,
+            ):
+                errors.append(f"{prepared.path.name}: skipped after large-dataset warning")
+                continue
+            dataset = Dataset(name=prepared.path.stem, frame=prepared.frame, source_path=prepared.path)
+            dataset.worksheet_metadata = prepared.metadata
+            self._apply_imported_column_hints(dataset, prepared.inspection)
+            staged.append(dataset)
+        if not self._text_import_is_current(token):
+            return
+        if not staged:
+            self._finish_text_import("Import failed")
+            QMessageBox.critical(self, "Import Failed", "\n".join(errors) or "No files were imported.")
+            return
+        imported: list[Dataset] = []
+        try:
+            for prepared in staged:
+                dataset = self._workspace.add_dataset(
+                    prepared.name, prepared.frame, source_path=prepared.source_path, copy_frame=False,
+                )
+                imported.append(dataset)
+                dataset.worksheet_metadata = prepared.worksheet_metadata
+                dataset.column_metadata = prepared.column_metadata
+                dataset.sync_column_metadata_attrs()
+        except Exception:
+            for dataset in imported:
+                self._workspace.remove_dataset(dataset.name)
+            raise
+        self._refresh_dataset_list(imported[-1].name)
+        total_rows = sum(len(dataset.frame) for dataset in imported)
+        self._finish_text_import(f"Imported {len(imported)} file(s) as datasets, {total_rows} total row(s)")
+        if errors:
+            QMessageBox.warning(self, "Batch Import Completed with Warnings", "\n".join(errors))
+
+    def _update_import_progress(self, progress: JobProgress) -> None:
+        dialog = self._text_import_progress
+        if dialog is None or self._text_import_cancel_requested:
+            return
+        dialog.setLabelText(progress.message)
+        if progress.total > 0:
+            dialog.setRange(0, 1000)
+            dialog.setValue(min(1000, max(0, int(progress.completed * 1000 / progress.total))))
+        else:
+            dialog.setRange(0, 0)
+
+    def _cancel_text_import(self) -> None:
+        if self._text_import_token is None:
+            return
+        self._text_import_cancel_requested = True
+        self._jobs.cancel()
+        self.statusBar().showMessage("Cancelling import; waiting for the current work unit to stop...")
+
+    def _finish_text_import(self, message: str) -> None:
+        self._text_import_token = None
+        self._text_import_workspace = None
+        dialog, self._text_import_progress = self._text_import_progress, None
+        if dialog is not None:
+            self.statusBar().removeWidget(dialog)
+            dialog.close()
+            dialog.deleteLater()
+        self._import_action.setEnabled(True)
+        self.statusBar().showMessage(message)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Keep worker owners alive until cooperative cancellation has finished."""
+        self._closing_when_idle = True
+        self._large_data_view.shutdown()
+        if self._jobs.is_running or self._large_data_view.jobs.is_running:
+            self._cancel_text_import()
+            self._jobs.cancel()
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _finish_deferred_close(self) -> None:
+        if (self._closing_when_idle and not self._jobs.is_running
+                and not self._large_data_view.jobs.is_running):
+            QTimer.singleShot(0, self.close)
 
     def _confirm_delimited_batch_pattern(
         self,
@@ -9866,6 +10025,13 @@ class MainWindow(QMainWindow):
             f"Deleted {len(deleted_columns)} column(s) from {dataset.name}"
         )
 
+    def _refresh_map_analysis_dataset(self, dataset_name: str) -> None:
+        """Publish a map result while keeping its source canvas available for more cuts."""
+        current_tab = self._tabs.currentWidget()
+        self._refresh_dataset_list(dataset_name)
+        if current_tab is not None:
+            self._tabs.setCurrentWidget(current_tab)
+
     def _refresh_dataset_list(self, selected_name: str | None = None) -> None:
         """Refresh dataset navigation and keep a valid selection."""
         dataset_names = self._workspace.dataset_names()
@@ -10497,6 +10663,8 @@ class MainWindow(QMainWindow):
 
     def _current_dataset(self) -> Dataset | None:
         """Return the dataset currently selected in the sidebar."""
+        if self._tabs.currentWidget() is self._large_data_view:
+            return None
         current_item = self._dataset_list.currentItem()
         if current_item is None:
             return None
@@ -10970,6 +11138,7 @@ class MainWindow(QMainWindow):
         """Return whether the current workspace has datasets or saved plots."""
         return bool(
             self._workspace.dataset_names()
+            or self._workspace.large_dataset_names()
             or self._workspace.plot_names()
             or self._workspace.custom_fit_model_names()
             or self._workspace.spectral_analysis_names()
@@ -11048,6 +11217,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Open Failed", str(exc))
             return
 
+        self._cancel_text_import()
+        self._large_data_view.set_source(None)
         self._workspace = loaded_workspace
         self._project_path = Path(file_name)
         self._project_password = password
@@ -11060,6 +11231,7 @@ class MainWindow(QMainWindow):
         self._active_plot_baseline = None
         self._plot_tab_widget.set_workspace(self._workspace)
         self._refresh_dataset_list()
+        self._refresh_large_dataset_list()
         self._refresh_plot_list()
         self._refresh_spectral_analysis_list()
         self._hide_spectral_analysis_tab()
@@ -11521,6 +11693,8 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
+        self._cancel_text_import()
+        self._large_data_view.set_source(None)
         self._workspace = Workspace()
         self._project_path = None
         self._project_password = None
@@ -11531,6 +11705,7 @@ class MainWindow(QMainWindow):
         self._active_plot_baseline = None
         self._plot_tab_widget.set_workspace(self._workspace)
         self._refresh_dataset_list()
+        self._refresh_large_dataset_list()
         self._refresh_plot_list()
         self._refresh_spectral_analysis_list()
         self._hide_spectral_analysis_tab()

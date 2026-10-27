@@ -1,7 +1,7 @@
 """Project file save/load for workspace persistence.
 
-Projects are saved as ZIP archives (.jasc) containing CSV data files
-and a JSON metadata document.
+Projects are saved as ZIP archives (.jasc) containing CSV worksheets,
+optional disk-backed Parquet tables, and a JSON metadata document.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from core.workspace import (
     Workspace,
 )
 from core.spectral_analysis import SpectralAnalysisSession
+from core.large_data import restore_large_dataset
 from models.fit_functions import CustomFitModel
 
 PROJECT_EXTENSION = ".jasc"
@@ -42,7 +43,7 @@ _DATASETS_DIR = "datasets"
 _FIGURE_SESSIONS_DIR = "figure_sessions"
 _ANALYSES_DIR = "analyses"
 _INTEGRITY_FILENAME = "integrity.json"
-_PROJECT_VERSION = 8
+_PROJECT_VERSION = 9
 _HASH_CHUNK_SIZE = 1024 * 1024
 _PACKAGE_SEAL_SCHEMA = "jasc-package-seal-v1"
 _PACKAGE_SEAL_DOMAIN = b"JASC-SEAL-v1"
@@ -158,12 +159,13 @@ def _write_project_archive(
 
     datasets = workspace.list_datasets()
     metadata = {
-        "version": _PROJECT_VERSION,
+        "version": _PROJECT_VERSION if workspace.large_dataset_names() else 8,
         "datasets": [],
         "figure_sessions": [],
         "plots": [],
         "custom_fit_models": [],
         "spectral_analyses": [],
+        "large_datasets": [],
     }
     if signing_identity is not None:
         metadata["security"] = {
@@ -174,6 +176,14 @@ def _write_project_archive(
         }
 
     with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for index, dataset in enumerate(workspace.list_large_datasets()):
+            member = f"large_datasets/{index:04d}.parquet"
+            # Already compressed Parquet; stream from disk without a bytes copy.
+            archive.write(dataset.path, member, compress_type=zipfile.ZIP_STORED)
+            metadata["large_datasets"].append({
+                "name": dataset.name, "parquet_file": member,
+                "source_path": dataset.source_path, "details": dataset.details,
+            })
         figure_sessions: dict[str, FigureExtractionSession] = {}
         for index, dataset in enumerate(datasets):
             csv_name = f"{_DATASETS_DIR}/{index:04d}_{_sanitise_filename(dataset.name)}.csv"
@@ -316,6 +326,13 @@ def _load_project_archive(
                 f"Project file version {metadata['version']} is newer than "
                 f"this application supports (version {_PROJECT_VERSION})."
             )
+
+        for entry in metadata.get("large_datasets", []):
+            with archive.open(entry["parquet_file"], "r") as stream:
+                workspace.add_large_dataset(restore_large_dataset(
+                    stream, entry["name"], source_path=entry.get("source_path", ""),
+                    details=entry.get("details", {}),
+                ))
 
         figure_sessions: dict[str, FigureExtractionSession] = {}
         for entry in metadata.get("figure_sessions", []):

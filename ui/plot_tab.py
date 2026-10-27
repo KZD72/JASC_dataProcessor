@@ -159,6 +159,7 @@ class PlotTab(QWidget):
     plot_draft_replaced = Signal()
     options_visibility_changed = Signal(bool)
     dataset_created = Signal(str)
+    plot_created = Signal(str)
 
     def __init__(
         self,
@@ -179,7 +180,6 @@ class PlotTab(QWidget):
         self._series_editor_dirty = False
         self._editing_series_row: int | None = None
         self._pending_surface_cut: tuple[PlotSeries, tuple[float, float, float, float]] | None = None
-        self._surface_profile_windows: list[QDialog] = []
         self._preview_dirty = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -1459,23 +1459,26 @@ class PlotTab(QWidget):
         output_name: str,
         frame: pd.DataFrame,
     ) -> Dataset:
-        """Store one map-analysis result and show a cut profile when applicable."""
+        """Store a map-analysis worksheet and persist its profile plot when applicable."""
         dataset = self._workspace.add_dataset(output_name, frame)
         self._annotate_surface_analysis_dataset(dataset, operation, series)
         if operation in {"horizontal", "vertical", "line"}:
-            self._show_surface_profile(dataset, operation, series)
+            self._save_surface_profile(dataset, operation, series)
         self.dataset_created.emit(dataset.name)
         self.refresh_controls(dataset.name)
-        self.status_message.emit(f"Created map-analysis worksheet {dataset.name}")
+        message = f"Created map-analysis worksheet {dataset.name}"
+        if operation in {"horizontal", "vertical", "line"}:
+            message += " and saved cut plot in Workspace > Plots"
+        self.status_message.emit(message)
         return dataset
 
-    def _show_surface_profile(
+    def _save_surface_profile(
         self,
         dataset: Dataset,
         operation: str,
         source_series: PlotSeries,
     ) -> None:
-        """Open a non-modal, zoomable plot for a generated map cut."""
+        """Save a normal workspace plot without replacing the source map draft."""
         if "distance" not in dataset.frame.columns or "z" not in dataset.frame.columns:
             return
         operation_labels = {
@@ -1488,47 +1491,26 @@ class PlotTab(QWidget):
             "vertical": "Y coordinate",
             "line": "Distance along cut",
         }
-        window = QDialog(self)
-        window.setAttribute(Qt.WA_DeleteOnClose, True)
-        window.setWindowTitle(operation_labels.get(operation, "Map cut profile"))
-        window.resize(760, 500)
-        canvas = PlotCanvas(window)
-        canvas.plot_series(
-            self._workspace,
-            [PlotSeries(
-                dataset.name,
-                "distance",
-                dataset.name,
-                "z",
-                plot_type="line_marker",
-                color="tab:blue",
-                marker="o",
-                marker_size=3.5,
-                custom_label=source_series.z_column or "Z",
-            )],
-            title=(
-                f"{operation_labels.get(operation, 'Map cut')}: "
-                f"{source_series.z_column or 'Z'}"
+        profile = PlotSeries(
+            dataset.name, "distance", dataset.name, "z",
+            plot_type="line_marker", color="tab:blue", marker="o",
+            marker_size=3.5, custom_label=source_series.z_column or "Z",
+        )
+        settings = PlotSettings(
+            title=f"{operation_labels.get(operation, 'Map cut')}: {source_series.z_column or 'Z'}",
+            x_axis=AxisSettings(label=x_labels.get(operation, "Distance")),
+            left_y_axis=AxisSettings(
+                label=source_series.colorbar_label or source_series.z_column or "Z"
             ),
-            x_label=x_labels.get(operation, "Distance"),
-            y_label=source_series.colorbar_label or source_series.z_column or "Z",
-            legend_settings=LegendSettings(enabled=False),
+            legend=LegendSettings(enabled=False),
         )
-        layout = QVBoxLayout(window)
-        layout.addWidget(canvas)
-        window._profile_canvas = canvas  # type: ignore[attr-defined]
-        self._surface_profile_windows.append(window)
-        window.destroyed.connect(
-            lambda _object=None, profile_window=window: self._discard_surface_profile_window(
-                profile_window
-            )
-        )
-        window.show()
-
-    def _discard_surface_profile_window(self, window: QDialog) -> None:
-        """Release a closed profile window from the non-modal window registry."""
-        if window in self._surface_profile_windows:
-            self._surface_profile_windows.remove(window)
+        saved = self._workspace.add_plot(dataset.name, {
+            "version": PLOT_STATE_VERSION,
+            "series": [asdict(profile)],
+            "locators": [],
+            "settings": settings.to_state(),
+        })
+        self.plot_created.emit(saved.name)
 
     @staticmethod
     def _annotate_surface_analysis_dataset(
