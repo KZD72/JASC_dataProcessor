@@ -1,0 +1,36 @@
+{
+  "pixels": 400,
+  "samples_per_pixel": 601,
+  "seed": 123,
+  "input_mib": 7.336551666259766,
+  "elapsed_s": 5.336062500020489,
+  "heartbeat_ticks": 349,
+  "heartbeat_p95_gap_s": 0.01923681002808735,
+  "heartbeat_max_gap_s": 0.13674789993092418,
+  "cancel_requested": false,
+  "cancel_completion_s": null,
+  "progress_reports": 402,
+  "last_completed": 400,
+  "published_analyses": [
+    "Synthetic map fit"
+  ],
+  "published_metrics": 400,
+  "failed_pixels": 0,
+  "published_optional_worksheets": [],
+  "memory_before": {
+    "rss_mib": 274.015625,
+    "peak_rss_mib": 279.9453125
+  },
+  "memory_after": {
+    "rss_mib": 327.7734375,
+    "peak_rss_mib": 353.0859375
+  },
+  "environment": {
+    "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+    "pandas": "3.0.3",
+    "numpy": "2.4.4",
+    "qt": "6.11.0"
+  },
+  "errors": [],
+  "qt_offscreen": true
+}

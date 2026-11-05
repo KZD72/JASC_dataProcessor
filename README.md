@@ -37,6 +37,27 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 
 ## Development
 
+Peak/Raman worksheet-batch and map fitting runs in the background with status-bar
+progress and Cancel. Completed results are published together; cancelled runs
+add no analysis or optional worksheets. Changing the source worksheet or project
+while fitting discards the pending result. Fits remain sequential within a run.
+
+Run verification from the repository root with the project environment active:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'offscreen'
+python -B -m unittest discover -s tests
+git diff --check
+```
+
+For the focused worker/UI regressions and reproducible synthetic map benchmarks:
+
+```powershell
+python -B -m unittest discover -s tests -p test_background_peak_fit.py
+python -B benchmarks/background_peak_fit_audit.py --output result.json
+python -B benchmarks/background_peak_fit_audit.py --cancel-after-ms 100 --output cancel.json
+```
+
 The architecture strictly separates concerns:
 - `core/`: State management, IO, and core validation.
 - `math_engine/`: Data operations (calculus, FFT, curve-fitting logic).

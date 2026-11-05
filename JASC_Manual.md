@@ -1044,9 +1044,22 @@ have no direct standard error when it is not a native model parameter, in which
 case its standard-error cell is intentionally blank/NaN rather than estimated
 without a defensible propagation model.
 
-Batch and map execution currently runs sequentially with a cancellable progress
-dialog. The shared background-worker/parallel implementation and advanced
-per-parameter bound/fixed/tied editing remain roadmap work.
+Peak/Raman batch and map fits run sequentially in a background worker. The status
+bar shows completed/total spectra and **Cancel** while the workspace remains
+accessible. Cancelling discards the entire pending run, including already fitted
+pixels; no analysis session or optional worksheets are published. Cancellation
+is checked between preprocessing phases and during optimizer evaluations. A
+native baseline/detection phase finishes before cancellation takes effect.
+
+Individual failed spectra are recorded in the analysis quality/status table while
+the remaining spectra continue. When the run completes, its analysis session and
+requested optional worksheets are published together. Changing the source data,
+column metadata, or project during fitting discards the pending results. Closing
+the window requests cancellation and waits safely for the worker to stop.
+
+Input snapshots and result curves remain in memory. Single-spectrum previews,
+baseline-only map correction, process parallelism, and advanced per-parameter
+bound/fixed/tied editing remain follow-up work.
 
 ---
 
@@ -1414,7 +1427,10 @@ Apply Formula uniquely exposes **Auto**, **Sequential**, and **Parallel processe
 
 ### Progress, cancellation, and summaries
 
-Batch operations display a modal progress dialog and check for cancellation between jobs/results. A cancellation does not undo jobs already completed.
+Peak/Raman batch and map fitting uses the background status-bar progress and
+Cancel controls described above; cancellation publishes no partial results.
+Other batch operations display a modal progress dialog and check for cancellation
+between jobs/results. Their cancellation does not undo jobs already completed.
 
 Multi-job runs create operation-specific summary datasets such as:
 

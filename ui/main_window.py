@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from collections.abc import Callable
+from copy import deepcopy
 import json
 import re
 import time
@@ -52,6 +53,10 @@ from PySide6.QtWidgets import (
 
 from core.import_jobs import PreparedTextBatch, inspect_text_files, prepare_text_files
 from core.jobs import JobContext, JobProgress
+from core.peak_fit_jobs import (
+    PeakFitRequest, PeakFitSource, PreparedPeakFit, match_peak_components,
+    peak_fit_map_row, prepare_peak_fit,
+)
 from core.large_data import LargeDataset, TablePage, open_large_dataset
 from ui.large_data_view import LargeDataView
 from ui.background_jobs import BackgroundJobController, JobProgressWidget
@@ -128,16 +133,9 @@ from math_engine.calculus import (
     integral_column,
     validate_numeric_column_metadata,
 )
-from math_engine.baseline import BaselineParameters, correct_baseline
-from math_engine.composite_peak_fit import (
-    CompositeFitParameters,
-    CompositeFitResult,
-    PeakComponentSpec,
-    build_peak_component_spec,
-    fit_composite_peaks,
-)
+from math_engine.baseline import correct_baseline
+from math_engine.composite_peak_fit import CompositeFitResult
 from math_engine.curve_fitting import FIT_METHODS, FitResult, fit_curve
-from math_engine.peak_detection import PeakDetectionParameters, PeakRecord, detect_peaks
 from math_engine.interpolation import (
     INTERPOLATION_METHODS,
     generated_query_points,
@@ -209,11 +207,15 @@ class MainWindow(QMainWindow):
         self._workspace = Workspace()
         self._jobs = BackgroundJobController(self)
         self._jobs.progress.connect(self._update_import_progress)
+        self._jobs.progress.connect(self._update_peak_fit_progress)
         self._jobs.finished.connect(self._finish_deferred_close)
         self._text_import_token: object | None = None
         self._text_import_workspace: Workspace | None = None
         self._text_import_progress: JobProgressWidget | None = None
         self._text_import_cancel_requested = False
+        self._peak_fit_token: object | None = None
+        self._peak_fit_progress: JobProgressWidget | None = None
+        self._peak_fit_cancel_requested = False
         self._closing_when_idle = False
         self._project_path: Path | None = None
         self._project_password: str | None = None
@@ -2190,7 +2192,7 @@ class MainWindow(QMainWindow):
     def _open_large_data(self) -> None:
         """Explicit disk-backed import; never route the source through Pandas."""
         if self._jobs.is_running or self._text_import_token is not None:
-            self.statusBar().showMessage("Wait for the current import to finish")
+            self.statusBar().showMessage("Wait for the current background job to finish")
             return
         file_name, _ = QFileDialog.getOpenFileName(
             self, "Open Large Dataset", "",
@@ -2311,7 +2313,7 @@ class MainWindow(QMainWindow):
     def _import_data_file(self) -> None:
         """Open a workbook or prepare text imports without blocking the GUI."""
         if self._text_import_token is not None or self._jobs.is_running:
-            self.statusBar().showMessage("An import is already in progress")
+            self.statusBar().showMessage("A background job is already in progress")
             return
         file_names, _selected_filter = QFileDialog.getOpenFileNames(
             self,
@@ -2519,6 +2521,7 @@ class MainWindow(QMainWindow):
         self._large_data_view.shutdown()
         if self._jobs.is_running or self._large_data_view.jobs.is_running:
             self._cancel_text_import()
+            self._cancel_peak_fit()
             self._jobs.cancel()
             event.ignore()
             return
@@ -8604,502 +8607,153 @@ class MainWindow(QMainWindow):
         )
 
     def _run_peak_analysis_batch_or_map(
-        self,
-        preview_dataset: Dataset,
-        dialog: PeakAnalysisDialog,
-        detail: dict[str, str],
+        self, preview_dataset: Dataset, dialog: PeakAnalysisDialog, detail: dict[str, str],
     ) -> None:
-        """Apply reviewed component models across worksheets or X/Y map groups."""
+        """Capture reviewed inputs, then fit without touching live GUI/workspace state."""
+        if (self._jobs.is_running or self._text_import_token is not None
+                or self._peak_fit_token is not None or self._closing_when_idle):
+            self.statusBar().showMessage("Wait for the current background job to finish")
+            return
         scope = dialog.application_scope()
-        jobs: list[tuple[str, pd.DataFrame, dict[str, float]]] = []
-        if scope == "batch":
-            for name in dialog.batch_dataset_names():
-                try:
-                    candidate = self._workspace.get_dataset(name)
-                except KeyError:
-                    continue
-                jobs.append((name, candidate.frame, {}))
-        else:
-            frame = preview_dataset.frame
-            if not {"X", "Y"}.issubset({str(column) for column in frame.columns}):
-                QMessageBox.warning(
-                    self,
-                    "Peak Analysis Map",
-                    "Map fitting requires normalized X and Y coordinate columns.",
-                )
-                return
-            try:
-                for column in ("X", "Y"):
-                    numeric = pd.to_numeric(frame[column], errors="coerce")
-                    validate_numeric_column_metadata(frame, column, numeric)
-            except MathOperationError as exc:
-                QMessageBox.warning(self, "Peak Analysis Map", str(exc))
-                return
-            for coordinates, group in frame.groupby(["X", "Y"], sort=False, dropna=False):
-                x_coordinate, y_coordinate = coordinates
-                label = f"{preview_dataset.name} [X={x_coordinate}, Y={y_coordinate}]"
-                jobs.append((
-                    label,
-                    group.reset_index(drop=True),
-                    {"X": float(x_coordinate), "Y": float(y_coordinate)},
-                ))
-
-        if not jobs:
+        names = dialog.batch_dataset_names() if scope == "batch" else [preview_dataset.name]
+        datasets = [self._workspace.get_dataset(name) for name in dict.fromkeys(names)
+                    if name in self._workspace.dataset_names()]
+        if not datasets:
             QMessageBox.warning(self, "Peak Analysis", "No compatible batch or map jobs were selected.")
             return
-
-        template_specs = [spec for spec in dialog.component_specs() if spec.enabled]
-        if not template_specs:
+        components = tuple(spec for spec in dialog.component_specs() if spec.enabled)
+        if not components:
             QMessageBox.warning(self, "Peak Analysis", "Enable at least one fit component.")
             return
-        baseline_parameters = dialog.baseline_parameters()
-        detection_parameters = dialog.detection_parameters()
-        fit_parameters = dialog.composite_parameters()
-        analysis_range = dialog.analysis_range()
-        x_column = dialog.x_column()
-        y_column = dialog.y_column()
-        tolerance = dialog.center_tolerance()
-
-        signal_frames: list[pd.DataFrame] = []
-        peak_frames: list[pd.DataFrame] = []
-        fit_frames: list[pd.DataFrame] = []
-        parameter_frames: list[pd.DataFrame] = []
-        analysis_curve_frames: list[pd.DataFrame] = []
-        analysis_peak_frames: list[pd.DataFrame] = []
-        analysis_parameter_frames: list[pd.DataFrame] = []
-        map_parameter_rows: list[dict[str, object]] = []
-        summary_rows: list[dict[str, object]] = []
-        progress = self._batch_progress_dialog(
-            "Raman Map Peak Fit" if scope == "map" else "Peak Fit Batch",
-            len(jobs),
+        x_column, y_column = dialog.x_column(), dialog.y_column()
+        coordinates = ["X", "Y"] if scope == "map" else []
+        columns = list(dict.fromkeys([*coordinates, x_column, y_column]))
+        # Copy only analysis inputs. Grouping and output assembly happen in the
+        # worker; neither the live Dataset nor the dialog crosses the boundary.
+        sources = tuple(PeakFitSource(
+            dataset.name,
+            dataset.frame.loc[:, [name for name in columns if name in dataset.frame]].copy(deep=True),
+        ) for dataset in datasets)
+        metadata_snapshots = tuple(deepcopy(dataset.column_metadata) for dataset in datasets)
+        create_fit = dialog.create_fit_output()
+        request = PeakFitRequest(
+            scope=scope, source_dataset=preview_dataset.name, sources=sources,
+            components=deepcopy(components), baseline=deepcopy(dialog.baseline_parameters()),
+            detection=deepcopy(dialog.detection_parameters()), fit=deepcopy(dialog.composite_parameters()),
+            x_column=x_column, y_column=y_column, analysis_range=dialog.analysis_range(),
+            tolerance=dialog.center_tolerance(),
+            analysis_name=(dialog.analysis_name() if hasattr(dialog, "analysis_name")
+                           else f"{preview_dataset.name} Raman Analysis"),
+            profile=deepcopy(dialog.analysis_profile()) if hasattr(dialog, "analysis_profile") else {},
+            detail=deepcopy(detail),
+            signal_name=dialog.result_sheet_name() if dialog.create_signal_output() else None,
+            peak_name=dialog.peak_sheet_name() if dialog.create_peak_output() else None,
+            fit_name=dialog.fit_sheet_name() if create_fit else None,
+            parameter_name=dialog.fit_parameter_sheet_name() if create_fit else None,
         )
-        for job_index, (source_name, frame, coordinates) in enumerate(jobs, start=1):
-            if self._batch_progress_canceled(
-                progress,
-                job_index - 1,
-                f"Peak fit: {source_name}",
-            ):
-                break
-            started = time.perf_counter()
-            try:
-                if x_column not in frame or y_column not in frame:
-                    raise MathOperationError(
-                        f"Required columns '{x_column}' and '{y_column}' were not found."
-                    )
-                x_numeric = pd.to_numeric(frame[x_column], errors="coerce")
-                y_numeric = pd.to_numeric(frame[y_column], errors="coerce")
-                validate_numeric_column_metadata(frame, x_column, x_numeric)
-                validate_numeric_column_metadata(frame, y_column, y_numeric)
-                x_values = x_numeric.to_numpy(dtype=float)
-                y_values = y_numeric.to_numpy(dtype=float)
-                if analysis_range is not None:
-                    lower, upper = analysis_range
-                    outside = (x_values < lower) | (x_values > upper)
-                    x_values = x_values.copy()
-                    y_values = y_values.copy()
-                    x_values[outside] = np.nan
-                    y_values[outside] = np.nan
-                baseline = correct_baseline(
-                    x_values,
-                    y_values,
-                    baseline_parameters,
-                    provenance={"source_sheet": source_name, **coordinates},
-                )
-                detection = detect_peaks(
-                    baseline.x,
-                    baseline.raw,
-                    baseline.corrected,
-                    detection_parameters,
-                    source_sheet=source_name,
-                    channel=y_column,
-                    map_coordinates=coordinates,
-                )
-                matched = self._match_peak_components(
-                    template_specs,
-                    list(detection.peaks),
-                    baseline.x,
-                    tolerance,
-                )
-                fit = fit_composite_peaks(
-                    baseline.x,
-                    baseline.raw,
-                    baseline.corrected,
-                    matched,
-                    fit_parameters,
-                    provenance={"source_sheet": source_name, **coordinates},
-                )
-                common = {"source_sheet": source_name, **coordinates}
-                analysis_curve = fit.fit_frame.rename(
-                    columns={"baseline": "fit_baseline"}
-                ).copy()
-                preprocessing = pd.DataFrame({
-                    "x": baseline.x,
-                    "raw": baseline.raw,
-                    "preprocessing_baseline": baseline.baseline,
-                    "corrected": baseline.corrected,
-                })
-                analysis_curve = preprocessing.merge(
-                    analysis_curve,
-                    on="x",
-                    how="inner",
-                    sort=False,
-                )
-                for name, value in reversed(list(common.items())):
-                    analysis_curve.insert(0, name, value)
-                analysis_curve_frames.append(analysis_curve)
+        token, workspace = object(), self._workspace
+        self._peak_fit_token = token
+        self._peak_fit_cancel_requested = False
+        progress = JobProgressWidget(self)
+        progress.setLabelText("Preparing peak-fit spectra...")
+        progress.canceled.connect(self._cancel_peak_fit)
+        self.statusBar().addPermanentWidget(progress)
+        self._peak_fit_progress = progress
+        self._import_action.setEnabled(False)
 
-                analysis_peak_frame = detection.peak_frame()
-                for name, value in common.items():
-                    if name not in analysis_peak_frame:
-                        analysis_peak_frame[name] = value
-                analysis_peak_frames.append(analysis_peak_frame)
+        def succeeded(result: PreparedPeakFit) -> None:
+            if token is not self._peak_fit_token:
+                return
+            if (self._closing_when_idle or self._peak_fit_cancel_requested
+                    or self._workspace is not workspace):
+                self._finish_peak_fit("Peak fit discarded; workspace changed or run cancelled")
+                return
+            for dataset, source, metadata in zip(datasets, sources, metadata_snapshots):
+                current = workspace.get_dataset(source.name) if source.name in workspace.dataset_names() else None
+                if (current is not dataset
+                        or not dataset.frame.loc[:, [name for name in columns if name in dataset.frame]].equals(source.frame)
+                        or dataset.column_metadata != metadata
+                        or dataset.frame.attrs != source.frame.attrs):
+                    self._finish_peak_fit("Peak fit discarded; source worksheet changed")
+                    return
+            self._commit_peak_fit(result, scope)
 
-                analysis_parameter_frame = fit.parameter_frame.copy()
-                for name, value in common.items():
-                    analysis_parameter_frame[name] = value
-                analysis_parameter_frame["r_squared"] = fit.r_squared
-                analysis_parameter_frame["rmse"] = fit.rmse
-                analysis_parameter_frame["aic"] = fit.aic
-                analysis_parameter_frame["bic"] = fit.bic
-                analysis_parameter_frame["status"] = "success"
-                analysis_parameter_frame["error"] = ""
-                analysis_parameter_frame["warnings"] = " | ".join(fit.warnings)
-                analysis_parameter_frames.append(analysis_parameter_frame)
-                if dialog.create_signal_output():
-                    signal_frame = pd.DataFrame({
-                        x_column: baseline.x,
-                        y_column: baseline.raw,
-                        f"{y_column}_baseline": baseline.baseline,
-                        f"{y_column}_corrected": baseline.corrected,
-                    })
-                    for name, value in reversed(list(common.items())):
-                        signal_frame.insert(0, name, value)
-                    signal_frames.append(signal_frame)
-                if dialog.create_peak_output():
-                    peak_frames.append(analysis_peak_frame.copy())
-                if dialog.create_fit_output():
-                    fit_frame = fit.fit_frame.copy()
-                    for name, value in reversed(list(common.items())):
-                        fit_frame.insert(0, name, value)
-                    fit_frames.append(fit_frame)
-                    parameter_frames.append(analysis_parameter_frame.copy())
-                map_parameter_rows.append(
-                    self._peak_fit_map_row(
-                        fit,
-                        source_name=source_name,
-                        coordinates=coordinates,
-                        noise_estimate=detection.noise_estimate,
-                        detected_peak_count=len(detection.peaks),
-                        matched_peak_count=len(matched),
-                    )
-                )
-                summary_rows.append({
-                    **common,
-                    "status": "success",
-                    "detected_peaks": len(detection.peaks),
-                    "matched_peaks": len(matched),
-                    "r_squared": fit.r_squared,
-                    "rmse": fit.rmse,
-                    "aic": fit.aic,
-                    "bic": fit.bic,
-                    "elapsed_seconds": time.perf_counter() - started,
-                    "error": "",
-                })
-            except Exception as exc:
-                map_parameter_rows.append({
-                    "source_sheet": source_name,
-                    **coordinates,
-                    "fit_success": 0.0,
-                    "fit_converged": 0.0,
-                    "status": "failed",
-                    "error": str(exc),
-                })
-                summary_rows.append({
-                    "source_sheet": source_name,
-                    **coordinates,
-                    "status": "failed",
-                    "detected_peaks": 0,
-                    "matched_peaks": 0,
-                    "r_squared": np.nan,
-                    "rmse": np.nan,
-                    "aic": np.nan,
-                    "bic": np.nan,
-                    "elapsed_seconds": time.perf_counter() - started,
-                    "error": str(exc),
-                })
-        if progress is not None:
-            progress.setValue(len(jobs))
+        def failed(message: str) -> None:
+            if token is self._peak_fit_token:
+                self._finish_peak_fit("Peak fit failed; no results were added")
+                if not self._closing_when_idle and self._workspace is workspace:
+                    QMessageBox.critical(self, "Peak Analysis Failed", message)
 
+        try:
+            self._jobs.start(
+                lambda context: prepare_peak_fit(context, request),
+                on_success=succeeded, on_error=failed,
+                on_cancelled=lambda: self._finish_peak_fit("Peak fit cancelled; no results were added"),
+            )
+        except Exception:
+            self._finish_peak_fit("Peak fit could not start")
+            raise
+
+    def _commit_peak_fit(self, result: PreparedPeakFit, scope: str) -> None:
+        """Publish the completed session and optional worksheets as one GUI transaction."""
+        workspace = self._workspace
+        datasets_before = set(workspace.dataset_names())
+        analyses_before = set(workspace.spectral_analysis_names())
         created: list[str] = []
-        selected_name: str | None = None
-        detail = dict(detail)
-        detail.update({
-            "Application scope": "Raman map" if scope == "map" else "Worksheet batch",
-            "Requested jobs": str(len(jobs)),
-            "Peak center matching tolerance": f"{tolerance:g}",
-        })
-        analysis_name = (
-            dialog.analysis_name()
-            if hasattr(dialog, "analysis_name")
-            else f"{preview_dataset.name} Raman Analysis"
-        )
-        profile = (
-            dialog.analysis_profile()
-            if hasattr(dialog, "analysis_profile")
-            else {}
-        )
-        analysis = self._workspace.add_spectral_analysis(SpectralAnalysisSession(
-            name=analysis_name,
-            source_dataset=preview_dataset.name,
-            analysis_kind="raman_map" if scope == "map" else "spectrum_batch",
-            x_column=x_column,
-            y_column=y_column,
-            coordinate_columns=("X", "Y") if scope == "map" else (),
-            profile={"settings": profile, "provenance": detail},
-            metrics_frame=pd.DataFrame(map_parameter_rows),
-            curves_frame=(
-                pd.concat(analysis_curve_frames, ignore_index=True)
-                if analysis_curve_frames else pd.DataFrame()
-            ),
-            parameters_frame=(
-                pd.concat(analysis_parameter_frames, ignore_index=True)
-                if analysis_parameter_frames else pd.DataFrame()
-            ),
-            peaks_frame=(
-                pd.concat(analysis_peak_frames, ignore_index=True)
-                if analysis_peak_frames else pd.DataFrame()
-            ),
-        ))
-        if dialog.create_signal_output() and signal_frames:
-            output = self._workspace.add_dataset(
-                dialog.result_sheet_name(), pd.concat(signal_frames, ignore_index=True), copy_frame=False
-            )
-            output.worksheet_metadata.import_details.update(detail)
-            set_dataset_operation_comments(output, f"Peak Analysis {scope} corrected signals")
-            created.append(output.name)
-            selected_name = output.name
-        if dialog.create_peak_output() and peak_frames:
-            output = self._workspace.add_dataset(
-                dialog.peak_sheet_name(), pd.concat(peak_frames, ignore_index=True), copy_frame=False
-            )
-            output.worksheet_metadata.import_details.update(detail)
-            set_dataset_operation_comments(output, f"Peak Analysis {scope} detected peaks")
-            created.append(output.name)
-            selected_name = output.name
-        if dialog.create_fit_output():
-            if fit_frames:
-                output = self._workspace.add_dataset(
-                    dialog.fit_sheet_name(), pd.concat(fit_frames, ignore_index=True), copy_frame=False
-                )
-                output.worksheet_metadata.import_details.update(detail)
-                set_dataset_operation_comments(output, f"Composite Peak Fit {scope} curves")
+        try:
+            for prepared in result.worksheets:
+                output = workspace.add_dataset(prepared.name, prepared.frame, copy_frame=False)
+                output.worksheet_metadata = prepared.worksheet_metadata
+                output.column_metadata = prepared.column_metadata
+                output.sync_column_metadata_attrs()
                 created.append(output.name)
-                selected_name = output.name
-            combined_parameters = (
-                pd.concat(parameter_frames, ignore_index=True)
-                if parameter_frames
-                else pd.DataFrame()
-            )
-            if summary_rows:
-                summary_frame = pd.DataFrame(summary_rows)
-                summary_frame["record_type"] = "fit_summary"
-                if combined_parameters.empty:
-                    combined_parameters = summary_frame
-                else:
-                    combined_parameters["record_type"] = "parameter"
-                    combined_parameters = pd.concat(
-                        [combined_parameters, summary_frame], ignore_index=True, sort=False
-                    )
-            output = self._workspace.add_dataset(
-                dialog.fit_parameter_sheet_name(), combined_parameters, copy_frame=False
-            )
-            output.worksheet_metadata.import_details.update(detail)
-            set_dataset_operation_comments(output, f"Composite Peak Fit {scope} parameters and summary")
-            created.append(output.name)
-            selected_name = output.name
-            if scope == "map" and map_parameter_rows:
-                map_frame = pd.DataFrame(map_parameter_rows)
-                coordinate_columns = [name for name in ("X", "Y") if name in map_frame]
-                leading_columns = [
-                    name for name in ("source_sheet", *coordinate_columns)
-                    if name in map_frame
-                ]
-                map_frame = map_frame[
-                    leading_columns
-                    + [name for name in map_frame.columns if name not in leading_columns]
-                ]
-                map_output = self._workspace.add_dataset(
-                    f"{dialog.fit_parameter_sheet_name()}_maps",
-                    map_frame,
-                    copy_frame=False,
-                )
-                map_output.worksheet_metadata.import_details.update(detail)
-                map_output.worksheet_metadata.import_details.update({
-                    "Worksheet layout": "One row per X/Y pixel; numeric columns are heatmap-ready Z values",
-                    "Recommended plot family": "2D Maps",
-                })
-                for coordinate_name, role in (("X", "x"), ("Y", "y")):
-                    if coordinate_name in map_frame:
-                        metadata = map_output.metadata_for_column(coordinate_name)
-                        metadata.role = role
-                        metadata.value_type = "numeric"
-                for column_name in map_frame.columns:
-                    if column_name in {"source_sheet", "status", "error"} or column_name.endswith("_model"):
-                        map_output.metadata_for_column(str(column_name)).value_type = "text"
-                    elif column_name not in {"X", "Y"}:
-                        map_output.metadata_for_column(str(column_name)).value_type = "numeric"
-                map_output.sync_column_metadata_attrs()
-                set_dataset_operation_comments(
-                    map_output,
-                    "Composite Peak Fit heatmap-ready parameter maps: one row per X/Y pixel",
-                )
-                created.append(map_output.name)
-                selected_name = map_output.name
-
-        self._refresh_dataset_list(selected_name)
-        self._refresh_spectral_analysis_list(analysis.name)
-        self._show_spectral_analysis(analysis)
-        successes = sum(row["status"] == "success" for row in summary_rows)
-        failures = sum(row["status"] == "failed" for row in summary_rows)
-        self.statusBar().showMessage(
-            f"Peak fit {scope}: {successes} succeeded, {failures} failed; "
+            analysis = workspace.add_spectral_analysis(result.analysis)
+        except Exception:
+            for name in set(workspace.dataset_names()) - datasets_before:
+                workspace.remove_dataset(name)
+            for name in set(workspace.spectral_analysis_names()) - analyses_before:
+                workspace.remove_spectral_analysis(name)
+            raise
+        self._finish_peak_fit(
+            f"Peak fit {scope}: {result.successes} succeeded, {result.failures} failed; "
             f"saved analysis '{analysis.name}'; "
             f"created {', '.join(created) if created else 'no optional worksheets'}"
         )
+        self._refresh_dataset_list(created[-1] if created else None)
+        self._refresh_spectral_analysis_list(analysis.name)
+        self._show_spectral_analysis(analysis)
 
-    @staticmethod
-    def _peak_fit_map_row(
-        fit: CompositeFitResult,
-        *,
-        source_name: str,
-        coordinates: dict[str, float],
-        noise_estimate: float,
-        detected_peak_count: int,
-        matched_peak_count: int,
-    ) -> dict[str, object]:
-        """Flatten one fit into heatmap-ready metrics for exactly one X/Y pixel."""
-        fit_frame = fit.fit_frame
-        baseline_values = pd.to_numeric(fit_frame["baseline"], errors="coerce").to_numpy(
-            dtype=float
-        )
-        finite_baseline = baseline_values[np.isfinite(baseline_values)]
-        row: dict[str, object] = {
-            "source_sheet": source_name,
-            **coordinates,
-            "fit_success": 1.0,
-            "fit_converged": 1.0 if fit.converged else 0.0,
-            "fit_r_squared": fit.r_squared,
-            "fit_rmse": fit.rmse,
-            "fit_mae": fit.mae,
-            "fit_aic": fit.aic,
-            "fit_bic": fit.bic,
-            "fit_evaluations": float(fit.evaluations),
-            "noise_estimate": float(noise_estimate),
-            "detected_peak_count": float(detected_peak_count),
-            "matched_peak_count": float(matched_peak_count),
-            "baseline_mean": (
-                float(np.mean(finite_baseline)) if finite_baseline.size else float("nan")
-            ),
-            "baseline_minimum": (
-                float(np.min(finite_baseline)) if finite_baseline.size else float("nan")
-            ),
-            "baseline_maximum": (
-                float(np.max(finite_baseline)) if finite_baseline.size else float("nan")
-            ),
-            "status": "success",
-            "error": "",
-            "warnings": " | ".join(fit.warnings),
-        }
+    def _update_peak_fit_progress(self, progress: JobProgress) -> None:
+        widget = self._peak_fit_progress
+        if widget is None or self._peak_fit_cancel_requested:
+            return
+        widget.setLabelText(progress.message)
+        widget.setRange(0, progress.total)
+        if progress.total:
+            widget.setValue(progress.completed)
 
-        baseline_parameters = fit.parameter_frame[
-            fit.parameter_frame["component"] == "baseline"
-        ]
-        for parameter in baseline_parameters.itertuples(index=False):
-            name = str(parameter.parameter)
-            row[f"baseline_parameter_{name}"] = float(parameter.value)
-            row[f"baseline_parameter_{name}_standard_error"] = float(
-                parameter.standard_error
-            )
+    def _cancel_peak_fit(self) -> None:
+        if self._peak_fit_token is None:
+            return
+        self._peak_fit_cancel_requested = True
+        self._jobs.cancel()
+        message = "Cancelling peak fit; waiting for the current calculation to stop..."
+        if self._peak_fit_progress is not None:
+            self._peak_fit_progress.setLabelText(message)
+        self.statusBar().showMessage(message)
 
-        aliases = {
-            "integrated_area": "area",
-            "fitted_position": "position",
-            "fitted_intensity": "intensity",
-            "fitted_fwhm": "fwhm",
-            "fitted_asymmetry": "asymmetry",
-            "natural_linewidth": "natural_linewidth",
-            "fano_peak_position": "fano_peak_position",
-            "fano_dip_position": "fano_dip_position",
-            "fano_peak_contrast": "fano_peak_contrast",
-            "fano_dip_contrast": "fano_dip_contrast",
-        }
-        peak_parameters = fit.parameter_frame[
-            fit.parameter_frame["component_index"] > 0
-        ]
-        for component_index, parameters in peak_parameters.groupby(
-            "component_index", sort=True
-        ):
-            index = int(component_index)
-            prefix = f"peak_{index}"
-            first = parameters.iloc[0]
-            row[f"{prefix}_model"] = str(first["model"])
-            if index <= len(fit.components):
-                detected_peak = fit.components[index - 1].peak
-                row[f"{prefix}_snr"] = float(detected_peak.local_snr)
-                row[f"{prefix}_detected_position"] = float(detected_peak.center)
-            for parameter in parameters.itertuples(index=False):
-                name = str(parameter.parameter)
-                value = float(parameter.value)
-                standard_error = float(parameter.standard_error)
-                row[f"{prefix}_parameter_{name}"] = value
-                row[f"{prefix}_parameter_{name}_standard_error"] = standard_error
-                if str(parameter.role) == "center" and f"{prefix}_position" not in row:
-                    row[f"{prefix}_position"] = value
-                    row[f"{prefix}_position_standard_error"] = standard_error
-                alias = aliases.get(name)
-                if alias is not None:
-                    row[f"{prefix}_{alias}"] = value
-                    row[f"{prefix}_{alias}_standard_error"] = standard_error
-            intensity = row.get(f"{prefix}_intensity")
-            intensity_error = row.get(f"{prefix}_intensity_standard_error")
-            if isinstance(intensity, float) and isinstance(intensity_error, float):
-                row[f"{prefix}_intensity_relative_standard_error"] = (
-                    abs(intensity_error / intensity)
-                    if np.isfinite(intensity)
-                    and np.isfinite(intensity_error)
-                    and intensity != 0.0
-                    else float("nan")
-                )
-        return row
+    def _finish_peak_fit(self, message: str) -> None:
+        self._peak_fit_token = None
+        progress, self._peak_fit_progress = self._peak_fit_progress, None
+        if progress is not None:
+            self.statusBar().removeWidget(progress)
+            progress.close()
+            progress.deleteLater()
+        self._import_action.setEnabled(True)
+        self.statusBar().showMessage(message)
 
-    @staticmethod
-    def _match_peak_components(
-        templates: list[PeakComponentSpec],
-        candidates: list[PeakRecord],
-        x_values: np.ndarray,
-        tolerance: float,
-    ) -> list[PeakComponentSpec]:
-        """Match batch/map peaks by expected physical center, never prominence rank."""
-        remaining = list(candidates)
-        matched: list[PeakComponentSpec] = []
-        for template in templates:
-            compatible = [
-                peak for peak in remaining if peak.polarity == template.peak.polarity
-            ] or remaining
-            if not compatible:
-                raise MathOperationError(
-                    f"No detected candidate is available near {template.peak.center:g}."
-                )
-            candidate = min(compatible, key=lambda peak: abs(peak.center - template.peak.center))
-            separation = abs(candidate.center - template.peak.center)
-            if separation > tolerance:
-                raise MathOperationError(
-                    f"Expected peak near {template.peak.center:g}, but the closest candidate "
-                    f"at {candidate.center:g} is outside tolerance {tolerance:g}."
-                )
-            remaining.remove(candidate)
-            matched.append(build_peak_component_spec(candidate, template.model_key, x_values))
-        return matched
+    _peak_fit_map_row = staticmethod(peak_fit_map_row)
+    _match_peak_components = staticmethod(match_peak_components)
 
     def _run_curve_fit(self) -> None:
         """Run the curve-fitting workflow and plot/save fit outputs."""
@@ -11218,6 +10872,7 @@ class MainWindow(QMainWindow):
             return
 
         self._cancel_text_import()
+        self._cancel_peak_fit()
         self._large_data_view.set_source(None)
         self._workspace = loaded_workspace
         self._project_path = Path(file_name)
@@ -11694,6 +11349,7 @@ class MainWindow(QMainWindow):
             return
 
         self._cancel_text_import()
+        self._cancel_peak_fit()
         self._large_data_view.set_source(None)
         self._workspace = Workspace()
         self._project_path = None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -182,8 +183,11 @@ def fit_composite_peaks(
     parameters: CompositeFitParameters | None = None,
     *,
     provenance: dict[str, Any] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> CompositeFitResult:
-    """Fit one shared baseline plus an additive set of registered peak components."""
+    """Fit a shared baseline and peak components, optionally checking cancellation."""
+    if check_cancelled is not None:
+        check_cancelled()
     settings = parameters or CompositeFitParameters()
     _validate_fit_parameters(settings)
     x = np.asarray(x_values, dtype=float)
@@ -267,6 +271,8 @@ def fit_composite_peaks(
         return values
 
     def residuals(free_values: np.ndarray) -> np.ndarray:
+        if check_cancelled is not None:
+            check_cancelled()
         total, _components, _baseline = calculate(expand_free(free_values))
         residual = total - observed
         return np.nan_to_num(residual, nan=1.0e30, posinf=1.0e30, neginf=-1.0e30)
@@ -293,6 +299,8 @@ def fit_composite_peaks(
         raise MathOperationError(f"Composite peak fit failed: {exc}") from exc
 
     fitted_parameters = expand_free(solution.x)
+    if check_cancelled is not None:
+        check_cancelled()
     total, component_values, baseline = calculate(fitted_parameters)
     residual = observed - total
     point_count = len(observed)

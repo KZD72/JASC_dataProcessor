@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,7 @@ import pandas as pd
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtTest import QTest
 
 from math_engine.baseline import BaselineParameters, correct_baseline
 from math_engine.calculus import MathOperationError
@@ -607,6 +609,10 @@ class PeakAnalysisMainWindowTests(unittest.TestCase):
                 def fit_parameter_sheet_name(self): return "Map_peak_parameters"
 
             window._run_peak_analysis_batch_or_map(dataset, FakeMapDialog(), {})
+            deadline = time.monotonic() + 10.0
+            while window._jobs.is_running and time.monotonic() < deadline:
+                QTest.qWait(5)
+            self.assertFalse(window._jobs.is_running)
             parameters = window._workspace.get_dataset("Map_peak_parameters").frame
             summary = parameters[parameters["record_type"] == "fit_summary"]
             self.assertEqual(len(summary), 2)

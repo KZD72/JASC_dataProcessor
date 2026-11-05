@@ -1,6 +1,53 @@
 # Large Data Loading and Clipboard Performance Audit
 
-Latest re-evaluation: 2026-10-21. Original loading/clipboard audit: 2026-08-17.
+Latest execution slice: 2026-10-30. Loading/clipboard re-evaluation: 2026-10-21. Original audit: 2026-08-17.
+
+## Background Peak/Raman Fitting Slice (2026-10-30)
+
+`core/peak_fit_jobs.py` captures no Qt objects or live workspace. The GUI copies
+only the input columns; the worker groups map pixels lazily, validates numeric
+inputs, corrects baselines, detects/matches components, fits spectra sequentially,
+and assembles the session plus optional worksheets. The shared background-job
+controller delivers real spectrum-count progress and GUI-thread completion.
+Cancellation propagates between phases and from optimizer residual evaluations;
+it discards all pending outputs. Native baseline/detection calls still finish
+their current phase before stopping. Individual failures remain in QC/metrics
+while other spectra continue.
+
+Completion checks workspace identity, source dataset identity, projected data,
+and column metadata before publication, including edits outside the visible table
+model. A publication failure rolls back all newly added worksheets and sessions.
+Closing or replacing a project requests cancellation, and window destruction
+waits for worker termination. Only one import/fit job uses the shared controller
+at once. Preview fitting and baseline-only map correction remain synchronous;
+this does not migrate Excel/project I/O or other analysis families.
+
+Measured with `benchmarks/background_peak_fit_audit.py`, using 400 seeded
+Gaussian spectra of 601 samples each (7.34 MiB input), including GUI input capture,
+result publication, and offscreen viewer rendering:
+
+| Measurement | Result |
+| --- | --- |
+| Full run | 5.336 s; all 400 fits succeeded; one analysis and no optional worksheets |
+| 10 ms GUI heartbeat | 349 ticks; p95 gap 19.24 ms; maximum gap 136.75 ms |
+| Cancellation requested by a 100 ms timer | Stopped 5.82 ms after actual delivery; no analyses or worksheets published |
+| Process working set, before / after success | 274.0 / 327.8 MiB; process peak 353.1 MiB |
+
+Raw results: `benchmarks/background_peak_fit_2026-10-30.json` and
+`benchmarks/background_peak_fit_cancel_2026-10-30.json`. These are timer-delivery
+measurements on one synthetic case, not a desktop interaction or vendor-map
+capacity claim. Input snapshots, per-spectrum results, and combined result tables
+remain in memory; initial input copying and final source comparison/rendering
+still run on the GUI thread. Larger-than-RAM analysis and process parallelism
+remain future work. Recorded environment: Python 3.13.13, Pandas 3.0.3, NumPy 2.4.4,
+PySide6 6.11.0. The existing Pandas/NumPy dependency drift remains unresolved.
+
+The full **295-test suite passes** in 73.135 s. Eleven new regressions cover
+worker/GUI affinity and heartbeat, per-spectrum failure isolation, cancellation
+during preprocessing/optimizer work and after queued success, cancellation after
+a successful pixel with restart, stale source/project rejection, rollback after
+publication failure, and deferred close. The existing map-fit integration test
+now waits for asynchronous completion and preserves its numerical/output checks.
 
 ## Polars/Parquet Paged Table Slice (2026-10-21)
 
