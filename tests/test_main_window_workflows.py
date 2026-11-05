@@ -259,6 +259,7 @@ class MainWindowWorkflowTests(unittest.TestCase):
                 "Open Plot",
                 "Duplicate Plot",
                 "Delete Plot",
+                "Compare Plots...",
             ],
         )
 

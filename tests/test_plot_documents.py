@@ -83,6 +83,85 @@ class PlotDocumentTests(unittest.TestCase):
         self.assertEqual(self.manager._series_label_edit.text(), "Unapplied label")
         self.assertTrue(self.manager.has_unapplied_series_edits())
 
+    def test_individual_plot_popout_keeps_editor_draft_zoom_and_maximize(self) -> None:
+        plot = self.plot()
+        editor = self.manager._active_editor
+        editor._series_label_edit.setText("Pending in window")
+        editor._plot_canvas.axes.set_xlim(.3, 1.3)
+        editor._detach_action.trigger()
+        dialog = self.manager._popouts[editor]
+        self.assertTrue(dialog.windowFlags() & Qt.WindowMaximizeButtonHint)
+        self.assertIs(editor._content.window(), dialog)
+        self.assertFalse(editor.options_widget().isHidden())
+        dialog.showMaximized()
+        QTest.qWait(20)
+        self.assertTrue(dialog.isMaximized())
+        self.manager.flush()
+        self.assertEqual(plot.editor_state["controls"]["_series_label_edit"]["value"], "Pending in window")
+        dialog.close()
+        self.assertNotIn(editor, self.manager._popouts)
+        self.assertIs(editor._content.parentWidget(), editor)
+        self.assertIs(self.manager._active_editor, editor)
+        self.assertEqual(editor._series_label_edit.text(), "Pending in window")
+        self.assertEqual(tuple(editor._plot_canvas.axes.get_xlim()), (.3, 1.3))
+
+    def test_activating_popout_routes_document_actions_to_its_plot(self) -> None:
+        first = self.plot("First")
+        editor = self.manager._active_editor
+        self.manager.toggle_popout(editor)
+        dialog = self.manager._popouts[editor]
+        self.plot("Second")
+        QCoreApplication.sendEvent(dialog, QEvent(QEvent.WindowActivate))
+        self.assertIs(self.manager.active_document, first)
+        with patch("ui.main_window.QInputDialog.getText", return_value=("Window name", True)):
+            editor._save_plot_button.click()
+        self.assertEqual(first.name, "Window name")
+        self.assertIn("Second", self.window._workspace.plot_names())
+
+    def test_popout_close_tab_project_replace_and_cancel_close_lifecycle(self) -> None:
+        plot = self.plot()
+        editor = self.manager._active_editor
+        self.manager.toggle_popout(editor)
+        dialog = self.manager._popouts[editor]
+        with patch("ui.main_window.QMessageBox.exec", return_value=QMessageBox.Cancel):
+            self.assertFalse(self.window.close())
+        self.assertIn(editor, self.manager._popouts)
+        self.manager.close_tab(self.manager.tabs.indexOf(editor))
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertFalse(isValid(dialog))
+        self.assertFalse(isValid(editor))
+        self.manager.open_plot(plot.name)
+        editor = self.manager._active_editor
+        self.manager.toggle_popout(editor)
+        dialog = self.manager._popouts[editor]
+        self.window._workspace = Workspace()
+        self.manager.set_workspace(self.window._workspace)
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertFalse(isValid(dialog))
+        self.assertFalse(isValid(editor))
+
+    def test_popout_inspector_toggle_is_local_and_project_save_captures_fields(self) -> None:
+        plot = self.plot()
+        editor = self.manager._active_editor
+        self.manager.toggle_popout(editor)
+        editor.set_plot_options_visible(False)
+        self.assertTrue(editor.options_widget().isHidden())
+        self.manager._return_to_tab(editor)
+        self.assertFalse(self.window._plot_inspector_enabled)
+        self.manager.toggle_popout(editor)
+        self.assertTrue(editor.options_widget().isHidden())
+        editor.set_plot_options_visible(True)
+        self.assertFalse(editor.options_widget().isHidden())
+        editor._title_edit.setText("Changed in window")
+        editor._series_label_edit.setText("Pending in window")
+        with tempfile.TemporaryDirectory() as folder:
+            self.window._project_path = Path(folder) / "popout.jasc"
+            self.window._save_project()
+            loaded = project_io.load_project(self.window._project_path)
+        self.assertEqual(loaded.get_plot(plot.name).state["settings"]["title"], "Changed in window")
+        self.assertEqual(loaded.get_plot(plot.name).editor_state["controls"]["_series_label_edit"]["value"],
+                         "Pending in window")
+
     def test_open_existing_activates_view_without_reload(self) -> None:
         first = self.plot()
         self.manager._title_edit.setText("Edited")

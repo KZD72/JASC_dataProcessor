@@ -161,6 +161,7 @@ class PlotTab(QWidget):
     dataset_created = Signal(str)
     plot_created = Signal(str)
     state_changed = Signal()
+    detach_requested = Signal()
 
     def __init__(
         self,
@@ -194,6 +195,17 @@ class PlotTab(QWidget):
         self._build_ui()
 
     # -- public API for MainWindow -----------------------------------------
+
+    def take_content(self) -> QWidget:
+        self._outer_layout.removeWidget(self._content)
+        self._detached_notice.show()
+        self._detach_action.setText("Return to Tab")
+        return self._content
+
+    def return_content(self) -> None:
+        self._outer_layout.insertWidget(0, self._content)
+        self._detached_notice.hide()
+        self._detach_action.setText("Pop Out")
 
     def set_workspace(self, workspace: Workspace) -> None:
         """Attach a new workspace and clear plot state tied to the old one."""
@@ -1202,6 +1214,8 @@ class PlotTab(QWidget):
         top_bar.setFloatable(False)
         top_bar.addWidget(self._active_plot_label)
         top_bar.addSeparator()
+        self._detach_action = top_bar.addAction("Pop Out", self.detach_requested.emit)
+        self._detach_action.setVisible(self._external_options)
         top_bar.addWidget(self._new_plot_button)
         top_bar.addWidget(self._save_plot_button)
         top_bar.addWidget(self._copy_plot_button)
@@ -1210,12 +1224,29 @@ class PlotTab(QWidget):
         top_bar.addWidget(self._toggle_options_button)
         self._plot_actions_toolbar = top_bar
 
-        layout = QVBoxLayout(self)
+        self._content = QWidget()
+        layout = QVBoxLayout(self._content)
         layout.addWidget(top_bar)
         if self._external_options:
             layout.addWidget(self._plot_canvas)
         else:
             layout.addWidget(self._plot_splitter)
+
+        self._outer_layout = QVBoxLayout(self)
+        self._outer_layout.setContentsMargins(0, 0, 0, 0)
+        self._outer_layout.addWidget(self._content)
+        self._detached_notice = QWidget()
+        notice = QVBoxLayout(self._detached_notice)
+        notice.addStretch()
+        message = QLabel("This plot is open in a separate window.")
+        message.setAlignment(Qt.AlignCenter)
+        notice.addWidget(message)
+        return_button = QPushButton("Return to Tab")
+        return_button.clicked.connect(self.detach_requested.emit)
+        notice.addWidget(return_button, alignment=Qt.AlignCenter)
+        notice.addStretch()
+        self._outer_layout.addWidget(self._detached_notice)
+        self._detached_notice.hide()
 
         self._x_dataset_combo.currentTextChanged.connect(
             lambda: self._update_column_combo(self._x_dataset_combo, self._x_column_combo, ("x",))
@@ -2177,7 +2208,8 @@ class PlotTab(QWidget):
         self._load_series_controls(self._plot_series[0])
         self._set_controls_enabled(bool(self._workspace.dataset_names()))
 
-    def _plot_series_from_state(self, state: dict[str, object]) -> PlotSeries:
+    @staticmethod
+    def _plot_series_from_state(state: dict[str, object]) -> PlotSeries:
         """Deserialize one saved series dictionary into a PlotSeries."""
         clean_state = {key: value for key, value in state.items() if key in _PLOT_SERIES_FIELDS}
 
@@ -2245,7 +2277,7 @@ class PlotTab(QWidget):
         clean_state["colorbar_label"] = str(
             clean_state.get("colorbar_label", "") or ""
         )
-        clean_state["voronoi_shape"] = self._normalized_voronoi_shape(
+        clean_state["voronoi_shape"] = PlotTab._normalized_voronoi_shape(
             str(clean_state.get("voronoi_shape", "circle") or "circle")
         )
         integer("grid_resolution", 120, 10, 500)

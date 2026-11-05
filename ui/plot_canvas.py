@@ -14,13 +14,14 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure
 from matplotlib.path import Path as MplPath
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QSizePolicy, QVBoxLayout, QWidget
 from scipy import ndimage
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
 from scipy.spatial import ConvexHull, Delaunay
 
 from core.workspace import COLUMN_NUMERIC_TYPES, Workspace, dataframe_column_metadata
 from models.plot_settings import LegendSettings
+from ui.plot_navigation import PlotMouseNavigation
 
 try:
     import scienceplots  # noqa: F401
@@ -215,6 +216,18 @@ class PlotNavigationToolbar(NavigationToolbar2QT):
             lambda _checked=False: plot_canvas.copy_to_clipboard()
         )
 
+    def home(self, *args: object) -> None:
+        self._plot_canvas_owner._mouse_navigation.finish()
+        super().home(*args)
+
+    def back(self, *args: object) -> None:
+        self._plot_canvas_owner._mouse_navigation.finish()
+        super().back(*args)
+
+    def forward(self, *args: object) -> None:
+        self._plot_canvas_owner._mouse_navigation.finish()
+        super().forward(*args)
+
     def save_figure(self, *args: object) -> str:
         """Choose a destination and export with the configured physical size."""
         filetypes = self.canvas.get_supported_filetypes_grouped()
@@ -265,6 +278,8 @@ class PlotCanvas(QWidget):
         self.figure = Figure(figsize=(7.0, 4.8), constrained_layout=False)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setToolTip(
+            "Wheel: zoom. Shift+wheel or middle-button drag: pan. "
+            "Over X/Y axes: that axis only; inside the plot: both. "
             "Double-click plotted data, the title, an axis label/tick area, the legend, "
             "or a legend entry to edit it directly."
         )
@@ -282,7 +297,9 @@ class PlotCanvas(QWidget):
         self._surface_cut_pick_active = False
         self._surface_cut_points: list[tuple[float, float]] = []
         self._surface_cut_artists: list[Any] = []
+        self._mouse_navigation = PlotMouseNavigation(self)
         self.coordinate_readout = QLabel()
+        self.coordinate_readout.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.coordinate_readout.setObjectName("MutedLabel")
         self.coordinate_readout.setMinimumHeight(20)
         self.coordinate_readout.setVisible(False)
@@ -291,7 +308,7 @@ class PlotCanvas(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.coordinate_readout)
-        layout.addWidget(self.canvas)
+        layout.addWidget(self.canvas, 1)
 
     def set_export_size(self, width: float, height: float, size_mode: str) -> None:
         """Set physical export geometry without resizing the interactive canvas."""
@@ -670,6 +687,7 @@ class PlotCanvas(QWidget):
         style_names: list[str] | None = None,
     ) -> PlotResult:
         """Render selected workspace series onto the axes."""
+        self._mouse_navigation.reset()
         try:
             with mpl_style.context(style_names or []):
                 return self._plot_series_with_style(
@@ -972,6 +990,7 @@ class PlotCanvas(QWidget):
 
     def clear_plot(self) -> None:
         """Clear the plot surface."""
+        self._mouse_navigation.reset()
         self._draw_empty_state()
         nav_stack = getattr(self.toolbar, "_nav_stack", None)
         if nav_stack is not None:

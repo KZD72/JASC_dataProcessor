@@ -17,6 +17,8 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 - **Custom Fit Models**: Define project-saved fit models from safe NumPy/SciPy expressions and use them in the standard fitting workflow.
 - **Dynamic Plotting**: High-performance multi-axis plotting with Matplotlib, featuring data locators, scaling controls, SciencePlots journal styling, visual customization, error bars, reporting plots, histograms, box/violin distribution comparisons, and native-grid or interpolated 2D and Raman/frequency-slice maps. Scientific map controls include automatic/manual/percentile colour ranges, linear/log/symmetric/diverging normalization, explicit contour levels and labels, measured-point/triangulation/boundary overlays, measured or interpolated extrema with provenance, aspect control, and live X/Y/intensity readout. Rendered grids, horizontal/vertical/arbitrary profiles, rectangular ROI statistics, and contour vertices can be exported as normal worksheets. Each cut also creates a persistent editable workspace plot. Peak/Raman result maps offer Map Cuts and mouse-picked cut lines for the selected metric.
 - **Independent Plot Tabs**: Each plot is a project document with its own editor, pending fields, view, and undo history. Open existing plots without reloading over edits; analysis results create new tabs. Close tabs without deleting plots, reopen them from Workspace, and use Save Project to persist every plot together. Rename and Delete are separate actions; project/app closure asks to save unsaved plot work.
+- **Mouse Navigation and Pop-outs**: Pop out individual plots or comparisons into maximizable windows with their inspectors. Wheel zoom, Shift+wheel pan, and middle-button dragging affect X over its axis, Y over its axis, and both in the plot interior. Back/Home work with these gestures, including logarithmic/reversed axes. Comparison X/Y synchronization also links image-map navigation.
+- **Plot Comparisons**: Choose and order 2-16 plots through **Plot > Compare Plots...**. Open a persistent comparison tab or pop-out window, arrange equal-sized grid cells, optionally match numeric X/left-Y limits, and copy or export the grid as PNG. Source plots remain independently editable.
 - **Data Preparation**: Create non-destructive result sheets for filtering, sorting, duplicate removal, missing-value cleanup, binning, grouping, joins, and reshaping.
 - **Responsive Docked Workspace Layout**: Size the initial window from the active screen work area, proportionally rebalance docks after window or DPI changes, and reflow the Plot Inspector without collapsing its editors. Plot actions move into a toolbar overflow menu when horizontal room is limited; on very narrow Plot layouts the Workspace navigator collapses automatically to preserve the canvas and can still be explicitly restored from View. Datasets, saved plots, and spectral-analysis sessions remain separate navigator sections, while Data receives the full central width and Raman Results appears only when a result exists or is explicitly opened.
 - **Project Persistence and Protection**: Save complete workspaces as open `.jasc` ZIP/CSV packages or optional password-encrypted `.jascx` packages. Encrypted saves use Scrypt-derived AES-256-GCM authenticated encryption; ordinary `.jasc` files remain directly inspectable for open-science use. Version 8 packages retain the uniquely salted JASC Package Seal over every member name, byte size, and SHA-256 digest, store spectral-analysis tables as readable CSV members, and can optionally add an Ed25519 author signature. JASC creates password-encrypted private identity files, exports shareable public identities, maintains a local trusted-fingerprint list, and distinguishes trusted, valid-but-unknown, unsigned, and invalid signatures.
@@ -37,13 +39,38 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 
 ## Development
 
-The independent-plot document/tab layout is a trial for desktop review. Run
+The independent-plot document/tab layout now includes comparison views. Run
 `main.py`, select **Plots**, and use **New Plot** or **+**. Open two plots, edit one,
 switch back and forth, close/reopen a tab from Workspace, and save/reopen the
 project. An asterisk marks changes since project save. **Rename** replaces the
 old separate Save Plot action. Pending series fields are saved as editor drafts;
 **Update Series** still applies them to the rendered plot. Closed canvases are
 released and recreated on demand. A preview is in `artifacts/plot_tabs_preview.png`.
+
+Try **Plot > Compare Plots...** after creating two plots. Select/reorder sources,
+choose rows and columns or **Fit Grid**, and optionally open a separate window.
+**Pop Out** and **Return to Tab** move the same view; closing the window returns
+it to its tab. Individual plot tabs also have **Pop Out**, and all plot windows
+support normal window maximization. **Synchronize X axis** / **Synchronize Y axis**
+link compatible numeric panels, including image maps, without converting
+units; Y matching concerns the left axis. Applied source definitions refresh after
+edits; use **Refresh** after worksheet value changes. Comparisons reference plot
+identities and save with the project; deleted sources keep a visible placeholder.
+Pending series edits still need **Update Series**. Equal cells preserve native
+aspect ratios, legends, and colour bars, so inner plotting areas can differ.
+Export currently produces PNG; shared legends, vector/PDF page export, insets,
+and arbitrary page composition remain future work. Actual-widget previews are
+`artifacts/plot_comparison_preview.png` and
+`artifacts/plot_comparison_popout_preview.png`.
+
+Use the wheel to zoom around the pointer, **Shift+wheel** to pan, or drag with the
+middle mouse button. Pointer location determines the affected axes: X ticks/label
+or spine restrict to X, Y ticks/label or spine restrict to that Y axis, and the
+plot interior affects both (including a secondary Y axis). Map colour bars are
+excluded. Navigation does not also scroll the comparison container, and pauses
+during interactive map-cut picking. Back/Forward/Home include these gestures.
+Previews: `artifacts/plot_popout_preview.png` and
+`artifacts/comparison_image_sync_preview.png`.
 
 Peak/Raman worksheet-batch and map fitting, plus baseline-only map correction,
 run in the background with status-bar progress and Cancel. Completed results are

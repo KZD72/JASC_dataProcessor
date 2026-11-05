@@ -8,14 +8,22 @@ The first measured large-sheet performance slice, shared background-job controll
 
 Map cuts create persistent editable workspace plots backed by profile worksheets. The Peak/Raman viewer supports horizontal, vertical, and mouse-picked arbitrary cuts of its selected parameter/quality metric.
 
-At the user's request, a trial independent-plot document/tab layer is implemented
-for desktop review. Open plots have separate editors/canvases and history; closed
+The user-approved independent-plot document/tab layer is implemented.
+Open plots have separate editors/canvases and history; closed
 views retain definitions, pending input, and viewport state in project documents.
 Analysis creates new documents, opening an existing plot activates its view, and
 Save Project serializes current states together. Plot rename cannot overwrite
-another document; tab close and document deletion are distinct. Review this UX
-before expanding detached windows or multi-panel layout. This reprioritizes plot
-ownership/persistence ahead of the remaining worker migrations for this trial.
+another document; tab close and document deletion are distinct. At the user's
+request, this now includes selectable 2-16-panel comparisons with persistent source
+IDs, panel ordering, equal grid cells, tab/pop-out controls, optional compatible
+numeric X/left-Y matching, native styles, PNG export, and clipboard copy. Source
+plots remain independent. This reprioritizes comparison layout ahead of remaining
+worker migrations. Full graph pages, shared legends, insets, and vector/PDF page
+export remain future work. Individual plots and comparisons now support
+maximizable pop-outs with retained inspectors/drafts, pointer-aware wheel zoom,
+Shift+wheel/middle-button pan, and synchronized image-map navigation through the
+comparison's X/Y options. These gestures preserve log/reversed axes and toolbar
+navigation history.
 
 Reviewed on 2026-09-24 against the current repository state, session changelog, and automated test suite.
 
@@ -35,7 +43,7 @@ Reviewed on 2026-09-24 against the current repository state, session changelog, 
 - Long-running import and analysis workflows can still block the Qt event loop. Background execution with real progress/cancel is the immediate engineering priority.
 - The app has project-level datasets and a first lightweight column-metadata layer, but not full Origin/SigmaPlot-style workbooks with matrix sheets, notes, reports, folders, cell comments, dependency graphs, or rich worksheet formatting.
 - Import/export is narrow compared with current commercial tools.
-- Plotting is strong for core 2D scientific charts but lacks multi-panel/page layouts, annotation tools, many specialized graph families, and true 3D graphing. Reusable plot/analysis templates are deliberately deferred to the final roadmap stage.
+- Plotting includes equal-cell comparison layouts but lacks a general graph-page editor, shared legends, insets, annotation tools, many specialized graph families, and true 3D graphing. Reusable plot/analysis templates are deliberately deferred to the final roadmap stage.
 - Batch analysis exists but lacks semantic role binding, a uniform timestamped audit-log schema, true background execution for most operation families, and workspace-level undo for edits to non-visible sheets.
 - Fitting lacks global multi-dataset fitting, general dynamic/robust initial-guess search, surface fitting, and advanced model comparison; Fano components now have dedicated multistart initialization.
 - No PyInstaller specification or repeatable standalone Windows build exists yet.
@@ -86,9 +94,9 @@ The benchmark products emphasize:
 - Phase 5: add matrix and density visualization.
   - X/Y/Z heatmap, contour, and filled contour with automatic native-grid preservation or selectable interpolation, grid resolution, boundary masking, X/Y-to-Z locators, palettes, editable colour-bar labels, and live X/Y/Z reading. (complete)
   - Scientific map controls: automatic/manual/percentile colour limits; linear/log/symmetric-log/diverging normalization; configurable contour levels, labels, overlays, and line styles; data-point/triangulation/convex-hull overlays; measured/interpolated global and local extrema with provenance; missing/under/over colours; aspect and opacity. Rendered-grid, horizontal/vertical/arbitrary profile, rectangular ROI-statistic, and contour-vertex worksheet extraction are complete.
-  - Remaining density/matrix follow-ups: matrix and correlation heatmaps, 2D histograms, hexbin plots, colour-bar tick formatting, polygonal ROI interaction, and multi-panel graph layout.
+  - Remaining density/matrix follow-ups: matrix and correlation heatmaps, 2D histograms, hexbin plots, colour-bar tick formatting, polygonal ROI interaction, and general graph-page layout beyond the comparison grid.
 - Phase 6: add engineering/time-series specialty plots: candlestick/OHLC with time, open, high, low, close, volume, and style controls.
-- Phase 7: add multi-panel/subplot layouts so heterogeneous plot types can be arranged in one saved figure.
+- Phase 7: initial selectable equal-cell comparison layouts are complete, including persistent source links, tab/pop-out views, compatible numeric linked limits, and PNG export. General page composition, shared legends, insets, and vector/PDF export remain.
 - For every plot type phase, ensure GUI controls only show relevant options, saved plots persist the new state, invalid column-role selections fail with clear messages, and the Matplotlib output is manually tested.
 
 ### Phase 3: Basic Math and Signal Processing
@@ -120,7 +128,7 @@ The benchmark products emphasize:
 | Import/connectors | Multi-file CSV/DAT/TXT with delimiter/metadata/header preflight, retained raw/parsed preambles, shared overrides, mismatch decisions, explicit data-type plus initial Horiba/B&W Tek profiles, decimal-comma spectra, legacy Horiba/B&WTech/Bruker IR text compatibility, and Horiba wide-map recognition normalized to X/Y/Raman Shift/Intensity rows; CSV/TXT export; initial value-only `.xlsx`/`.xlsm` worksheet-tab import with unsupported-object preflight; XY/2D-colourplot digitization with precision zoom, ROI/color tracing, symbol matching, perspective correction, manual uncertainty, empirical colour-scale calibration, and multiple curve/probe-set capture per calibration | Missing stacked/multiple-channel/multi-acquisition spectrometer layouts, broader encoding/locale controls, additional fixture-driven vendor/map profiles, Excel export, named/range-only mapping and metadata rows, legacy `.xls`, JSON/XML/HTML, HDF5/NetCDF/MATLAB, binary/instrument formats, ODBC/SQL, drag/drop, re-import/refresh, per-file batch parser overrides, plus digitizer point cleanup, overlap splitting, automatic multi-curve separation, discrete colour levels, automatic grid extraction, and OCR tick assistance |
 | Data preparation | Formula columns, row/column operations, clipboard, filter/query, sort, duplicate removal, missing-value cleanup, binning, group/aggregate, merge/join, and reshape result sheets | Missing richer multi-condition filters, previews, type conversion, pivot tables, append/split tools, date/time parsing, resampling, and data reduction |
 | Graphing breadth | Core 2D, distribution plots, early 2D maps, initial pie/donut/Voronoi composition charts, SciencePlots styles | Missing density families, grouped/categorical chart variants, polar/radar/ternary, waterfall, 3D scatter/surface/mesh/bars, specialized scientific diagrams, map overlays, images, and graph object editing |
-| Graph layout | Single responsive canvas with saved/duplicable plots, right Y axis, direct element editing, and export-specific sizing | Missing page layout manager, multi-panel/multi-layer graph pages, linked axes, inset graphs, object manager, annotation tools, direct data labels, and graph galleries; reusable templates/themes are intentionally deferred |
+| Graph layout | Independent plot documents, equal-cell comparison tabs/pop-outs with linked numeric X/left-Y ranges, native heterogeneous panels, PNG grid export, right Y axis, and direct source editing | General page layout, shared legends, multi-layer pages, insets, vector/PDF comparison export, object manager, annotations, direct data labels, and galleries remain; reusable templates/themes are intentionally deferred |
 | Analysis | Calculus, FFT/iFFT, advanced smoothing including derivative reconstruction, 1D/2D/N-D interpolation, statistics workbench, baseline correction, physical-unit peak detection/review, registered composite peak fitting, sequential worksheet/Raman-map application, persistent spectral-analysis sessions, linked map/spectrum/residual/QC visualization, and opt-in worksheet export | Missing broader filters, advanced peak constraints/global fitting, convolution/correlation, STFT, wavelets, 2D FFT, resampling workflows, ROI/gadget-style analysis, and analysis chains |
 | Statistics | Useful first-pass reports, multi-column correlations/covariance/PCA summaries, grouped one-way analyses, post-hoc comparisons, and companion plots | Missing two-way/repeated-measures ANOVA, ANCOVA/MANOVA families, broader nonparametric families, clustering, survival/reliability, SPC/control charts, DOE, power/sample-size, ROC, probability/distribution fitting, and guided statistical advisor workflows |
 | Fitting | Nonlinear and batch fits, ODR, custom models, weights, residuals, confidence bands, per-source outputs, and cumulative summaries | Missing global fitting with shared/local parameters, dynamic initial-guess search, robust model ranking, arbitrary polynomial degree UI, prediction bands, peak deconvolution, surface fitting, implicit fitting UI, constraints by expression, and background execution |
@@ -351,11 +359,11 @@ Acceptance criteria:
 
 Purpose: make plots feel like publishable scientific graph pages, not just traces.
 
-The Plot Inspector final-state audit and recommended single-canvas polish sequence are documented in `Plot_Inspector_Final_State.md`. Complete that state/interaction, legend/typography, axes/grid/figure, and existing-plot-type polish before coupling the inspector to multi-panel page layout work.
+The Plot Inspector final-state audit is documented in `Plot_Inspector_Final_State.md`. The user explicitly prioritized independent plot documents and now comparison layouts. Those are implemented; broader inspector polish and general page composition remain.
 
 Tasks:
 - Finish Phase 2A subphases 4-7.
-- Add a graph page layout editor for multi-panel/multi-layer figures, insets, linked axes, shared legends, and aligned panels.
+- Extend the implemented equal-cell comparison grids and numeric linked axes into a graph page editor with multi-layer figures, insets, shared legends, and vector/PDF page export.
 - Add annotation tools: text, arrows, lines, rectangles, images, direct labels, legend ordering, and graph object selection.
 - Add grouped/categorical charts, kernel density, ECDF, probability plots, forest plots, radar/polar, ternary, waterfall, and 3D scatter/surface/mesh/bar plots.
 - Add colormap, colorbar, symbol, line pattern, font, and journal export preset editors.

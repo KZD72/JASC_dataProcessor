@@ -1410,6 +1410,13 @@ open activates its existing tab and keeps its edits.
 - **Delete Plot** removes the document after confirmation. It is separate from
   closing a tab and does not delete its source worksheets.
 
+Use **Pop Out** on an individual plot or comparison to move its live view and
+inspector into a separate, maximizable window. Its tab keeps a **Return to Tab**
+notice. Close the window or use **Return to Tab** to reattach it without reloading
+the plot, losing pending fields, or resetting its zoom. Activating a plot window
+selects the corresponding document for plot actions. Project save includes edits
+in these windows; project/app closure still protects unsaved changes.
+
 **Save Project** (`Ctrl+S`) writes all current plot documents, including closed
 plots and pending editor fields. There is no separate Save Plot step. A tab and
 project asterisk indicates plot changes since the last successful project save.
@@ -1424,6 +1431,72 @@ prompt or a failed save keeps the project open. Plot edit history is retained
 within the session, including tab close/reopen; it is not stored across project
 reloads. Source-structure changes clear affected history to avoid restoring old
 bindings.
+
+### Comparing plots in an equal-cell grid
+
+Choose **Plot > Compare Plots...** (also available in the Workspace plot context
+menu) once at least two plots contain applied series. Check 2-16 source plots,
+drag them or use **Move Up/Down** to set panel order, and enter a comparison name.
+Choose 1-4 rows and columns or use **Fit Grid**. Every cell has equal width and
+height, including empty trailing cells. **Show panel labels** adds A, B, C, etc.
+
+The default result is a new comparison tab in **Plots**. Enable **Open in a
+separate window** in the picker or use **Pop Out** later. Its controls move with
+the comparison. **Return to Tab** or closing the separate window reattaches it;
+closing its document tab releases the view and retains the layout in Workspace.
+Save Project persists the comparison's sources, order, grid, matching options,
+and viewport. Comparison layouts support the usual per-document Undo/Redo.
+
+Use **Edit Comparison...** or **Choose / Reorder Plots...** to revise the selection,
+and the inspector to change rows, columns, matching, or panel letters. Comparisons
+are native renderings of the source definitions. They retain plot types, styling,
+legends, secondary axes, colour bars, and aspect ratios without changing source
+plots. Equal cells do not force identical inner axes when legends, colour bars,
+or fixed aspect ratios require space. Existing comparisons cannot be nested.
+
+**Synchronize X axis** and **Synchronize Y axis** use a common numeric range and
+link subsequent wheel, pan, and zoom changes within the comparison, including
+heatmaps and contour images. Y synchronization uses the left axis.
+Matching is skipped, with a message, for missing/unrenderable sources, categories,
+composition/distribution panels, or different axis scales. Units are not converted;
+choose matching only for comparable quantities. **Pan**, **Zoom**, and **Reset
+View** control the comparison without changing original viewports.
+
+Source plot edits refresh after a short debounce; **Refresh** also rereads worksheet
+values. Pending source series fields must be applied with **Update Series** first.
+Double-click a panel to open its source plot. Renaming a source keeps the link;
+deleting it leaves a visible placeholder that can be replaced through selection.
+
+**Copy** captures the full grid, excluding controls. **Export PNG...** renders
+1000 x 750 pixels per cell into one PNG, independently of window size, then restores
+the live view. Vector/PDF comparison export, shared legends, inset panels, and a
+general page composition editor are follow-ups.
+
+### Navigating with the mouse
+
+- **Wheel up/down** zooms in/out around the pointer.
+- **Shift+wheel** pans by a fraction of the visible range.
+- **Middle-button drag** pans continuously; release, leave the canvas, or press
+  Escape to end the drag.
+
+The pointer's position at the start of a gesture chooses its axes. Over the X
+spine, ticks, or label, only X changes. Over a Y spine, ticks, or label, only that
+Y axis changes, including the right axis when present. Inside the plot, X and Y
+change together, including both left/right Y axes for overlays. Dragging keeps
+its original axis selection even when the pointer moves outside the plot area.
+
+These gestures work in tabs and popped-out windows, including linear/logarithmic
+and reversed axes, and participate in Matplotlib **Back**, **Forward**, and
+**Home**. They leave source data and applied plot definitions unchanged. On image
+comparisons, enable the X/Y synchronization options to navigate matching spatial
+regions together; turn them off to inspect panels independently. Units and colour
+scales are not converted or synchronized by these spatial-axis options.
+
+Map colour bars do not trigger spatial navigation. Wheel events handled by a
+plot do not also scroll the surrounding comparison. Navigation is suspended
+during map-cut picking or an active toolbar selection/drag so the tools do not
+compete. Paused trackpad wheel input commits one navigation-history step per
+burst.
 
 
 ---

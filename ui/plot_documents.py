@@ -7,12 +7,26 @@ from copy import deepcopy
 import json
 from collections.abc import Iterator
 
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QStackedWidget, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QTabWidget, QVBoxLayout, QWidget
 
-from core.workspace import SavedPlot, Workspace
+from core.workspace import Dataset, SavedPlot, Workspace
 from core.plot_documents import rename_editor_columns, rename_editor_dataset
+from core.plot_comparison import is_comparison, validated_comparison
+from ui.plot_comparison import PlotComparisonView
 from ui.plot_tab import PlotTab
+
+
+class PlotDocumentWindow(QDialog):
+    """A maximizable document window that keeps active-document actions in sync."""
+
+    activated = Signal()
+
+    def event(self, event: QEvent) -> bool:
+        result = super().event(event)
+        if event.type() == QEvent.WindowActivate:
+            self.activated.emit()
+        return result
 
 
 class PlotDocuments(QWidget):
@@ -33,8 +47,9 @@ class PlotDocuments(QWidget):
     def __init__(self, workspace: Workspace, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._workspace = workspace
-        self._active_editor: PlotTab | None = None
-        self._editors: dict[str, PlotTab] = {}
+        self._active_editor: PlotTab | PlotComparisonView | None = None
+        self._editors: dict[str, PlotTab | PlotComparisonView] = {}
+        self._popouts: dict[PlotTab | PlotComparisonView, PlotDocumentWindow] = {}
         self._saved: dict[str, str] = {}
         self._undo: dict[str, list[dict[str, object]]] = {}
         self._redo: dict[str, list[dict[str, object]]] = {}
@@ -44,6 +59,10 @@ class PlotDocuments(QWidget):
         self._history_timer.setSingleShot(True)
         self._history_timer.setInterval(250)
         self._history_timer.timeout.connect(self._finish_history_group)
+        self._comparison_timer = QTimer(self)
+        self._comparison_timer.setSingleShot(True)
+        self._comparison_timer.setInterval(150)
+        self._comparison_timer.timeout.connect(self._refresh_comparisons)
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.setMovable(True)
@@ -53,6 +72,9 @@ class PlotDocuments(QWidget):
         self.tabs.currentChanged.connect(self._tab_changed)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self._inspector = QStackedWidget()
+        self._detached_inspector = QLabel("Plot controls are in its separate window.")
+        self._detached_inspector.setWordWrap(True)
+        self._inspector.addWidget(self._detached_inspector)
         self._inspector.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         corner = QWidget()
         buttons = QHBoxLayout(corner)
@@ -88,7 +110,7 @@ class PlotDocuments(QWidget):
         finally:
             self._mutating -= 1
 
-    def _document(self, editor: PlotTab | None = None) -> SavedPlot | None:
+    def _document(self, editor: PlotTab | PlotComparisonView | None = None) -> SavedPlot | None:
         identity = getattr(editor or self._active_editor, "_document_id", None)
         return next((plot for plot in self._workspace.list_plots() if plot.plot_id == identity), None)
 
@@ -118,13 +140,15 @@ class PlotDocuments(QWidget):
         self._update_labels()
         self.documents_changed.emit()
 
-    def _make_editor(self, plot: SavedPlot | None) -> PlotTab:
+    def _make_editor(self, plot: SavedPlot | None) -> PlotTab | PlotComparisonView:
         with self._suspend():
-            editor = PlotTab(self._workspace, external_options=True)
+            editor = (PlotComparisonView(self._workspace, plot.state) if plot is not None and is_comparison(plot.state)
+                      else PlotTab(self._workspace, external_options=True))
             editor._document_id = plot.plot_id if plot is not None else None
             if plot is not None:
                 try:
-                    editor.load_plot_state(plot.state)
+                    if not isinstance(editor, PlotComparisonView):
+                        editor.load_plot_state(plot.state)
                     editor.restore_editor_state(plot.editor_state)
                 except Exception:
                     editor.options_widget().deleteLater()
@@ -133,11 +157,15 @@ class PlotDocuments(QWidget):
             self._inspector.addWidget(editor.options_widget())
             index = self.tabs.addTab(editor, plot.name if plot is not None else "New plot")
             for name in ("status_message", "save_plot_requested", "load_plot_requested", "remove_plot_requested",
-                         "new_plot_requested", "options_visibility_changed", "dataset_created", "plot_created"):
+                         "new_plot_requested", "dataset_created", "plot_created"):
                 getattr(editor, name).connect(getattr(self, name).emit)
             editor.plot_rendered.connect(lambda: self._rendered(editor))
             editor.state_changed.connect(lambda: self._changed(editor))
             editor.plot_draft_replaced.connect(lambda: self._changed(editor))
+            editor.detach_requested.connect(lambda: self.toggle_popout(editor))
+            editor.options_visibility_changed.connect(lambda visible: self._options_visibility(editor, visible))
+            if isinstance(editor, PlotComparisonView):
+                editor.source_requested.connect(self._open_source)
             if plot is not None:
                 self._editors[plot.plot_id] = editor
             self.tabs.setCurrentIndex(index)
@@ -150,9 +178,14 @@ class PlotDocuments(QWidget):
             self._make_editor(None)
         self._update_labels()
 
-    def _remove_editor(self, editor: PlotTab) -> None:
-        editor._preview_timer.stop()
-        editor._plot_canvas.cancel_surface_cut_selection()
+    def _remove_editor(self, editor: PlotTab | PlotComparisonView) -> None:
+        self._return_to_tab(editor)
+        if isinstance(editor, PlotComparisonView):
+            editor.release_views()
+        else:
+            editor._preview_timer.stop()
+            editor._plot_canvas._mouse_navigation.reset()
+            editor._plot_canvas.cancel_surface_cut_selection()
         index = self.tabs.indexOf(editor)
         with self._suspend():
             if index >= 0:
@@ -162,6 +195,88 @@ class PlotDocuments(QWidget):
             inspector.deleteLater()
             editor.deleteLater()
         self._active_editor = self.tabs.currentWidget()
+        if self._active_editor is not None:
+            self._select_inspector(self._active_editor)
+
+    def new_comparison(self, name: str, state: dict[str, object], *, pop_out: bool = False) -> SavedPlot:
+        """Create a persistent layout referencing source plot IDs, without editing them."""
+        state = validated_comparison(state)
+        self.flush()
+        placeholder = self._active_editor if self.active_document is None else None
+        plot = self._workspace.add_plot(name.strip() or "Plot comparison", state)
+        try:
+            editor = self._make_editor(plot)
+        except Exception:
+            self._workspace.remove_plot(plot.name)
+            raise
+        if placeholder is not None:
+            self._remove_editor(placeholder)
+        self._active_editor = editor
+        self._capture(editor)
+        self._finish_history_group()
+        self._notify()
+        if pop_out:
+            self.toggle_popout(editor)
+        return plot
+
+    def _open_source(self, identity: str) -> None:
+        plot = next((plot for plot in self._workspace.list_plots() if plot.plot_id == identity), None)
+        if plot is not None and not is_comparison(plot.state):
+            self.open_plot(plot.name)
+
+    def _select_inspector(self, editor: PlotTab | PlotComparisonView) -> None:
+        self._inspector.setCurrentWidget(self._detached_inspector if editor in self._popouts else editor.options_widget())
+
+    def _options_visibility(self, editor: PlotTab | PlotComparisonView, visible: bool) -> None:
+        if editor in self._popouts:
+            editor.options_widget().setVisible(visible)
+        else:
+            self.options_visibility_changed.emit(visible)
+
+    def toggle_popout(self, editor: PlotTab | PlotComparisonView) -> None:
+        if editor in self._popouts:
+            self._return_to_tab(editor)
+            return
+        dialog = PlotDocumentWindow(self.window(), Qt.Window | Qt.WindowMinMaxButtonsHint
+                                    | Qt.WindowCloseButtonHint | Qt.WindowSystemMenuHint)
+        plot = self._document(editor)
+        dialog.setWindowTitle(plot.name if plot is not None else "New plot")
+        dialog.resize(1200, 850)
+        inspector = editor.options_widget()
+        self._inspector.removeWidget(inspector)
+        splitter = QSplitter()
+        splitter.addWidget(editor.take_content())
+        splitter.addWidget(inspector)
+        inspector.setVisible(editor.plot_options_visible())
+        splitter.setCollapsible(1, False)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([900, 300] if isinstance(editor, PlotComparisonView) else [800, 400])
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(splitter)
+        self._popouts[editor] = dialog
+        dialog.finished.connect(lambda _result: self._return_to_tab(editor))
+        dialog.activated.connect(lambda: self.tabs.setCurrentWidget(editor))
+        if self._active_editor is editor:
+            self._select_inspector(editor)
+        dialog.show()
+
+    def _return_to_tab(self, editor: PlotTab | PlotComparisonView) -> None:
+        dialog = self._popouts.pop(editor, None)
+        if dialog is None:
+            return
+        editor.return_content()
+        self._inspector.addWidget(editor.options_widget())
+        if self._active_editor is editor:
+            self._select_inspector(editor)
+            if not self._mutating:
+                self.options_visibility_changed.emit(editor.plot_options_visible())
+        dialog.close()
+        dialog.deleteLater()
+
+    def close_popouts(self) -> None:
+        for editor in list(self._popouts):
+            self._return_to_tab(editor)
 
     def new_plot(self, name: str | None = None) -> SavedPlot:
         self.flush()
@@ -191,7 +306,10 @@ class PlotDocuments(QWidget):
                 self._remove_editor(placeholder)
         self.tabs.setCurrentWidget(editor)
         self._active_editor = editor
-        self._inspector.setCurrentWidget(editor.options_widget())
+        self._select_inspector(editor)
+        if editor in self._popouts:
+            self._popouts[editor].raise_()
+            self._popouts[editor].activateWindow()
         self._notify()
         return plot
 
@@ -238,7 +356,7 @@ class PlotDocuments(QWidget):
         self._active_editor.set_plot_actions_enabled(can_save, can_load, can_remove)
         self._active_editor._copy_plot_button.setEnabled(self._active_editor.has_plot_series())
 
-    def _capture(self, editor: PlotTab) -> None:
+    def _capture(self, editor: PlotTab | PlotComparisonView) -> None:
         pending = editor.capture_editor_state()
         try:
             state = editor.current_plot_state()
@@ -262,7 +380,7 @@ class PlotDocuments(QWidget):
         for index in range(self.tabs.count()):
             self._capture(self.tabs.widget(index))
 
-    def _changed(self, editor: PlotTab) -> None:
+    def _changed(self, editor: PlotTab | PlotComparisonView) -> None:
         if self._mutating:
             return
         plot = self._document(editor)
@@ -281,7 +399,7 @@ class PlotDocuments(QWidget):
             self._history_timer.start()
         self._notify()
 
-    def _rendered(self, editor: PlotTab) -> None:
+    def _rendered(self, editor: PlotTab | PlotComparisonView) -> None:
         self._changed(editor)
         if not self._mutating:
             self.plot_rendered.emit()
@@ -296,7 +414,7 @@ class PlotDocuments(QWidget):
         self._finish_history_group()
         self._active_editor = self.tabs.currentWidget()
         if self._active_editor is not None:
-            self._inspector.setCurrentWidget(self._active_editor.options_widget())
+            self._select_inspector(self._active_editor)
         self._notify()
 
     def _update_labels(self) -> None:
@@ -308,12 +426,21 @@ class PlotDocuments(QWidget):
                 self.tabs.setTabText(index, plot.name + (" *" if dirty else ""))
                 self.tabs.setTabToolTip(index, "Close this tab to keep the plot in Workspace > Plots.")
                 editor.set_active_plot_name(plot.name)
+                if editor in self._popouts:
+                    self._popouts[editor].setWindowTitle(plot.name + (" *" if dirty else ""))
         self._undo_button.setEnabled(self.can_undo())
         self._redo_button.setEnabled(self.can_redo())
 
     def _notify(self) -> None:
         self._update_labels()
         self.documents_changed.emit()
+        self._comparison_timer.start()
+
+    def _refresh_comparisons(self) -> None:
+        for editor in list(self._editors.values()):
+            if isinstance(editor, PlotComparisonView):
+                # Debounce source edits; fingerprints prevent render/notification loops.
+                editor.refresh_if_sources_changed()
 
     def can_undo(self) -> bool:
         plot = self.active_document
@@ -354,6 +481,7 @@ class PlotDocuments(QWidget):
         return True
 
     def set_workspace(self, workspace: Workspace) -> None:
+        self._comparison_timer.stop()
         with self._suspend():
             for index in range(self.tabs.count() - 1, -1, -1):
                 self._remove_editor(self.tabs.widget(index))
@@ -404,7 +532,9 @@ class PlotDocuments(QWidget):
         self.refresh_controls()
         with self._suspend():
             for editor in self._editors.values():
-                if any(name in (series.x_dataset, series.y_dataset, series.z_dataset) for series in editor._plot_series):
+                if isinstance(editor, PlotComparisonView):
+                    editor.refresh()
+                elif any(name in (series.x_dataset, series.y_dataset, series.z_dataset) for series in editor._plot_series):
                     editor._render_plot(silent_if_empty=True, show_validation_messages=False)
         self._notify()
 
@@ -462,3 +592,19 @@ class PlotDocuments(QWidget):
 
     def queue_plot_series(self, *args: object, **kwargs: object) -> None:
         self._queue("queue_plot_series", *args, **kwargs)
+
+    def _commit_surface_analysis(self, *args: object) -> Dataset:
+        """Map-result cuts can be published while a comparison is the active view."""
+        editor = next((view for view in self._editors.values() if isinstance(view, PlotTab)), None)
+        temporary = editor is None
+        if temporary:
+            editor = PlotTab(self._workspace, external_options=True)
+            editor.dataset_created.connect(self.dataset_created.emit)
+            editor.plot_created.connect(self.plot_created.emit)
+            editor.status_message.connect(self.status_message.emit)
+        try:
+            return editor._commit_surface_analysis(*args)
+        finally:
+            if temporary:
+                editor.options_widget().deleteLater()
+                editor.deleteLater()

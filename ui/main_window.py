@@ -194,6 +194,8 @@ from ui.dialogs import (
 )
 from ui.plot_canvas import PlotSeries
 from ui.plot_documents import PlotDocuments
+from ui.plot_comparison import ComparePlotsDialog
+from core.plot_comparison import is_comparison
 from ui.spectral_analysis_viewer import SpectralAnalysisExportDialog, SpectralAnalysisViewer
 
 
@@ -1594,6 +1596,9 @@ class MainWindow(QMainWindow):
         new_plot_action.setShortcut("Ctrl+Alt+N")
         new_plot_action.triggered.connect(self._start_new_plot)
 
+        self._compare_plots_action = plot_menu.addAction("Compare Plots...")
+        self._compare_plots_action.triggered.connect(self._compare_plots)
+
         save_plot_action = plot_menu.addAction("&Rename Current Plot...")
         save_plot_action.setShortcut("Ctrl+Alt+S")
         save_plot_action.triggered.connect(self._save_current_plot)
@@ -2542,6 +2547,7 @@ class MainWindow(QMainWindow):
             self._jobs.cancel()
             event.ignore()
             return
+        self._plot_tab_widget.close_popouts()
         super().closeEvent(event)
 
     def _finish_deferred_close(self) -> None:
@@ -11667,6 +11673,19 @@ class MainWindow(QMainWindow):
     def _plot_has_unsaved_changes(self) -> bool:
         return self._plot_tab_widget.is_dirty()
 
+    def _compare_plots(self) -> None:
+        """Create an independent comparison document from selected applied plots."""
+        self._plot_tab_widget.flush()
+        dialog = ComparePlotsDialog(self._workspace, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            try:
+                self._plot_tab_widget.new_comparison(dialog._name.text(), dialog.specification(),
+                                                     pop_out=dialog._pop_out.isChecked())
+                self._tabs.setCurrentWidget(self._plot_tab_widget)
+            except (ValueError, TypeError, KeyError) as exc:
+                QMessageBox.warning(self, "Compare Plots", str(exc))
+        dialog.deleteLater()
+
     def _confirm_plot_replacement(self) -> bool:
         """Opening or creating a document preserves the other plot documents."""
         return True
@@ -11813,6 +11832,8 @@ class MainWindow(QMainWindow):
             self._duplicate_selected_plot()
         elif action == actions["remove"]:
             self._delete_selected_plot()
+        elif action == actions["compare"]:
+            self._compare_plots()
 
     def _build_plot_context_menu(self, plot_name: object) -> tuple[QMenu, dict[str, object]]:
         """Build the saved-plot context menu and its named actions."""
@@ -11827,13 +11848,21 @@ class MainWindow(QMainWindow):
         duplicate_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
         delete_action = menu.addAction("Delete Plot")
         delete_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
+        menu.addSeparator()
+        compare_action = menu.addAction("Compare Plots...")
+        compare_action.setEnabled(self._comparison_available())
         return menu, {
             "new": new_action,
             "save": save_action,
             "load": load_action,
             "duplicate": duplicate_action,
             "remove": delete_action,
+            "compare": compare_action,
         }
+
+    def _comparison_available(self) -> bool:
+        return sum(bool(plot.state.get("series")) and not is_comparison(plot.state)
+                   for plot in self._workspace.list_plots()) >= 2
 
     def _update_plot_action_state(self) -> None:
         """Update plot menu and header action enabled states."""
@@ -11843,6 +11872,7 @@ class MainWindow(QMainWindow):
         has_document = self._plot_tab_widget.active_document is not None
 
         if hasattr(self, "_save_plot_action"):
+            self._compare_plots_action.setEnabled(self._comparison_available())
             self._save_plot_action.setEnabled(has_document)
             self._copy_plot_action.setEnabled(has_current_plot)
             self._load_plot_action.setEnabled(has_saved_plot)
