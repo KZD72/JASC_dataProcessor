@@ -286,6 +286,12 @@ class PeakAnalysisDialogTests(unittest.TestCase):
         y = 3.0 + 0.001 * x + 8.0 * np.exp(-0.5 * ((x - 520.0) / 7.0) ** 2)
         self.frame = pd.DataFrame({"Raman Shift": x, "Intensity": y})
 
+    def wait_preview(self, dialog: PeakAnalysisDialog, seconds: float = 15.0) -> None:
+        deadline = time.monotonic() + seconds
+        while dialog.preview_busy and time.monotonic() < deadline:
+            QTest.qWait(5)
+        self.assertFalse(dialog.preview_busy, "Preview did not finish")
+
     def test_signal_starts_unselected_and_preview_populates_review_table(self) -> None:
         dialog = PeakAnalysisDialog(
             self.frame,
@@ -297,6 +303,7 @@ class PeakAnalysisDialogTests(unittest.TestCase):
             dialog._y_combo.setCurrentIndex(dialog._y_combo.findData("Intensity"))
             dialog._prominence.setText("1")
             self.assertTrue(dialog.preview_peaks())
+            self.wait_preview(dialog)
             self.assertEqual(dialog._peak_table.rowCount(), 1)
             self.assertAlmostEqual(dialog.peak_result().peaks[0].center, 520.0, delta=0.3)
 
@@ -328,6 +335,7 @@ class PeakAnalysisDialogTests(unittest.TestCase):
         try:
             dialog._y_combo.setCurrentIndex(dialog._y_combo.findData("Intensity"))
             self.assertTrue(dialog.preview_baseline())
+            self.wait_preview(dialog)
             self.assertIsNone(dialog.peak_result())
             self.assertFalse(dialog.create_peak_output())
             self.assertEqual(dialog._tabs.count(), 3)
@@ -364,11 +372,13 @@ class PeakAnalysisDialogTests(unittest.TestCase):
             dialog._y_combo.setCurrentIndex(dialog._y_combo.findData("Intensity"))
             dialog._prominence.setText("1")
             self.assertTrue(dialog.preview_peaks())
+            self.wait_preview(dialog)
             self.assertEqual(dialog._component_table.rowCount(), 1)
             model_combo = dialog._component_table.cellWidget(0, 2)
             self.assertGreaterEqual(model_combo.findData("lorentzian"), 0)
             model_combo.setCurrentIndex(model_combo.findData("gaussian"))
             self.assertTrue(dialog.preview_composite_fit())
+            self.wait_preview(dialog)
             self.assertGreater(dialog.composite_result().r_squared, 0.999)
             self.assertEqual(dialog.component_specs()[0].model_key, "gaussian")
         finally:
@@ -410,6 +420,7 @@ class PeakAnalysisDialogTests(unittest.TestCase):
             source._maximum_fit_evaluations.setValue(34567)
             source._center_tolerance.setValue(7.5)
             self.assertTrue(source.preview_peaks())
+            self.wait_preview(source)
             model_combo = source._component_table.cellWidget(0, 2)
             model_combo.setCurrentIndex(model_combo.findData("lorentzian"))
 
@@ -431,6 +442,7 @@ class PeakAnalysisDialogTests(unittest.TestCase):
             self.assertEqual(fit.maximum_evaluations, 34567)
             self.assertEqual(target.center_tolerance(), 7.5)
             self.assertTrue(target.preview_peaks())
+            self.wait_preview(target)
             loaded_combo = target._component_table.cellWidget(0, 2)
             self.assertEqual(loaded_combo.currentData(), "lorentzian")
         finally:
@@ -459,6 +471,7 @@ class PeakAnalysisDialogTests(unittest.TestCase):
             dialog._baseline_method.setCurrentIndex(dialog._baseline_method.findData("constant"))
             dialog._constant_value.setText("2")
             self.assertTrue(dialog.preview_baseline())
+            self.wait_preview(dialog)
             result = dialog.baseline_result()
             self.assertEqual(len(result.x), len(shift))
             self.assertEqual(dialog.preview_coordinates(), {"X": 1.0, "Y": 0.0})
@@ -466,6 +479,7 @@ class PeakAnalysisDialogTests(unittest.TestCase):
             self.assertEqual(result.provenance["X"], 1.0)
         finally:
             dialog.deleteLater()
+
 
 
 class PeakAnalysisMainWindowTests(unittest.TestCase):
@@ -691,6 +705,11 @@ class PeakAnalysisMainWindowTests(unittest.TestCase):
                 window._run_baseline_map(dataset, dialog, {})
             finally:
                 dialog.deleteLater()
+
+            deadline = time.monotonic() + 10.0
+            while window._jobs.is_running and time.monotonic() < deadline:
+                QTest.qWait(5)
+            self.assertFalse(window._jobs.is_running)
 
             output = window._workspace.get_dataset("Baseline Map_peak_signal")
             self.assertEqual(len(output.frame), 2 * len(shift))

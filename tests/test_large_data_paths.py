@@ -199,7 +199,8 @@ class EditorRefreshTests(unittest.TestCase):
         self.window = MainWindow()
 
     def tearDown(self) -> None:
-        self.window.close()
+        with patch.object(self.window, "_confirm_project_plot_changes", return_value=True):
+            self.window.close()
 
     def test_dataset_list_refresh_attaches_and_sizes_once(self) -> None:
         dataset = self.window._workspace.add_dataset(
@@ -741,7 +742,8 @@ class ProjectStreamingTests(unittest.TestCase):
                 "Confirm encryption password:",
             )
         finally:
-            window.close()
+            with patch.object(window, "_confirm_project_plot_changes", return_value=True):
+                window.close()
 
     def test_file_menu_exposes_each_project_security_save_mode(self) -> None:
         app = QApplication.instance() or QApplication([])
@@ -762,7 +764,8 @@ class ProjectStreamingTests(unittest.TestCase):
             self.assertIn("Save Signed + Encrypted Project As...", labels)
             self.assertIn("Signing Identities", labels)
         finally:
-            window.close()
+            with patch.object(window, "_confirm_project_plot_changes", return_value=True):
+                window.close()
 
     def test_signed_save_as_uses_selected_private_identity(self) -> None:
         app = QApplication.instance() or QApplication([])
@@ -810,7 +813,8 @@ class ProjectStreamingTests(unittest.TestCase):
                 "Private-key password:",
             )
         finally:
-            window.close()
+            with patch.object(window, "_confirm_project_plot_changes", return_value=True):
+                window.close()
 
     def test_main_window_prompts_to_open_encrypted_project(self) -> None:
         app = QApplication.instance() or QApplication([])
@@ -843,7 +847,8 @@ class ProjectStreamingTests(unittest.TestCase):
             self.assertEqual(load_project.call_count, 2)
             self.assertEqual(load_project.call_args.kwargs["password"], "secret")
         finally:
-            window.close()
+            with patch.object(window, "_confirm_project_plot_changes", return_value=True):
+                window.close()
 
     def test_failed_save_keeps_existing_project_file(self) -> None:
         workspace = Workspace()
@@ -957,7 +962,8 @@ class ProjectStreamingTests(unittest.TestCase):
             self.assertIn("may have been forged", warning.call_args.args[2])
             self.assertEqual(window._workspace.dataset_names(), [])
         finally:
-            window.close()
+            with patch.object(window, "_confirm_project_plot_changes", return_value=True):
+                window.close()
 
     def test_workspace_can_adopt_a_freshly_parsed_frame(self) -> None:
         frame = pd.DataFrame({"x": [1, 2, 3]})

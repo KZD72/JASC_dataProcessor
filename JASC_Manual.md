@@ -82,7 +82,7 @@ At first launch, JASC opens an empty workspace. Create a sheet, import data, or 
 | Workspace         | Central work area                 | Plot Inspector     |
 |                   |                                   |                    |
 | Datasets          | Data tab: worksheet editor        | Series             |
-| Saved Plots       | Plot tab: Matplotlib canvas       | Axes               |
+| Saved Plots       | Plots: independent plot tabs       | Axes               |
 |                   | and navigation toolbar            | Legend             |
 |                   |                                   | Locator            |
 +-------------------+-----------------------------------+--------------------+
@@ -90,9 +90,9 @@ At first launch, JASC opens an empty workspace. Create a sheet, import data, or 
 +----------------------------------------------------------------------------+
 ```
 
-- **Workspace Navigator**: The left dock contains the dataset and saved-plot lists. Select a dataset to display it in the Data tab. Select a saved plot to load it, subject to the unsaved-plot prompt.
+- **Workspace Navigator**: The left dock lists datasets and project plots. Select a dataset to display it in Data; select a plot to open or activate its independent tab without replacing another plot.
 - **Data tab**: Shows the selected worksheet and a summary containing its dimensions, memory estimate, metadata/formula counts, and backend.
-- **Plot tab**: Shows the current plot canvas, the standard Matplotlib navigation toolbar, and plot-management buttons.
+- **Plots tab**: Contains one tab per open plot, each with its own canvas, Matplotlib navigation toolbar, editor, and view state. Use **+** for another plot and **x** to close a view while keeping its plot in the project.
 - **Plot Inspector**: The right dock is synchronized with the Plot tab and contains Series, Axes, Legend, and Locator controls. It is hidden while the Data tab is active.
 - **Status bar**: Reports completed operations, selected outputs, large-data warnings, and batch progress summaries.
 
@@ -129,7 +129,7 @@ The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**
 | View | Navigator/section/inspector visibility and Reset View to Default |
 | Data | Duplicate/Rename/Remove Dataset; Add/Insert Row or Column; Resize Sheet; Fill Range; Smart Fill Selection; all Data Preparation tools; Column Metadata; Apply Formula |
 | Analysis | Derivative, Integral, Smoothing, Interpolation, FFT, Inverse FFT, Statistics, Baseline Correction, Peak Analysis, Raman Analysis, Custom Fit Models, Curve Fit |
-| Plot | New Empty Plot, Save Current Plot, Copy Current Plot to Clipboard, Load/Duplicate/Remove Selected Plot |
+| Plot | New Plot, Rename Current Plot, Copy Current Plot to Clipboard, Open/Duplicate/Delete Selected Plot |
 
 ### Keyboard shortcuts
 
@@ -154,7 +154,7 @@ The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**
 | `Ctrl+Shift+C` | Curve Fit |
 | `Ctrl+Shift+R` | Reset view layout |
 | `Ctrl+Alt+N` | New empty plot |
-| `Ctrl+Alt+S` | Save current plot |
+| `Ctrl+Alt+S` | Rename current plot |
 | `Ctrl+Alt+C` | Copy the current live plot visualization to the clipboard |
 
 ---
@@ -164,7 +164,7 @@ The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**
 ### Workspace concepts
 
 - A **dataset** is a named pandas worksheet with a table, formulas, column metadata, source path, and backend label.
-- A **saved plot** is a named snapshot of plot series, axes, legend, locator, style, and figure settings.
+- A **plot document** is an independent named project object containing series, axes, legend, locators, style, figure settings, and pending editor/view state. Its identity stays stable when renamed.
 - A **custom fit model** is an expression-based fitting function stored with the project.
 - The **workspace** is the collection of all three.
 
@@ -240,7 +240,7 @@ Because worksheet payloads are CSV, specialized pandas dtypes are reconstructed 
 - Click **Duplicate Sheet**, right-click a dataset and choose **Duplicate Sheet**, or use **Data > Duplicate Dataset** to create and open a fully independent copy. Values, column order and dtypes, formulas, metadata, source provenance, and backend label are retained. Copies are named `Sheet Copy`, `Sheet Copy (2)`, and so on; later edits do not affect the source.
 - Right-click a dataset for its common Open, Plot, Export, Data Preparation, Analysis, Duplicate, Rename, and Remove operations.
 - The same management actions are available from the **Data** menu.
-- Renaming a dataset updates references inside saved plots. The active plot draft is cleared so it cannot retain stale controls.
+- Renaming a dataset retargets open and closed plot documents, including pending editor bindings. Deleting a dataset retains dependent plot definitions and shows missing-source feedback so bindings can be repaired.
 - Deleting a dataset asks for confirmation. Dataset deletion is not part of worksheet Undo/Redo.
 
 ---
@@ -849,6 +849,27 @@ ascending or descending and evenly or irregularly spaced X values.
 Missing rows remain missing, while contiguous finite segments are analyzed
 independently. An optional physical-X range can limit the analysis.
 
+**Preview Baseline**, **Detect / Refresh Peaks**, and **Fit Selected Components**
+calculate in the background. You can keep editing controls while a preview runs.
+Changes to source, pixel, range, or algorithm settings invalidate outdated results
+immediately; typing pauses for 250 ms before the latest update starts. Only the
+newest pending request is kept. Native baseline/detection phases finish before a
+replacement starts; composite fits also check cancellation during optimization.
+
+Use **Stop Preview** to cancel pending/current preview work while keeping the
+dialog open. Editing fit models or reviewed peaks cancels an outdated fit without
+replacing the review table. Manual additions, repositioned/disabled peaks, removed
+candidates, and component model choices survive refreshes for the same source and
+pixel within the selected range. Changing the source/pixel or loading a parameter
+profile starts a new review.
+
+**OK** uses the current review and completes any required preview/fit before
+accepting. If you change inputs while acceptance is pending, the dialog stays open
+for review; click **OK** again when ready. **Cancel**, Esc, closing the dialog, or
+replacing/closing its project cancels previews and waits safely for active work to
+stop. Preview drawing is reduced to at most 6,000 points per curve; numerical
+results and exports keep their full resolution.
+
 For a normalized long-form map, choose **Long-form map (group by X/Y)** under
 **Source layout**. JASC selects this automatically when the worksheet contains
 multiple finite `X`/`Y` coordinate groups, but the control remains explicit so a
@@ -864,6 +885,20 @@ does the same for baseline/detection/fitting and matches reviewed components by
 center tolerance. The saved analysis retains `X` and `Y` on every metric, curve,
 peak, and parameter row. A single-pixel result remains available by choosing
 **Current preview spectrum / selected pixel** instead.
+
+Baseline-only map correction runs in the background after accepting the dialog.
+The status bar shows completed/total pixels and **Cancel**. Successful pixels form
+one ordinary corrected worksheet with raw, baseline, and corrected signal columns;
+Worksheet Metadata records requested/successful/failed pixel counts and error
+details. An individual baseline failure skips that pixel and lets the other
+pixels continue. If every pixel fails, the run reports an error without creating
+a worksheet. Numeric/text validation remains strict across all selected columns.
+
+Cancelling discards the entire pending map, including pixels already corrected.
+Changing the source data, column metadata, or project discards pending results.
+Closing the window requests cancellation and waits for the active worker to stop.
+A native baseline call finishes before cancellation takes effect. Inputs and
+assembled results remain in memory.
 
 The **Baseline** tab provides:
 
@@ -1057,8 +1092,7 @@ requested optional worksheets are published together. Changing the source data,
 column metadata, or project during fitting discards the pending results. Closing
 the window requests cancellation and waits safely for the worker to stop.
 
-Input snapshots and result curves remain in memory. Single-spectrum previews,
-baseline-only map correction, process parallelism, and advanced per-parameter
+Input snapshots and result curves remain in memory. Process parallelism and advanced per-parameter
 bound/fixed/tied editing remain follow-up work.
 
 ---
@@ -1356,16 +1390,41 @@ Choose marker shape, size, and color, then click **Add Locator**. Located values
 
 Use the embedded Matplotlib toolbar for home/reset, back/forward, pan, zoom, subplot configuration where offered, copying, and saving the rendered figure. **Copy** places the current on-screen canvas image on the system clipboard without applying export dimensions. The same command is available as the top-row **Copy Plot** button and as **Plot > Copy Current Plot to Clipboard** (`Ctrl+Alt+C`). The save action applies the configured full-image or plotting-area physical size only for export, then restores the responsive canvas. Both operations produce static images; neither saves editable JASC plot state.
 
-### Saved plots and unsaved drafts
+### Independent plot documents and tabs
 
-- **New / Empty Plot** is the default unsaved workspace entry.
-- Use the Plot menu, top-row buttons, or saved-plot right-click menu to create, save, load, duplicate, and remove plot definitions.
-- **Duplicate Saved Plot** creates a deep copy named `Plot Copy`, `Plot Copy (2)`, and so on, then loads that copy for editing. Series, mappings, locators, axes, legend, style, export geometry, and type-specific settings are retained. Editing or saving the copy does not alter the source definition. If the current draft has unsaved changes, the normal Save/Discard/Cancel protection appears first.
-- Saving under an existing name asks before replacement.
-- Starting or loading another plot while the current draft has unsaved changes offers **Save**, **Discard**, and **Cancel**. Resolve any staged series edits with **Update Series** or **Revert Edits** before saving.
-- Analysis-generated plots detach from a previously loaded saved plot so they cannot silently overwrite it.
+**Plots** contains a tab for each open plot. **New Plot** and **+** create another
+independent project document (automatically named `Plot 1`, `Plot 2`, etc.). The
+Workspace list includes both open and closed plots. Opening one that is already
+open activates its existing tab and keeps its edits.
 
-Saved definitions preserve queued series, locators, mappings, axis labels/scales/ranges/typography, legend, styles, figure dimensions, and type-specific settings. Save the overall `.jasc` project to persist them between application sessions.
+- Edit each plot through the shared inspector, which follows the active tab.
+  Series, axes, legend, locators, staged fields, viewport, and edit history belong
+  to that plot. Undo/Redo act on the active plot while Plots is selected.
+- Analysis-generated plots open as new documents. To combine results, open the
+  target plot and add another series from the result worksheet.
+- Close a tab with **x** to retain its document in the workspace. Reopen it from
+  the list to restore its pending fields and view. Closed canvases are released.
+- **Rename** changes a document's name without changing its identity. A name
+  already used by another plot is rejected. **Duplicate Plot** creates an
+  independent copy with a new identity.
+- **Delete Plot** removes the document after confirmation. It is separate from
+  closing a tab and does not delete its source worksheets.
+
+**Save Project** (`Ctrl+S`) writes all current plot documents, including closed
+plots and pending editor fields. There is no separate Save Plot step. A tab and
+project asterisk indicates plot changes since the last successful project save.
+Use **Update Series** to apply staged series changes to the drawing; saving a
+project preserves staged fields without silently applying them. Existing project
+files without document metadata still open, and signing/encryption remain
+available for the complete project.
+
+Closing the application or replacing/closing a project with unsaved plot changes
+offers **Save**, **Discard**, or **Cancel** once. Cancelling the file/password/key
+prompt or a failed save keeps the project open. Plot edit history is retained
+within the session, including tab close/reopen; it is not stored across project
+reloads. Source-structure changes clear affected history to avoid restoring old
+bindings.
+
 
 ---
 
@@ -1427,7 +1486,7 @@ Apply Formula uniquely exposes **Auto**, **Sequential**, and **Parallel processe
 
 ### Progress, cancellation, and summaries
 
-Peak/Raman batch and map fitting uses the background status-bar progress and
+Peak/Raman batch/map fitting and baseline-only map correction use status-bar progress and
 Cancel controls described above; cancellation publishes no partial results.
 Other batch operations display a modal progress dialog and check for cancellation
 between jobs/results. Their cancellation does not undo jobs already completed.
@@ -1580,7 +1639,7 @@ Consult `Roadmap.md` for planned work; roadmap entries are not instructions for 
 3. Clean data with non-destructive Data Preparation outputs.
 4. Apply formulas or analysis operations, using preflight for batch work.
 5. Inspect generated comments and batch summaries.
-6. Build an unsaved plot draft, configure axes/legend/locators, and save the plot definition.
+6. Create a plot document, configure axes/legend/locators, and save the project.
 7. Export final data/figures as needed.
 8. Save the `.jasc` project to retain the editable workspace.
 

@@ -39,7 +39,8 @@ class MainWindowWorkflowTests(unittest.TestCase):
         self.app.processEvents()
 
     def tearDown(self) -> None:
-        self.window.close()
+        with patch.object(self.window, "_confirm_project_plot_changes", return_value=True):
+            self.window.close()
         self.app.processEvents()
 
     def _queue_unsaved_plot(self) -> None:
@@ -114,45 +115,40 @@ class MainWindowWorkflowTests(unittest.TestCase):
         collect(menu)
         return texts
 
-    def test_new_plot_cancel_preserves_unsaved_draft(self) -> None:
+    def test_new_plot_preserves_existing_document_without_prompt(self) -> None:
         self._queue_unsaved_plot()
-        with patch.object(QMessageBox, "exec", return_value=QMessageBox.Cancel):
-            started = self.window._start_new_plot()
-        self.assertFalse(started)
+        document = self.window._plot_tab_widget.active_document
+        with patch.object(QMessageBox, "exec") as prompt:
+            self.assertTrue(self.window._start_new_plot())
+        prompt.assert_not_called()
+        self.assertFalse(self.window._plot_tab_widget.has_plot_series())
+        self.window._plot_tab_widget.open_plot(document.name)
         self.assertTrue(self.window._plot_tab_widget.has_plot_series())
 
-    def test_new_plot_discard_replaces_unsaved_draft(self) -> None:
+    def test_closing_new_tab_preserves_document(self) -> None:
         self._queue_unsaved_plot()
-        with patch.object(QMessageBox, "exec", return_value=QMessageBox.Discard):
-            started = self.window._start_new_plot()
-        self.assertTrue(started)
-        self.assertFalse(self.window._plot_tab_widget.has_plot_series())
+        manager = self.window._plot_tab_widget
+        document = manager.active_document
+        manager.close_tab(manager.tabs.currentIndex())
+        self.assertIn(document.name, self.window._workspace.plot_names())
+        manager.open_plot(document.name)
+        self.assertTrue(manager.has_plot_series())
 
-    def test_new_plot_save_replaces_draft_only_after_successful_save(self) -> None:
+    def test_new_plot_does_not_require_separate_save(self) -> None:
         self._queue_unsaved_plot()
-        with (
-            patch.object(QMessageBox, "exec", return_value=QMessageBox.Save),
-            patch.object(self.window, "_save_current_plot", return_value=True) as save_plot,
-        ):
-            started = self.window._start_new_plot()
-        save_plot.assert_called_once_with()
-        self.assertTrue(started)
-        self.assertFalse(self.window._plot_tab_widget.has_plot_series())
+        with patch.object(self.window, "_save_current_plot") as rename:
+            self.window._start_new_plot()
+        rename.assert_not_called()
+        self.assertEqual(len(self.window._workspace.plot_names()), 2)
 
-    def test_staged_series_edits_must_be_resolved_before_saving(self) -> None:
+    def test_pending_series_edits_are_retained_in_document(self) -> None:
         self._queue_unsaved_plot()
-        tab = self.window._plot_tab_widget
-        self.window._active_plot_baseline = self.window._plot_state_fingerprint()
-        tab._series_label_edit.setText("Staged label")
-
-        self.assertTrue(tab.has_unapplied_series_edits())
-        self.assertTrue(self.window._plot_has_unsaved_changes())
-        with patch.object(QMessageBox, "information") as information:
-            saved = self.window._save_current_plot()
-
-        self.assertFalse(saved)
-        information.assert_called_once()
-        self.assertEqual(self.window._workspace.plot_names(), [])
+        manager = self.window._plot_tab_widget
+        manager._series_label_edit.setText("Staged label")
+        self.assertTrue(manager.has_unapplied_series_edits())
+        manager.flush()
+        self.assertTrue(manager.active_document.editor_state["series_dirty"])
+        self.assertEqual(manager.active_document.editor_state["controls"]["_series_label_edit"]["value"], "Staged label")
 
     def test_dataset_context_menus_expose_common_workflows(self) -> None:
         dataset = self.window._workspace.add_dataset(
@@ -258,11 +254,11 @@ class MainWindowWorkflowTests(unittest.TestCase):
         self.assertEqual(
             self._menu_texts(plot_menu),
             [
-                "New Empty Plot",
-                "Save Current Plot...",
-                "Load Plot",
-                "Duplicate Saved Plot",
-                "Remove Saved Plot",
+                "New Plot",
+                "Rename Current Plot...",
+                "Open Plot",
+                "Duplicate Plot",
+                "Delete Plot",
             ],
         )
 

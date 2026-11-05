@@ -1,6 +1,101 @@
 # Large Data Loading and Clipboard Performance Audit
 
-Latest execution slice: 2026-10-30. Loading/clipboard re-evaluation: 2026-10-21. Original audit: 2026-08-17.
+Latest execution slice: 2026-11-05. Loading/clipboard re-evaluation: 2026-10-21. Original audit: 2026-08-17.
+
+## Asynchronous Spectral Dialog Previews (2026-11-05)
+
+`core/spectral_preview.py` receives independent column projections, selected
+pixel/range/settings, and optional current baseline/detection results. It performs
+numeric validation, representative-pixel selection, baseline correction,
+detection, and composite fitting without a dialog or live source. The dialog uses
+the existing background controller with immediate generation invalidation, a
+250 ms debounce, one active worker, and one replaceable pending intent. It also
+checks source identity, projected contents, and metadata before GUI publication.
+
+Fit-only work consumes current reviewed component specs. Acceptance no longer
+redetects and replaces the review table: it reuses valid previews or queues needed
+baseline/detection/fit phases, then accepts only current results. Manual review
+and component choices persist for the same source/pixel, with explicit source,
+pixel, or profile changes resetting review. Stop Preview, reject/Esc, programmatic
+disposal, parent closure, and project replacement cancel pending work and retain
+dialog/controller ownership through worker termination. Baseline/detection native
+calls remain cooperative at phase boundaries; optimization checks residuals.
+
+`benchmarks/spectral_preview_audit.py` drives the real dialog, includes explicit
+final canvas painting, and records native process memory and 10 ms Qt timer gaps:
+
+| Run | Result |
+| --- | --- |
+| Seeded 100,000-point baseline/detection/Gaussian fit, known constant background | 0.318 s; one peak; 100,000 fit rows; at most 6,000 displayed points per curve |
+| Same full preview heartbeat | p95 gap 91.43 ms; maximum 112.06 ms, including GUI publication and painting |
+| Ten rapid arPLS smoothness changes, 100,000 points | 0.704 s; only original/final worker requests (100,000 / 200,000 smoothness); p95 gap 10.82 ms; maximum 132.76 ms |
+| Cancel 1,000,000-point detection/fit request after a 100 ms timer | 0.504 s after delivery while native detection finished; no preview result published; p95/max timer gaps 10.76/10.99 ms |
+
+Raw results are `benchmarks/spectral_preview_fit_2026-11-05.json`,
+`benchmarks/spectral_preview_updates_2026-11-05.json`, and
+`benchmarks/spectral_preview_cancel_2026-11-05.json`. Fit and arPLS-update process
+peaks are 288.5 and 322.0 MiB; the million-point cancellation run peaks at 410.2 MiB.
+These are offscreen synthetic cases, not a vendor-file capacity or constant GUI
+latency claim. Full numerical results remain in memory. Source copying/comparison,
+initial source/range/pixel control population, Matplotlib artist construction,
+and painting still run on the GUI thread; all preview curves now use at most
+6,000 display points. Existing dependency drift remains unresolved.
+
+Regression coverage includes engine equivalence, descending/ranged pixel previews,
+strict text validation, heartbeat/GUI affinity, rapid settings and source switches,
+stale live-source edits, profile replacement, in-flight fit edits, manual review
+preservation, acceptance chaining and output validation, cancellation/retry,
+bounded drawing with full fit data, and dialog/parent/project lifetime handling.
+All **328 tests pass** in 95.202 s. Twenty preview regressions were added, and the
+existing synchronous dialog tests now await background completion. Two progress
+tests also wait for queued GUI delivery before inspecting the reported count.
+
+## Background Baseline-Only Map Correction (2026-11-05)
+
+Baseline-only maps now use `core/baseline_jobs.py` for numeric validation, per-pixel
+correction, failure provenance, and complete corrected-worksheet assembly. Shared
+`core/spectral_jobs.py` input/group iteration and the GUI's `_start_spectral_job`
+lifecycle serve both baseline maps and full Peak/Raman fits. Workers receive
+independent column projections and reviewed settings; they retain no live dialog,
+Dataset, or Workspace. Final source data/metadata checks, registry publication,
+and view updates run on the GUI thread.
+
+Progress counts completed/total pixels. Cancelling discards the entire pending
+run, including earlier successful pixels; native baseline calls finish before
+cancellation takes effect. Individual baseline errors skip that pixel and retain
+successful corrections, with counts and messages in Worksheet Metadata. Strict
+numeric/text validation still rejects malformed source columns before any pixel
+is processed. If all pixels fail, no worksheet is published. A publication failure
+rolls back the new worksheet, preserving existing names/data. Source/project
+replacement, queued-success cancellation, and deferred close use the same guards
+as fitting. Preview work remains synchronous.
+
+The extended `benchmarks/background_peak_fit_audit.py --baseline-only` harness
+corrects 400 seeded 601-point spectra with arPLS (7.34 MiB input), including GUI
+input capture, source verification, worksheet publication, and editor refresh:
+
+| Measurement | Result |
+| --- | --- |
+| Full correction | 3.103 s; all 400 pixels succeeded; 240,400 output rows |
+| 10 ms GUI heartbeat | 306 ticks; p95 gap 11.33 ms; maximum gap 41.90 ms |
+| Cancellation requested by a 100 ms timer | Stopped 3.61 ms after delivery; no worksheets/analyses published |
+| Process working set, before / after success | 277.4 / 292.2 MiB; process peak 310.6 MiB |
+
+Raw results: `benchmarks/background_baseline_map_2026-11-05.json` and
+`benchmarks/background_baseline_map_cancel_2026-11-05.json`. These measure timer
+delivery on synthetic data with Qt offscreen. Input copies and assembled results
+remain in memory, and snapshots/final comparisons/display refresh remain GUI
+work. They do not establish bounded-memory or larger-than-RAM correction. The
+recorded Python/Pandas/NumPy/Qt environment is unchanged from the fitting slice;
+dependency drift remains open.
+
+All **308 tests pass** in 74.169 s. Thirteen new regressions cover numerical
+equivalence for descending/ranged spectra, strict input validation, partial/all
+pixel failures, worker/GUI affinity and heartbeat, progress, cross-operation
+reentry guards, cancellation/restart and queued success, changed/non-visible
+sources and metadata, publication rollback, project close, and deferred window
+close. Existing fit/import/persistence regressions pass through the shared
+lifecycle, and the real-dialog baseline-map integration test now awaits completion.
 
 ## Background Peak/Raman Fitting Slice (2026-10-30)
 

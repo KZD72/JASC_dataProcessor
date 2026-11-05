@@ -160,6 +160,7 @@ class PlotTab(QWidget):
     options_visibility_changed = Signal(bool)
     dataset_created = Signal(str)
     plot_created = Signal(str)
+    state_changed = Signal()
 
     def __init__(
         self,
@@ -181,6 +182,7 @@ class PlotTab(QWidget):
         self._editing_series_row: int | None = None
         self._pending_surface_cut: tuple[PlotSeries, tuple[float, float, float, float]] | None = None
         self._preview_dirty = False
+        self._new_series_touched = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(200)
@@ -361,6 +363,87 @@ class PlotTab(QWidget):
             "settings": self._settings_from_controls().to_state(),
         }
 
+    def capture_editor_state(self) -> dict[str, object]:
+        """Keep raw pending fields, selection, and viewport independently of applied series."""
+        controls: dict[str, object] = {}
+        for name, widget in vars(self).items():
+            if isinstance(widget, QLineEdit):
+                controls[name] = {"kind": "text", "value": widget.text()}
+            elif isinstance(widget, QComboBox):
+                data = widget.currentData()
+                controls[name] = {"kind": "combo", "text": widget.currentText(),
+                                  "data": data if isinstance(data, (str, int, float, bool)) else None}
+            elif isinstance(widget, QCheckBox):
+                controls[name] = {"kind": "check", "value": widget.isChecked()}
+            elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                controls[name] = {"kind": "number", "value": widget.value()}
+        axes = self._plot_canvas.axes
+        return {
+            "controls": controls, "series_row": self._selected_series_row(),
+            "series_dirty": self._series_editor_dirty, "new_series_touched": self._new_series_touched,
+            "distribution_columns": self._selected_distribution_columns(),
+            "options_tab": self._options_tabs.currentIndex(),
+            "view": {"xlim": list(axes.get_xlim()), "ylim": list(axes.get_ylim()),
+                     "right_ylim": list(self._plot_canvas.right_axes.get_ylim())
+                     if self._plot_canvas.right_axes is not None else None},
+        }
+
+    def restore_editor_state(self, state: dict[str, object]) -> None:
+        """Restore even incomplete field text without committing it to the plotted series."""
+        if not state:
+            return
+        row = state.get("series_row")
+        if isinstance(row, int) and 0 <= row < self._series_list.count():
+            self._series_list.setCurrentRow(row)
+        elif row is None:
+            self._series_list.setCurrentRow(-1)
+            self._editing_series_row = None
+        self._loading_plot_settings = self._loading_series_controls = True
+        try:
+            for name, value in state.get("controls", {}).items():
+                widget = getattr(self, name, None)
+                if not isinstance(value, dict):
+                    continue
+                if isinstance(widget, QLineEdit) and value.get("kind") == "text":
+                    widget.setText(str(value.get("value", "")))
+                elif isinstance(widget, QComboBox) and value.get("kind") == "combo":
+                    index = widget.findData(value.get("data")) if value.get("data") is not None else -1
+                    if index < 0:
+                        index = widget.findText(str(value.get("text", "")))
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+                    elif widget.isEditable():
+                        widget.setEditText(str(value.get("text", "")))
+                    elif name.endswith(("_dataset_combo", "_column_combo", "_err_column_combo")) and value.get("text"):
+                        widget.addItem(str(value["text"]), value.get("data"))
+                        index = widget.count() - 1
+                        widget.setItemData(index, "This source is unavailable; choose a replacement.", Qt.ToolTipRole)
+                        widget.setCurrentIndex(index)
+                elif isinstance(widget, QCheckBox) and value.get("kind") == "check":
+                    widget.setChecked(bool(value.get("value")))
+                elif isinstance(widget, (QSpinBox, QDoubleSpinBox)) and value.get("kind") == "number":
+                    widget.setValue(value.get("value", widget.value()))
+            selected = state.get("distribution_columns", [])
+            for index in range(self._distribution_columns_list.count()):
+                item = self._distribution_columns_list.item(index)
+                item.setSelected(item.text() in selected)
+            self._options_tabs.setCurrentIndex(int(state.get("options_tab", 0)))
+        finally:
+            self._loading_plot_settings = self._loading_series_controls = False
+        self._new_series_touched = bool(state.get("new_series_touched", False))
+        self._update_series_editor_state()
+        self._series_editor_dirty = bool(state.get("series_dirty", self._series_editor_dirty))
+        view = state.get("view", {})
+        try:
+            if isinstance(view, dict) and view.get("xlim") and view.get("ylim"):
+                self._plot_canvas.axes.set_xlim(view["xlim"])
+                self._plot_canvas.axes.set_ylim(view["ylim"])
+                if view.get("right_ylim") and self._plot_canvas.right_axes is not None:
+                    self._plot_canvas.right_axes.set_ylim(view["right_ylim"])
+                self._plot_canvas.canvas.draw_idle()
+        except (TypeError, ValueError):
+            pass
+
     def options_widget(self) -> QWidget:
         """Return the plot controls widget for placement in an external inspector."""
         return self._plot_options_scroll
@@ -375,6 +458,7 @@ class PlotTab(QWidget):
             raise ValueError("Saved plot locator data is invalid.")
 
         self._series_editor_dirty = False
+        self._new_series_touched = False
         self._editing_series_row = None
         self._plot_series = [
             self._plot_series_from_state(item)
@@ -396,7 +480,7 @@ class PlotTab(QWidget):
         self.refresh_controls()
         self._select_first_series_for_editing()
         self._prefill_axis_labels_from_plot_context()
-        self._render_plot(silent_if_empty=True)
+        self._render_plot(silent_if_empty=True, show_validation_messages=False)
 
     def queue_fit_plot(
         self,
@@ -1094,7 +1178,7 @@ class PlotTab(QWidget):
         self._active_plot_label = QLabel("Unsaved plot")
         self._active_plot_label.setObjectName("SectionLabel")
 
-        self._save_plot_button = QPushButton("Save Plot")
+        self._save_plot_button = QPushButton("Rename")
         self._save_plot_button.clicked.connect(self.save_plot_requested.emit)
         self._copy_plot_button = QPushButton("Copy Plot")
         self._copy_plot_button.setToolTip(
@@ -1103,9 +1187,9 @@ class PlotTab(QWidget):
         self._copy_plot_button.clicked.connect(self.copy_plot_to_clipboard)
         self._new_plot_button = QPushButton("New Plot")
         self._new_plot_button.clicked.connect(self.new_plot_requested.emit)
-        self._load_plot_button = QPushButton("Load Selected")
+        self._load_plot_button = QPushButton("Open Selected")
         self._load_plot_button.clicked.connect(self.load_plot_requested.emit)
-        self._remove_plot_button = QPushButton("Remove Saved")
+        self._remove_plot_button = QPushButton("Delete Plot")
         self._remove_plot_button.clicked.connect(self.remove_plot_requested.emit)
 
         self._toggle_options_button = QPushButton("Hide Inspector" if self._external_options else "Hide Options")
@@ -1700,10 +1784,16 @@ class PlotTab(QWidget):
         if self._loading_series_controls:
             return
         self._update_series_editor_state()
+        if self._selected_series_row() is None:
+            self._new_series_touched = True
+        self.state_changed.emit()
 
     def _schedule_preview(self, _value: object = None) -> None:
         """Mark the canvas stale and schedule one redraw when live preview is enabled."""
-        if self._loading_plot_settings or not self._plot_series:
+        if self._loading_plot_settings:
+            return
+        self.state_changed.emit()
+        if not self._plot_series:
             return
         self._preview_dirty = True
         self._preview_status_label.setText("Preview out of date")

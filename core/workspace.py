@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
@@ -12,6 +13,7 @@ from core.data_backends import PANDAS_BACKEND, normalize_backend
 from core.operations import rename_worksheet_references
 from core.spectral_analysis import SpectralAnalysisSession
 from core.large_data import LargeDataset
+from core.plot_documents import rename_editor_columns, rename_editor_dataset
 from models.fit_functions import CustomFitModel
 
 
@@ -228,6 +230,8 @@ class SavedPlot:
 
     name: str
     state: dict[str, object] = field(default_factory=dict)
+    plot_id: str = field(default_factory=lambda: uuid4().hex)
+    editor_state: dict[str, object] = field(default_factory=dict)
 
 
 class Workspace:
@@ -356,11 +360,18 @@ class Workspace:
         """Return the current dataset names in insertion order."""
         return list(self._datasets.keys())
 
-    def add_plot(self, name: str, state: dict[str, object]) -> SavedPlot:
+    def add_plot(
+        self, name: str, state: dict[str, object], *, plot_id: str | None = None,
+        editor_state: dict[str, object] | None = None,
+    ) -> SavedPlot:
         """Add a saved plot under a unique display name and return it."""
         clean_name = name.strip() or "Plot"
         unique_name = self._make_unique_plot_name(clean_name)
-        plot = SavedPlot(name=unique_name, state=deepcopy(state))
+        identity = plot_id or uuid4().hex
+        if any(plot.plot_id == identity for plot in self._plots.values()):
+            raise ValueError("Duplicate plot identity in project.")
+        plot = SavedPlot(name=unique_name, state=deepcopy(state), plot_id=identity,
+                         editor_state=deepcopy(editor_state or {}))
         self._plots[unique_name] = plot
         return plot
 
@@ -382,7 +393,19 @@ class Workspace:
         if name not in self._plots:
             raise KeyError(f"Saved plot '{name}' does not exist in the workspace.")
         source = self._plots[name]
-        return self.add_plot(self._copy_base_name(source.name), source.state)
+        return self.add_plot(self._copy_base_name(source.name), source.state, editor_state=source.editor_state)
+
+    def rename_plot(self, old_name: str, new_name: str) -> SavedPlot:
+        """Rename a document without changing identity or replacing another plot."""
+        clean = new_name.strip()
+        if not clean:
+            raise ValueError("Enter a plot name.")
+        if clean != old_name and clean in self._plots:
+            raise ValueError(f"A plot named '{clean}' already exists. Choose another name.")
+        plot = self._plots[old_name]
+        plot.name = clean
+        self._plots = {clean if key == old_name else key: value for key, value in self._plots.items()}
+        return plot
 
     def get_plot(self, name: str) -> SavedPlot:
         """Return the saved plot for a workspace name."""
@@ -513,6 +536,7 @@ class Workspace:
     def _rename_dataset_references_in_plots(self, old_name: str, new_name: str) -> None:
         """Update saved plot series when a referenced dataset is renamed."""
         for saved_plot in self._plots.values():
+            rename_editor_dataset(saved_plot.editor_state, old_name, new_name)
             series_list = saved_plot.state.get("series")
             if not isinstance(series_list, list):
                 continue
@@ -536,6 +560,7 @@ class Workspace:
             return
 
         for saved_plot in self._plots.values():
+            rename_editor_columns(saved_plot.editor_state, dataset_name, rename_map)
             series_list = saved_plot.state.get("series")
             if not isinstance(series_list, list):
                 continue

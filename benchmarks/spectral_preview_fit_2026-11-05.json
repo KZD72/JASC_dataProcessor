@@ -1,0 +1,42 @@
+{
+  "kind": "fit",
+  "samples": 100000,
+  "seed": 123,
+  "elapsed_s": 0.31843800004571676,
+  "heartbeat_ticks": 14,
+  "heartbeat_p95_gap_s": 0.09143264009617263,
+  "heartbeat_max_gap_s": 0.11205950006842613,
+  "cancel_requested": false,
+  "cancel_completion_s": null,
+  "setting_changes": 0,
+  "worker_requests": [
+    {
+      "kind": "peaks",
+      "smoothness": 100000.0
+    },
+    {
+      "kind": "fit",
+      "smoothness": 100000.0
+    }
+  ],
+  "baseline_rows": 100000,
+  "peak_count": 1,
+  "fit_rows": 100000,
+  "maximum_drawn_points": 6000,
+  "memory_before": {
+    "rss_mib": 244.2265625,
+    "peak_rss_mib": 244.2265625
+  },
+  "memory_after": {
+    "rss_mib": 268.015625,
+    "peak_rss_mib": 288.4921875
+  },
+  "environment": {
+    "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+    "pandas": "3.0.3",
+    "numpy": "2.4.4",
+    "qt": "6.11.0"
+  },
+  "qt_offscreen": true,
+  "errors": []
+}

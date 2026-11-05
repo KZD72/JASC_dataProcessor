@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,7 +12,8 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -42,7 +44,6 @@ from math_engine.baseline import (
     BASELINE_METHODS,
     BaselineParameters,
     BaselineResult,
-    correct_baseline,
 )
 from math_engine.calculus import MathOperationError, validate_numeric_column_metadata
 from math_engine.composite_peak_fit import (
@@ -51,7 +52,6 @@ from math_engine.composite_peak_fit import (
     PeakComponentSpec,
     available_composite_peak_models,
     build_peak_component_spec,
-    fit_composite_peaks,
 )
 from math_engine.peak_detection import (
     PEAK_POLARITIES,
@@ -59,8 +59,13 @@ from math_engine.peak_detection import (
     PeakDetectionParameters,
     PeakDetectionResult,
     PeakRecord,
-    detect_peaks,
 )
+from core.jobs import JobProgress
+from core.spectral_jobs import SpectralSource
+from core.spectral_preview import (
+    PreviewKind, SpectralPreviewRequest, SpectralPreviewResult, prepare_spectral_preview,
+)
+from ui.background_jobs import BackgroundJobController
 
 
 ANALYSIS_PROFILE_SCHEMA = "jasc.peak-analysis-profile"
@@ -101,7 +106,20 @@ class PeakAnalysisDialog(QDialog):
         self._peak_result: PeakDetectionResult | None = None
         self._composite_result: CompositeFitResult | None = None
         self._reviewed_peaks: list[tuple[bool, PeakRecord]] = []
+        self._removed_peak_centers: list[float] = []
         self._preview_generation = 0
+        self._preview_jobs = BackgroundJobController(self)
+        self._preview_jobs.finished.connect(self._preview_finished)
+        self._preview_jobs.progress.connect(self._preview_progress)
+        self._pending_preview: tuple[PreviewKind, int, bool] | None = None
+        self._active_preview: tuple[PreviewKind, int, bool] | None = None
+        self._result_request: SpectralPreviewRequest | None = None
+        self._result_frame: pd.DataFrame | None = None
+        self._accept_pending = False
+        self._fit_after_preview = False
+        self._preview_close_result: int | None = None
+        self._delete_when_idle = False
+        self._preview_closed = False
         self._scheduled_preview_generation = 0
         self._updating_table = False
         self._profile_loading = False
@@ -109,7 +127,7 @@ class PeakAnalysisDialog(QDialog):
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._run_scheduled_preview)
-        self.finished.connect(lambda _result: self._preview_timer.stop())
+        self.finished.connect(self._stop_preview_timer)
 
         self._tabs = QTabWidget()
         self._source_tab = self._build_source_tab(default_x_column, default_y_column)
@@ -148,6 +166,10 @@ class PeakAnalysisDialog(QDialog):
         preview_row = QHBoxLayout()
         preview_row.addWidget(preview_baseline)
         preview_row.addWidget(self._preview_peaks_button)
+        self._stop_preview_button = QPushButton("Stop Preview")
+        self._stop_preview_button.clicked.connect(self._cancel_preview)
+        self._stop_preview_button.setEnabled(False)
+        preview_row.addWidget(self._stop_preview_button)
         left_layout.addLayout(preview_row)
         left_layout.addWidget(self._status_label)
 
@@ -166,7 +188,7 @@ class PeakAnalysisDialog(QDialog):
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = self._buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
@@ -367,6 +389,7 @@ class PeakAnalysisDialog(QDialog):
     def _build_fit_tab(self) -> QWidget:
         tab = QWidget()
         self._component_table = QTableWidget(0, 3)
+        self._component_table.itemChanged.connect(self._clear_composite_preview)
         self._component_table.setHorizontalHeaderLabels(["Use", "Detected center", "Peak model"])
         self._component_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self._component_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -532,21 +555,258 @@ class PeakAnalysisDialog(QDialog):
             self._smoothing_method.currentIndexChanged.connect(self._update_smoothing_controls)
 
     def _schedule_preview(self, *_args: object) -> None:
-        """Debounce previews and discard callbacks from stale generations."""
-        if self._profile_loading:
+        """Invalidate immediately, debounce, and keep only the newest desired input."""
+        if self._profile_loading or self._preview_closed or self._preview_close_result is not None:
             return
         self._preview_generation += 1
         self._scheduled_preview_generation = self._preview_generation
+        self._pending_preview = None
+        self._accept_pending = self._fit_after_preview = False
+        self._baseline_result = self._peak_result = self._composite_result = None
+        self._result_request = self._result_frame = None
+        self._preview_jobs.cancel()
         self._preview_timer.start(250)
+        self._status_label.setText("Preview settings changed; preparing an update...")
+        self._fit_metrics.setText("Fit preview needs refreshing.")
+        self._draw_preview()
+        self._update_preview_buttons()
 
     def _run_scheduled_preview(self) -> None:
-        """Run only the newest debounced preview request."""
-        if self._scheduled_preview_generation != self._preview_generation:
+        if self._scheduled_preview_generation == self._preview_generation:
+            self._request_preview("baseline" if self._baseline_only else "peaks", show_errors=False)
+
+    def _stop_preview_timer(self, _result: int) -> None:
+        self._preview_timer.stop()
+
+    @property
+    def preview_busy(self) -> bool:
+        return self._preview_jobs.is_running or self._pending_preview is not None or self._preview_timer.isActive()
+
+    def _update_preview_buttons(self) -> None:
+        self._stop_preview_button.setEnabled(self.preview_busy and self._preview_close_result is None)
+        self._buttons.button(QDialogButtonBox.Ok).setEnabled(
+            not self._accept_pending and self._preview_close_result is None)
+
+    def _source_matches(self, request: SpectralPreviewRequest, frame: pd.DataFrame) -> bool:
+        if self._frame is not frame or self._frames.get(request.source.name) is not frame:
+            return False
+        columns = list(request.source.frame.columns)
+        return (set(columns).issubset(frame.columns)
+                and frame.loc[:, columns].equals(request.source.frame)
+                and frame.attrs == request.source.frame.attrs)
+
+    def _cache_is_current(self) -> bool:
+        return bool(self._result_request is not None and self._result_frame is not None
+                    and self._source_matches(self._result_request, self._result_frame))
+
+    def _make_preview_request(self, kind: PreviewKind) -> SpectralPreviewRequest:
+        x_column, y_column = self.x_column(), self.y_column()
+        if not x_column or not y_column:
+            raise MathOperationError("Choose both the X axis and intensity column.")
+        if x_column == y_column:
+            raise MathOperationError("Choose different columns for the X axis and intensity.")
+        coordinates = self.preview_coordinates()
+        if self.source_layout() == "map" and not coordinates:
+            raise MathOperationError("Map preview requires a finite X/Y pixel. Choose a preview pixel.")
+        columns = list(dict.fromkeys([*(('X', 'Y') if coordinates else ()), x_column, y_column]))
+        source = SpectralSource(self._dataset_name,
+            self._frame.loc[:, [name for name in columns if name in self._frame]].copy(deep=True))
+        cached = self._cache_is_current()
+        return SpectralPreviewRequest(
+            kind, source, x_column, y_column, coordinates, self.analysis_range(),
+            self.baseline_parameters(),
+            detection_parameters=None if self._baseline_only else self.detection_parameters(),
+            fit_parameters=self.composite_parameters() if kind == "fit" else None,
+            components=tuple(deepcopy(self.component_specs())) if kind == "fit" else (),
+            baseline=self._baseline_result if cached else None,
+            peaks=self._peak_result if cached and kind == "fit" else None,
+        )
+
+    def _request_preview(self, kind: PreviewKind, *, show_errors: bool, for_accept: bool = False) -> bool:
+        """Queue a preview; True means accepted for asynchronous computation."""
+        if self._preview_closed or self._preview_close_result is not None:
+            return False
+        self._preview_timer.stop()
+        if not for_accept:
+            self._accept_pending = False
+        if not self._cache_is_current():
+            self._baseline_result = self._peak_result = self._composite_result = None
+            self._result_request = self._result_frame = None
+        self._fit_after_preview = kind == "fit" and self._peak_result is None
+        if self._fit_after_preview:
+            kind = "peaks"
+        self._preview_generation += 1
+        self._pending_preview = kind, self._preview_generation, show_errors
+        self._preview_jobs.cancel()
+        self._status_label.setText("Preview queued; waiting for the current calculation..."
+                                   if self._preview_jobs.is_running else "Preparing preview...")
+        started = self._start_pending_preview()
+        self._update_preview_buttons()
+        return started
+
+    def _start_pending_preview(self) -> bool:
+        if self._preview_jobs.is_running or self._pending_preview is None:
+            return True
+        kind, generation, show_errors = self._pending_preview
+        self._pending_preview = None
+        try:
+            request = self._make_preview_request(kind)
+        except (MathOperationError, ValueError, KeyError) as exc:
+            self._preview_failed(str(exc), show_errors)
+            return False
+        frame = self._frame
+        self._active_preview = kind, generation, show_errors
+
+        def current() -> bool:
+            return (generation == self._preview_generation and not self._preview_closed
+                    and self._preview_close_result is None)
+
+        def succeeded(result: SpectralPreviewResult) -> None:
+            if not current():
+                return
+            if not self._source_matches(request, frame):
+                self._schedule_preview()
+                self._status_label.setText("Source data changed; refreshing preview...")
+                return
+            self._apply_preview(request, result)
+            self._result_request, self._result_frame = request, frame
+            if self._fit_after_preview:
+                self._fit_after_preview = False
+                self._request_preview("fit", show_errors=show_errors, for_accept=self._accept_pending)
+            elif self._accept_pending:
+                self.accept()
+
+        def failed(message: str) -> None:
+            if current():
+                self._preview_failed(message, show_errors)
+
+        self._preview_jobs.start(
+            lambda context: prepare_spectral_preview(context, request), on_success=succeeded,
+            on_error=failed, on_cancelled=lambda: None,
+        )
+        return True
+
+    def _preview_failed(self, message: str, show_errors: bool) -> None:
+        self._accept_pending = self._fit_after_preview = False
+        self._composite_result = None
+        self._status_label.setText(message)
+        self._fit_metrics.setText(message)
+        self._update_preview_buttons()
+        if show_errors:
+            QMessageBox.warning(self, self.windowTitle(), message)
+
+    def _preview_progress(self, progress: JobProgress) -> None:
+        if (self._active_preview is not None and self._active_preview[1] == self._preview_generation
+                and self._preview_close_result is None):
+            self._status_label.setText(progress.message)
+
+    def _preview_finished(self) -> None:
+        # A completion callback may already have started the next phase.
+        if self._preview_jobs.is_running:
             return
-        if self._baseline_only:
-            self.preview_baseline(show_errors=False)
+        superseded = self._active_preview is not None and self._active_preview[1] != self._preview_generation
+        self._active_preview = None
+        if self._preview_close_result is not None:
+            self.done(self._preview_close_result)
+        elif self._pending_preview is not None:
+            self._start_pending_preview()
+        elif superseded and not self._preview_timer.isActive():
+            self._status_label.setText("Preview cancelled.")
+        self._update_preview_buttons()
+
+    def _cancel_preview(self, *_args: object) -> None:
+        self._preview_generation += 1
+        self._preview_timer.stop()
+        self._pending_preview = None
+        self._accept_pending = self._fit_after_preview = False
+        self._preview_jobs.cancel()
+        self._status_label.setText("Stopping preview; waiting for the current calculation..."
+                                   if self._preview_jobs.is_running else "Preview cancelled.")
+        self._update_preview_buttons()
+
+    def _apply_preview(self, request: SpectralPreviewRequest, result: SpectralPreviewResult) -> None:
+        """Publish only a current generation, preserving review edits for fit-only work."""
+        self._baseline_result = result.baseline
+        if request.kind == "peaks" and result.peaks is not None:
+            previous = [(enabled, peak) for enabled, peak in self._reviewed_peaks
+                        if peak.manual_status != "automatic"]
+            reviewed = [(True, peak) for peak in result.peaks.peaks
+                        if not any(abs(peak.center - center) <= self.center_tolerance()
+                                   for center in self._removed_peak_centers)]
+            finite_x = result.baseline.x[np.isfinite(result.baseline.x)]
+            for enabled, peak in previous:
+                if not finite_x.size or not float(finite_x.min()) <= peak.center <= float(finite_x.max()):
+                    continue
+                if reviewed and peak.manual_status != "added":
+                    nearest = min(range(len(reviewed)), key=lambda i: abs(reviewed[i][1].center - peak.center))
+                    if abs(reviewed[nearest][1].center - peak.center) <= self.center_tolerance():
+                        reviewed.pop(nearest)
+                reviewed.append((enabled, peak))
+            self._reviewed_peaks = sorted(reviewed, key=lambda entry: entry[1].center)
+            self._peak_result = result.peaks
+            self._populate_peak_table()
+            self._populate_component_table()
+            self._composite_result = None
+            warning = f" Warnings: {'; '.join(result.peaks.warnings)}" if result.peaks.warnings else ""
+            self._status_label.setText(f"Detected {len(result.peaks.peaks)} candidate peak(s); robust noise "
+                                       f"estimate={result.peaks.noise_estimate:.6g}.{warning}")
+        elif request.kind == "baseline":
+            baseline = result.baseline
+            warning = f" Warnings: {'; '.join(baseline.warnings)}" if baseline.warnings else ""
+            self._status_label.setText(f"Baseline ready: {BASELINE_METHODS[baseline.parameters.method]}; "
+                f"iterations={baseline.iterations}; converged={'yes' if baseline.converged else 'no'}.{warning}")
+        if result.fit is not None:
+            self._composite_result = result.fit
+            fit = result.fit
+            self._fit_metrics.setText(f"Converged={'yes' if fit.converged else 'no'}; "
+                f"R?={fit.r_squared:.6g}; RMSE={fit.rmse:.6g}; AIC={fit.aic:.6g}; BIC={fit.bic:.6g}. {fit.message}")
+            self._status_label.setText("Composite fit preview ready.")
+        self._draw_preview()
+
+    def reject(self) -> None:
+        self.done(QDialog.Rejected)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.reject()
+        if self._preview_jobs.is_running:
+            event.ignore()
         else:
-            self.preview_peaks(show_errors=False)
+            event.accept()
+
+    def done(self, result: int) -> None:
+        if self._preview_closed:
+            if self._delete_when_idle:
+                super().deleteLater()
+            return
+        self._preview_timer.stop()
+        self._pending_preview = None
+        self._accept_pending = self._fit_after_preview = False
+        self._preview_generation += 1
+        self._preview_close_result = result
+        self._preview_jobs.cancel()
+        if self._preview_jobs.is_running:
+            self._status_label.setText("Closing; waiting for the current preview to stop...")
+            self._update_preview_buttons()
+            return
+        self._preview_closed = True
+        super().done(result)
+        if self._delete_when_idle:
+            super().deleteLater()
+
+    def deleteLater(self) -> None:
+        """Retain the dialog/controller until workers stop, including programmatic disposal."""
+        self._delete_when_idle = True
+        if self._preview_closed and not self._preview_jobs.is_running:
+            super().deleteLater()
+            return
+        self.done(QDialog.Rejected)
+
+    def event(self, event: QEvent) -> bool:
+        if (event.type() == QEvent.DeferredDelete and hasattr(self, "_preview_jobs")
+                and self._preview_jobs.is_running):
+            self.deleteLater()
+            return True
+        return super().event(event)
 
     def _update_baseline_controls(self, *_args: object) -> None:
         method = str(self._baseline_method.currentData())
@@ -624,6 +884,7 @@ class PeakAnalysisDialog(QDialog):
             self._peak_result = None
             self._composite_result = None
             self._reviewed_peaks = []
+            self._removed_peak_centers = []
             self._populate_peak_table()
             self._populate_component_table()
             self._schedule_preview()
@@ -634,6 +895,7 @@ class PeakAnalysisDialog(QDialog):
         self._peak_result = None
         self._composite_result = None
         self._reviewed_peaks = []
+        self._removed_peak_centers = []
         self._populate_peak_table()
         self._populate_component_table()
         self._schedule_preview()
@@ -682,6 +944,7 @@ class PeakAnalysisDialog(QDialog):
         self._peak_result = None
         self._composite_result = None
         self._reviewed_peaks = []
+        self._removed_peak_centers = []
         self._populate_peak_table()
         self._populate_component_table()
         self._schedule_preview()
@@ -763,118 +1026,13 @@ class PeakAnalysisDialog(QDialog):
             smoothing_polynomial_order=int(self._smoothing_order.value()),
         )
 
-    def _source_arrays(self) -> tuple[str, str, np.ndarray, np.ndarray]:
-        x_column = self._x_combo.currentText().strip()
-        y_column = self._y_combo.currentData()
-        if not x_column or not y_column:
-            raise MathOperationError("Choose both the X axis and intensity column.")
-        if x_column == str(y_column):
-            raise MathOperationError("Choose different columns for the X axis and intensity.")
-        source_frame = self._frame
-        if self.source_layout() == "map":
-            coordinates = self.preview_coordinates()
-            if not coordinates:
-                raise MathOperationError(
-                    "Map preview requires a finite X/Y pixel. Choose a preview pixel."
-                )
-            map_x_numeric = pd.to_numeric(self._frame["X"], errors="coerce")
-            map_y_numeric = pd.to_numeric(self._frame["Y"], errors="coerce")
-            validate_numeric_column_metadata(self._frame, "X", map_x_numeric)
-            validate_numeric_column_metadata(self._frame, "Y", map_y_numeric)
-            map_x = map_x_numeric.to_numpy(dtype=float)
-            map_y = map_y_numeric.to_numpy(dtype=float)
-            selected = np.isclose(map_x, coordinates["X"], rtol=0.0, atol=1.0e-12) & np.isclose(
-                map_y, coordinates["Y"], rtol=0.0, atol=1.0e-12
-            )
-            source_frame = self._frame.loc[selected]
-            if source_frame.empty:
-                raise MathOperationError("The selected X/Y preview pixel contains no rows.")
-        x_numeric = pd.to_numeric(source_frame[x_column], errors="coerce")
-        y_numeric = pd.to_numeric(source_frame[str(y_column)], errors="coerce")
-        validate_numeric_column_metadata(self._frame, x_column, x_numeric)
-        validate_numeric_column_metadata(self._frame, str(y_column), y_numeric)
-        x = x_numeric.to_numpy(dtype=float)
-        y = y_numeric.to_numpy(dtype=float)
-        if self._range_checkbox.isChecked():
-            lower = min(self._range_min.value(), self._range_max.value())
-            upper = max(self._range_min.value(), self._range_max.value())
-            outside = (x < lower) | (x > upper)
-            x = x.copy()
-            y = y.copy()
-            x[outside] = np.nan
-            y[outside] = np.nan
-        return x_column, str(y_column), x, y
-
     def preview_baseline(self, *_args: object, show_errors: bool = True) -> bool:
-        """Calculate and display the current baseline settings."""
-        try:
-            x_column, y_column, x, y = self._source_arrays()
-            self._baseline_result = correct_baseline(
-                x,
-                y,
-                self.baseline_parameters(),
-                provenance={
-                    "source_sheet": self._dataset_name,
-                    "x_column": x_column,
-                    "y_column": y_column,
-                    **self.preview_coordinates(),
-                },
-            )
-            self._peak_result = None
-            self._reviewed_peaks = []
-            self._populate_peak_table()
-            self._draw_preview()
-            result = self._baseline_result
-            warning_text = f" Warnings: {'; '.join(result.warnings)}" if result.warnings else ""
-            self._status_label.setText(
-                f"Baseline ready: {BASELINE_METHODS[result.parameters.method]}; "
-                f"iterations={result.iterations}; converged={'yes' if result.converged else 'no'}."
-                f"{warning_text}"
-            )
-            return True
-        except (MathOperationError, ValueError) as exc:
-            self._status_label.setText(str(exc))
-            if show_errors:
-                QMessageBox.warning(self, self.windowTitle(), str(exc))
-            return False
+        """Queue baseline preview; results arrive on the GUI thread."""
+        return self._request_preview("baseline", show_errors=show_errors)
 
     def preview_peaks(self, *_args: object, show_errors: bool = True) -> bool:
-        """Calculate baseline plus detector output and refresh the review table."""
-        if not self.preview_baseline(show_errors=show_errors):
-            return False
-        assert self._baseline_result is not None
-        try:
-            x_column, y_column, _x, _y = self._source_arrays()
-            self._peak_result = detect_peaks(
-                self._baseline_result.x,
-                self._baseline_result.raw,
-                self._baseline_result.corrected,
-                self.detection_parameters(),
-                source_sheet=self._dataset_name,
-                channel=y_column,
-                map_coordinates=self.preview_coordinates(),
-                provenance={
-                    "x_column": x_column,
-                    "baseline": self.baseline_parameters().to_dict(),
-                    **self.preview_coordinates(),
-                },
-            )
-            self._reviewed_peaks = [(True, peak) for peak in self._peak_result.peaks]
-            self._populate_peak_table()
-            self._populate_component_table()
-            self._composite_result = None
-            self._draw_preview()
-            warning_text = f" Warnings: {'; '.join(self._peak_result.warnings)}" if self._peak_result.warnings else ""
-            self._status_label.setText(
-                f"Detected {len(self._peak_result.peaks)} candidate peak(s); robust noise "
-                f"estimate={self._peak_result.noise_estimate:.6g}.{warning_text}"
-            )
-            return True
-        except (MathOperationError, ValueError) as exc:
-            self._status_label.setText(str(exc))
-            if show_errors:
-                QMessageBox.warning(self, "Peak Detection", str(exc))
-            return False
+        """Queue baseline/detection without blocking the dialog."""
+        return self._request_preview("peaks", show_errors=show_errors)
 
     def _draw_preview(self) -> None:
         self._figure.clear()
@@ -906,9 +1064,11 @@ class PeakAnalysisDialog(QDialog):
         )
         if self._composite_result is not None:
             fit = self._composite_result.fit_frame
-            lower.plot(fit["x"], fit["total_fit"], color="#D62728", linewidth=1.5, label="Composite fit")
+            fit_positions = _preview_positions(fit["x"].to_numpy(), fit["total_fit"].to_numpy(), maximum=6000)
+            displayed_fit = fit.iloc[fit_positions]
+            lower.plot(displayed_fit["x"], displayed_fit["total_fit"], color="#D62728", linewidth=1.5, label="Composite fit")
             for column in (name for name in fit.columns if name.startswith("peak_")):
-                lower.plot(fit["x"], fit[column], linewidth=0.9, alpha=0.75, label=column)
+                lower.plot(displayed_fit["x"], displayed_fit[column], linewidth=0.9, alpha=0.75, label=column)
         for enabled, peak in self._reviewed_peaks:
             color = "#2E8B57" if peak.polarity == "positive" else "#B03A8F"
             if not enabled:
@@ -948,64 +1108,79 @@ class PeakAnalysisDialog(QDialog):
         """Keep reviewed candidates separate while assigning one registered model each."""
         if not hasattr(self, "_component_table"):
             return
-        previous: dict[float, tuple[str, bool]] = {}
-        for row in range(self._component_table.rowCount()):
-            center_item = self._component_table.item(row, 1)
-            use_item = self._component_table.item(row, 0)
-            combo = self._component_table.cellWidget(row, 2)
-            if center_item is not None and isinstance(combo, QComboBox):
-                try:
-                    previous[float(center_item.text())] = (
-                        str(combo.currentData()),
-                        bool(use_item is not None and use_item.checkState() == Qt.Checked),
+        was_updating = self._updating_table
+        self._updating_table = True
+        try:
+            previous: dict[float, tuple[str, bool]] = {}
+            for row in range(self._component_table.rowCount()):
+                center_item = self._component_table.item(row, 1)
+                use_item = self._component_table.item(row, 0)
+                combo = self._component_table.cellWidget(row, 2)
+                if center_item is not None and isinstance(combo, QComboBox):
+                    try:
+                        previous[float(center_item.text())] = (
+                            str(combo.currentData()),
+                            bool(use_item is not None and use_item.checkState() == Qt.Checked),
+                        )
+                    except ValueError:
+                        pass
+            models = available_composite_peak_models()
+            remaining_previous = dict(previous)
+            remaining_profile = list(self._profile_components)
+            self._component_table.setRowCount(len(self._reviewed_peaks))
+            for row, (review_enabled, peak) in enumerate(self._reviewed_peaks):
+                enabled = review_enabled
+                model_key = "gaussian"
+                if remaining_previous:
+                    preserved = min(
+                        remaining_previous,
+                        key=lambda value: abs(value - peak.center),
                     )
-                except ValueError:
-                    pass
-        models = available_composite_peak_models()
-        remaining_previous = dict(previous)
-        remaining_profile = list(self._profile_components)
-        self._component_table.setRowCount(len(self._reviewed_peaks))
-        for row, (review_enabled, peak) in enumerate(self._reviewed_peaks):
-            enabled = review_enabled
-            model_key = "gaussian"
-            if remaining_previous:
-                preserved = min(
-                    remaining_previous,
-                    key=lambda value: abs(value - peak.center),
-                )
-                model_key, enabled = remaining_previous.pop(preserved)
-            elif remaining_profile:
-                compatible = [
-                    item for item in remaining_profile
-                    if str(item.get("polarity", peak.polarity)) == peak.polarity
-                ] or remaining_profile
-                preserved_profile = min(
-                    compatible,
-                    key=lambda item: abs(float(item["reference_center"]) - peak.center),
-                )
-                remaining_profile.remove(preserved_profile)
-                model_key = str(preserved_profile["model_key"])
-                enabled = bool(preserved_profile.get("enabled", review_enabled))
-            use_item = QTableWidgetItem("")
-            use_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
-            use_item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)
-            self._component_table.setItem(row, 0, use_item)
-            center_item = QTableWidgetItem(f"{peak.center:.12g}")
-            center_item.setFlags(center_item.flags() & ~Qt.ItemIsEditable)
-            self._component_table.setItem(row, 1, center_item)
-            combo = QComboBox()
-            for model in models:
-                combo.addItem(model.name, model.key)
-            index = combo.findData(model_key)
-            combo.setCurrentIndex(max(0, index))
-            combo.currentIndexChanged.connect(lambda _index: self._clear_composite_preview())
-            self._component_table.setCellWidget(row, 2, combo)
+                    model_key, enabled = remaining_previous.pop(preserved)
+                elif remaining_profile:
+                    compatible = [
+                        item for item in remaining_profile
+                        if str(item.get("polarity", peak.polarity)) == peak.polarity
+                    ] or remaining_profile
+                    preserved_profile = min(
+                        compatible,
+                        key=lambda item: abs(float(item["reference_center"]) - peak.center),
+                    )
+                    remaining_profile.remove(preserved_profile)
+                    model_key = str(preserved_profile["model_key"])
+                    enabled = bool(preserved_profile.get("enabled", review_enabled))
+                use_item = QTableWidgetItem("")
+                use_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+                use_item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)
+                self._component_table.setItem(row, 0, use_item)
+                center_item = QTableWidgetItem(f"{peak.center:.12g}")
+                center_item.setFlags(center_item.flags() & ~Qt.ItemIsEditable)
+                self._component_table.setItem(row, 1, center_item)
+                combo = QComboBox()
+                for model in models:
+                    combo.addItem(model.name, model.key)
+                index = combo.findData(model_key)
+                combo.setCurrentIndex(max(0, index))
+                combo.currentIndexChanged.connect(lambda _index: self._clear_composite_preview())
+                self._component_table.setCellWidget(row, 2, combo)
+        finally:
+            self._updating_table = was_updating
 
-    def _clear_composite_preview(self) -> None:
-        self._composite_result = None
-        if self._profile_loading:
+    def _clear_composite_preview(self, *_args: object) -> None:
+        if self._profile_loading or self._updating_table:
             return
+        self._composite_result = None
+        self._accept_pending = self._fit_after_preview = False
+        fit_active = self._active_preview is not None and self._active_preview[0] == "fit"
+        fit_pending = self._pending_preview is not None and self._pending_preview[0] == "fit"
+        if fit_active or fit_pending:
+            self._preview_generation += 1
+            self._pending_preview = None
+            self._preview_jobs.cancel()
+            self._status_label.setText("Fit settings changed; preview needs refreshing.")
+        self._fit_metrics.setText("Fit settings changed; preview needs refreshing.")
         self._draw_preview()
+        self._update_preview_buttons()
 
     def component_specs(self) -> list[PeakComponentSpec]:
         """Return reviewed peak/model selections as serializable component specs."""
@@ -1088,6 +1263,15 @@ class PeakAnalysisDialog(QDialog):
         range_settings = _profile_section(payload, "analysis_range")
         self._profile_loading = True
         self._preview_timer.stop()
+        self._preview_generation += 1
+        self._pending_preview = None
+        self._preview_jobs.cancel()
+        self._accept_pending = self._fit_after_preview = False
+        self._baseline_result = self._peak_result = self._composite_result = None
+        self._result_request = self._result_frame = None
+        self._reviewed_peaks = []
+        self._removed_peak_centers = []
+        self._populate_peak_table()
         try:
             _select_combo_data(self._baseline_method, baseline.get("method"), "baseline method")
             _select_combo_data(self._baseline_polarity, baseline.get("polarity"), "baseline polarity")
@@ -1248,36 +1432,8 @@ class PeakAnalysisDialog(QDialog):
             QMessageBox.warning(self, "Load Analysis Parameters", str(exc))
 
     def preview_composite_fit(self, *_args: object, show_errors: bool = True) -> bool:
-        """Fit the reviewed components and overlay total/component curves."""
-        if self._peak_result is None and not self.preview_peaks(show_errors=show_errors):
-            return False
-        assert self._baseline_result is not None
-        try:
-            self._composite_result = fit_composite_peaks(
-                self._baseline_result.x,
-                self._baseline_result.raw,
-                self._baseline_result.corrected,
-                self.component_specs(),
-                self.composite_parameters(),
-                provenance={
-                    "source_sheet": self._dataset_name,
-                    "x_column": self.x_column(),
-                    "y_column": self.y_column(),
-                },
-            )
-            result = self._composite_result
-            self._fit_metrics.setText(
-                f"Converged={'yes' if result.converged else 'no'}; "
-                f"R²={result.r_squared:.6g}; RMSE={result.rmse:.6g}; "
-                f"AIC={result.aic:.6g}; BIC={result.bic:.6g}. {result.message}"
-            )
-            self._draw_preview()
-            return True
-        except (MathOperationError, ValueError) as exc:
-            self._fit_metrics.setText(str(exc))
-            if show_errors:
-                QMessageBox.warning(self, "Composite Peak Fit", str(exc))
-            return False
+        """Queue a fit from current reviewed components, detecting first when needed."""
+        return self._request_preview("fit", show_errors=show_errors)
 
     def _review_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating_table or item.row() >= len(self._reviewed_peaks):
@@ -1294,16 +1450,22 @@ class PeakAnalysisDialog(QDialog):
                 peak = replace(peak, center=center, manual_status="repositioned")
             self._reviewed_peaks[item.row()] = (enabled, peak)
             self._populate_component_table()
-            self._composite_result = None
-            self._draw_preview()
+            if item.column() == 0:
+                self._updating_table = True
+                try:
+                    self._component_table.item(item.row(), 0).setCheckState(Qt.Checked if enabled else Qt.Unchecked)
+                finally:
+                    self._updating_table = False
+            self._clear_composite_preview()
         except ValueError:
             QMessageBox.warning(self, "Peak Review", "Peak center must be a finite number.")
             self._populate_peak_table()
 
     def _add_manual_peak(self) -> None:
-        if self._baseline_result is None:
-            if not self.preview_baseline():
-                return
+        if self._baseline_result is None or not self._cache_is_current():
+            self.preview_baseline()
+            self._status_label.setText("Wait for the baseline preview, then add a manual peak.")
+            return
         from PySide6.QtWidgets import QInputDialog
 
         assert self._baseline_result is not None
@@ -1326,7 +1488,7 @@ class PeakAnalysisDialog(QDialog):
         nearest = int(positions[np.argmin(np.abs(self._baseline_result.x[valid] - center))])
         corrected_height = float(self._baseline_result.corrected[nearest])
         polarity = "positive" if corrected_height >= 0 else "negative"
-        _x_column, y_column, _x, _y = self._source_arrays()
+        y_column = self.y_column()
         peak = PeakRecord(
             source_sheet=self._dataset_name,
             channel=y_column,
@@ -1353,18 +1515,17 @@ class PeakAnalysisDialog(QDialog):
         self._reviewed_peaks.sort(key=lambda entry: entry[1].center)
         self._populate_peak_table()
         self._populate_component_table()
-        self._composite_result = None
-        self._draw_preview()
+        self._clear_composite_preview()
 
     def _remove_selected_peaks(self) -> None:
         rows = sorted({index.row() for index in self._peak_table.selectedIndexes()}, reverse=True)
         for row in rows:
             if 0 <= row < len(self._reviewed_peaks):
-                self._reviewed_peaks.pop(row)
+                _enabled, peak = self._reviewed_peaks.pop(row)
+                self._removed_peak_centers.append(peak.center)
         self._populate_peak_table()
         self._populate_component_table()
-        self._composite_result = None
-        self._draw_preview()
+        self._clear_composite_preview()
 
     def baseline_result(self) -> BaselineResult:
         if self._baseline_result is None:
@@ -1457,14 +1618,23 @@ class PeakAnalysisDialog(QDialog):
         )
 
     def accept(self) -> None:
-        if self._baseline_only:
-            valid = self.preview_baseline()
-        else:
-            valid = self.preview_peaks()
-        if not valid:
+        if self._preview_closed or self._preview_close_result is not None:
             return
-        if not self._baseline_only and not self.preview_composite_fit():
+        if not self._cache_is_current():
+            self._baseline_result = self._peak_result = self._composite_result = None
+        ready = (self._baseline_result is not None and
+                 (self._baseline_only or (self._peak_result is not None and self._composite_result is not None)))
+        if not ready or self.preview_busy:
+            self._accept_pending = True
+            self._preview_timer.stop()
+            if self._preview_jobs.is_running and self._active_preview is not None and self._active_preview[1] == self._preview_generation:
+                self._fit_after_preview = not self._baseline_only and self._active_preview[0] != "fit"
+            else:
+                self._request_preview("baseline" if self._baseline_only else "fit", show_errors=True, for_accept=True)
+            self._update_preview_buttons()
             return
+        self._accept_pending = False
+        self._update_preview_buttons()
         if self._baseline_only and not self.create_signal_output():
             QMessageBox.warning(self, self.windowTitle(), "Choose a corrected-signal output worksheet.")
             return
@@ -1489,7 +1659,7 @@ class PeakAnalysisDialog(QDialog):
                     "Map mode requires X, Y, the selected spectral axis, and intensity columns.",
                 )
                 return
-        super().accept()
+        self.done(QDialog.Accepted)
 
 
 def _scientific_spin(value: float, minimum: float, maximum: float) -> QDoubleSpinBox:

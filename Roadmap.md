@@ -4,9 +4,18 @@
 
 ## Current Capability Baseline
 
-The first measured large-sheet performance slice, shared background-job controller, and cancellable staged text imports are implemented. Peak/Raman batch and map fitting now uses the controller for sequential detached computation, spectrum-count progress, cancellation, stale-source rejection, and atomic result publication. A first Polars/Parquet large-data slice provides read-only disk-backed sources, bounded asynchronous 1,000-row/32-column/8 MiB windows, explicit window extraction, and embedded version-9 project persistence. Full-source query/analysis UI, vendor-map storage, larger-than-RAM capacity validation, Excel/project/remaining-analysis job migration, delta undo, and plot reduction/caching remain pending; see `Large_Data_Performance_Audit.md` for measured results.
+The first measured large-sheet performance slice, shared background-job controller, and cancellable staged text imports are implemented. Peak/Raman batch/map fitting and baseline-only map correction now share the controller for sequential detached computation, spectrum/pixel-count progress, cancellation, stale-source rejection, and atomic publication. Baseline/detection/composite-fit dialog previews are also asynchronous, with coalesced updates, current-review acceptance, and safe cancellation/close. A first Polars/Parquet large-data slice provides read-only disk-backed sources, bounded asynchronous 1,000-row/32-column/8 MiB windows, explicit window extraction, and embedded version-9 project persistence. Full-source query/analysis UI, vendor-map storage, larger-than-RAM capacity validation, Excel/project/remaining-analysis job migration, delta undo, and plot reduction/caching remain pending; see `Large_Data_Performance_Audit.md` for measured results.
 
 Map cuts create persistent editable workspace plots backed by profile worksheets. The Peak/Raman viewer supports horizontal, vertical, and mouse-picked arbitrary cuts of its selected parameter/quality metric.
+
+At the user's request, a trial independent-plot document/tab layer is implemented
+for desktop review. Open plots have separate editors/canvases and history; closed
+views retain definitions, pending input, and viewport state in project documents.
+Analysis creates new documents, opening an existing plot activates its view, and
+Save Project serializes current states together. Plot rename cannot overwrite
+another document; tab close and document deletion are distinct. Review this UX
+before expanding detached windows or multi-panel layout. This reprioritizes plot
+ownership/persistence ahead of the remaining worker migrations for this trial.
 
 Reviewed on 2026-09-24 against the current repository state, session changelog, and automated test suite.
 
@@ -152,8 +161,30 @@ records individual failures, rejects changed source data/metadata and projects,
 and publishes the session/optional worksheets together with rollback. Cancel
 discards all pending outputs. The 400-pixel benchmark and 11 new regressions cover
 responsive delivery, cancellation/restart, races, failure, and shutdown. Single
-preview fits, baseline-only map correction, CPU process parallelism, and other
-operation-family migration remain follow-ups.
+preview fits and baseline-only correction were completed in the slices below;
+CPU process parallelism and other operation-family migration remain follow-ups.
+
+Third execution slice implemented (2026-11-05): baseline-only map correction now
+uses `core/baseline_jobs.py` for strict validation, sequential per-pixel correction,
+and corrected-worksheet assembly. It shares map iteration, input snapshots,
+status-bar progress/Cancel, source/project validation, safe shutdown, and result
+publication guards with full map fitting. Cancel discards the whole pending map;
+individual baseline failures retain successful pixels and record counts/errors
+in Worksheet Metadata. Snapshot capture and final source comparison remain GUI
+work. Asynchronous dialog previews are implemented in the fourth slice below.
+
+Fourth execution slice implemented (2026-11-05): baseline, peak-detection, and
+composite-fit dialog previews use Qt-independent `core/spectral_preview.py` and a
+dialog-owned shared background controller. Settings changes invalidate results
+immediately, retain the 250 ms debounce, coalesce pending requests, and reject old
+source/pixel/range/configuration generations. Stop Preview cancels pending work;
+optimizer evaluations check cancellation. Review/model choices survive fit and
+acceptance; OK finishes prerequisites asynchronously and preserves manual edits.
+Dialog/parent/project closure cancels and retains worker ownership until threads
+stop. Baseline/fit/component drawing is bounded at 6,000 points while numerical
+outputs stay complete. Input snapshots, source comparisons, source/pixel control
+population, and drawing remain GUI work. Broader operation-family migration and
+process parallelism remain next execution slices.
 
 Purpose: keep the application responsive while existing operations run on one or many worksheets, with safe commits, visible mappings, and auditable outputs. Moving long operations off the Qt UI thread is the highest-priority implementation item after the short Stage 0 gate.
 
@@ -413,7 +444,7 @@ analysis session. The dedicated Raman Analysis viewer provides linked map/spectr
 component, residual, distribution, and QC views while keeping result tables out
 of the generic Data navigator until explicitly exported. Batch/map fitting now
 runs in the shared background controller with atomic publication and cancellation.
-Baseline-only map/preview worker migration, process parallelism, advanced component
+Process parallelism, advanced component
 constraints/ties, and explicit missing/extra-peak policies remain the next slices.
 
 Architecture and contracts:
@@ -571,13 +602,13 @@ Acceptance criteria:
 
 1. Close the small remaining Stage 0 gate: document verification commands, add missing core/batch smoke coverage, configure linting, define manual checks, and resolve dependency drift.
 2. Harden the new spectrometer-import foundation with committed/anonymized vendor fixtures, additional locale controls and fixture-driven legacy encodings, stacked/long-form/multi-acquisition layouts, explicit coordinate/channel mapping, and lossless warnings for unrecognized records.
-3. Extend the implemented Stage 1 background-job controller beyond text import and Peak/Raman batch/map fits, retaining progress, cooperative cancellation, safe shutdown, and GUI-thread result commits.
+3. Extend the implemented Stage 1 background-job controller beyond text import and the spectral preview/batch/map workflows, retaining progress, cooperative cancellation, safe shutdown, and GUI-thread result commits.
 4. Move long imports and the existing calculus, smoothing, FFT/iFFT, interpolation, statistics, and curve-fitting workflows off the Qt UI thread.
 5. Add workspace transactions/undo for background and non-visible-sheet edits, then test cancellation, partial failures, and project consistency.
 6. Complete semantic role binding and normalized timestamped audit logs across every batch-capable dialog.
 7. Harden Excel support with background parsing, previews, named/range-only selection, metadata-row mapping, and `.xlsx` export.
 8. Continue figure extraction and Data Prep with their listed cleanup, mapping, preview, date/time, reshape, and batch follow-ups.
-9. Harden the implemented Peak/Raman Analysis composite and background batch/map slice with representative vendor-map fixtures, advanced bounds/fixed/tied parameters, explicit missing/extra-peak policies, remaining preview/baseline-only worker migration, and process parallelism.
+9. Harden the implemented Peak/Raman Analysis composite, background batch/map fits, baseline-only map correction, and asynchronous previews with representative vendor-map fixtures, advanced bounds/fixed/tied parameters, explicit missing/extra-peak policies, and process parallelism.
 10. Add the remaining signal-analysis family: digital filter design and response previews, convolution/correlation, Hilbert transform, STFT, wavelets, and 2D FFT.
 11. Extend statistics, general/global fitting, plotting families, annotations, and multi-panel page layouts. Reusable templates remain excluded from this stage.
 12. After the main workflows are responsive and tested, continue disk-backed large-data mode (Polars/DuckDB evaluation plus a bounded 1,000-row display window), decimated plotting, delta undo, autosave/recovery, PyInstaller packaging, reporting, and plugin extension points.

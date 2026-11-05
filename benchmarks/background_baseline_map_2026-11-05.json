@@ -1,0 +1,39 @@
+{
+  "operation": "baseline_map",
+  "baseline_method": "arpls",
+  "pixels": 400,
+  "samples_per_pixel": 601,
+  "seed": 123,
+  "input_mib": 7.336551666259766,
+  "elapsed_s": 3.1028015001211315,
+  "heartbeat_ticks": 306,
+  "heartbeat_p95_gap_s": 0.011325479997321964,
+  "heartbeat_max_gap_s": 0.041904100216925144,
+  "cancel_requested": false,
+  "cancel_completion_s": null,
+  "progress_reports": 402,
+  "last_completed": 400,
+  "published_analyses": [],
+  "published_metrics": 0,
+  "failed_pixels": 0,
+  "published_worksheets": [
+    "Synthetic corrected map"
+  ],
+  "published_rows": 240400,
+  "memory_before": {
+    "rss_mib": 277.4375,
+    "peak_rss_mib": 280.38671875
+  },
+  "memory_after": {
+    "rss_mib": 292.23046875,
+    "peak_rss_mib": 310.56640625
+  },
+  "environment": {
+    "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]",
+    "pandas": "3.0.3",
+    "numpy": "2.4.4",
+    "qt": "6.11.0"
+  },
+  "errors": [],
+  "qt_offscreen": true
+}

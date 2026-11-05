@@ -16,7 +16,7 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 - **Curve Fitting**: Fit 66 categorized analytical models spanning polynomials, decay/growth, symmetric and asymmetric peaks, transitions/waveforms, kinetics, rheology, probability distributions, and physical functions, with customizable parameters and LM, trust-region, Dogbox, or ODR optimization.
 - **Custom Fit Models**: Define project-saved fit models from safe NumPy/SciPy expressions and use them in the standard fitting workflow.
 - **Dynamic Plotting**: High-performance multi-axis plotting with Matplotlib, featuring data locators, scaling controls, SciencePlots journal styling, visual customization, error bars, reporting plots, histograms, box/violin distribution comparisons, and native-grid or interpolated 2D and Raman/frequency-slice maps. Scientific map controls include automatic/manual/percentile colour ranges, linear/log/symmetric/diverging normalization, explicit contour levels and labels, measured-point/triangulation/boundary overlays, measured or interpolated extrema with provenance, aspect control, and live X/Y/intensity readout. Rendered grids, horizontal/vertical/arbitrary profiles, rectangular ROI statistics, and contour vertices can be exported as normal worksheets. Each cut also creates a persistent editable workspace plot. Peak/Raman result maps offer Map Cuts and mouse-picked cut lines for the selected metric.
-- **Saved Plots**: Start from a default empty plot, protect unsaved drafts with Save/Discard/Cancel before replacement, and store named definitions so series, locators, axes, legends, and sizing can be restored later.
+- **Independent Plot Tabs**: Each plot is a project document with its own editor, pending fields, view, and undo history. Open existing plots without reloading over edits; analysis results create new tabs. Close tabs without deleting plots, reopen them from Workspace, and use Save Project to persist every plot together. Rename and Delete are separate actions; project/app closure asks to save unsaved plot work.
 - **Data Preparation**: Create non-destructive result sheets for filtering, sorting, duplicate removal, missing-value cleanup, binning, grouping, joins, and reshaping.
 - **Responsive Docked Workspace Layout**: Size the initial window from the active screen work area, proportionally rebalance docks after window or DPI changes, and reflow the Plot Inspector without collapsing its editors. Plot actions move into a toolbar overflow menu when horizontal room is limited; on very narrow Plot layouts the Workspace navigator collapses automatically to preserve the canvas and can still be explicitly restored from View. Datasets, saved plots, and spectral-analysis sessions remain separate navigator sections, while Data receives the full central width and Raman Results appears only when a result exists or is explicitly opened.
 - **Project Persistence and Protection**: Save complete workspaces as open `.jasc` ZIP/CSV packages or optional password-encrypted `.jascx` packages. Encrypted saves use Scrypt-derived AES-256-GCM authenticated encryption; ordinary `.jasc` files remain directly inspectable for open-science use. Version 8 packages retain the uniquely salted JASC Package Seal over every member name, byte size, and SHA-256 digest, store spectral-analysis tables as readable CSV members, and can optionally add an Ed25519 author signature. JASC creates password-encrypted private identity files, exports shareable public identities, maintains a local trusted-fingerprint list, and distinguishes trusted, valid-but-unknown, unsigned, and invalid signatures.
@@ -37,10 +37,27 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 
 ## Development
 
-Peak/Raman worksheet-batch and map fitting runs in the background with status-bar
-progress and Cancel. Completed results are published together; cancelled runs
-add no analysis or optional worksheets. Changing the source worksheet or project
-while fitting discards the pending result. Fits remain sequential within a run.
+The independent-plot document/tab layout is a trial for desktop review. Run
+`main.py`, select **Plots**, and use **New Plot** or **+**. Open two plots, edit one,
+switch back and forth, close/reopen a tab from Workspace, and save/reopen the
+project. An asterisk marks changes since project save. **Rename** replaces the
+old separate Save Plot action. Pending series fields are saved as editor drafts;
+**Update Series** still applies them to the rendered plot. Closed canvases are
+released and recreated on demand. A preview is in `artifacts/plot_tabs_preview.png`.
+
+Peak/Raman worksheet-batch and map fitting, plus baseline-only map correction,
+run in the background with status-bar progress and Cancel. Completed results are
+published together; cancelling discards the entire pending run. Changing source
+data, column metadata, or the project discards pending results. Spectra are
+processed sequentially within a run. Baseline-only correction creates a normal
+corrected worksheet with pixel counts and failure details in Worksheet Metadata.
+
+Dialog baseline, detection, and component-fit previews also run in workers.
+The existing 250 ms debounce keeps only the latest requested settings; **Stop
+Preview** cancels pending work. **OK** uses current reviewed peaks/model choices
+and finishes any required preview before accepting. Dialog/parent/project closure
+cancels preview work safely. Plot curves use at most 6,000 display points while
+numerical results retain their full resolution.
 
 Run verification from the repository root with the project environment active:
 
@@ -54,8 +71,16 @@ For the focused worker/UI regressions and reproducible synthetic map benchmarks:
 
 ```powershell
 python -B -m unittest discover -s tests -p test_background_peak_fit.py
+python -B -m unittest discover -s tests -p test_background_baseline.py
+python -B -m unittest discover -s tests -p test_spectral_previews.py
+python -B -m unittest discover -s tests -p test_plot_documents.py
 python -B benchmarks/background_peak_fit_audit.py --output result.json
 python -B benchmarks/background_peak_fit_audit.py --cancel-after-ms 100 --output cancel.json
+python -B benchmarks/background_peak_fit_audit.py --baseline-only --output baseline.json
+python -B benchmarks/background_peak_fit_audit.py --baseline-only --cancel-after-ms 100 --output baseline_cancel.json
+python -B benchmarks/spectral_preview_audit.py --kind fit --output preview.json
+python -B benchmarks/spectral_preview_audit.py --kind baseline --changes 10 --output preview_updates.json
+python -B benchmarks/spectral_preview_audit.py --kind fit --samples 1000000 --cancel-after-ms 100 --output preview_cancel.json
 ```
 
 The architecture strictly separates concerns:

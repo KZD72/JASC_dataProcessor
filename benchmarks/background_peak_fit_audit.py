@@ -1,7 +1,8 @@
-"""Measure real Raman map fitting, GUI heartbeat, memory, and cancellation.
+"""Measure real Raman map fitting/correction, GUI heartbeat, memory, and cancellation.
 
 Run: python -B benchmarks/background_peak_fit_audit.py --output result.json
-Add --cancel-after-ms 100 for cancellation. Uses synthetic, seeded spectra;
+Add --baseline-only for arPLS map correction; --cancel-after-ms 100 cancels.
+Uses synthetic, seeded spectra;
 no source files or application preferences are changed.
 """
 
@@ -38,6 +39,7 @@ def main() -> None:
     parser.add_argument("--pixels", type=int, default=400)
     parser.add_argument("--samples", type=int, default=601)
     parser.add_argument("--cancel-after-ms", type=int, default=0)
+    parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.pixels < 1 or args.samples < 20:
@@ -54,7 +56,8 @@ def main() -> None:
                   + rng.normal(0, 0.01, args.samples),
     }) for pixel in range(args.pixels)], ignore_index=True)
     source = window._workspace.add_dataset("Synthetic map", frame, copy_frame=False)
-    baseline_settings = BaselineParameters(method="constant", constant_value=2.0)
+    baseline_settings = (BaselineParameters(method="arpls") if args.baseline_only
+                         else BaselineParameters(method="constant", constant_value=2.0))
     detection_settings = PeakDetectionParameters(prominence=1.0)
     reference = correct_baseline(x, frame["signal"].iloc[:args.samples].to_numpy(), baseline_settings)
     peaks = detect_peaks(x, reference.raw, reference.corrected, detection_settings)
@@ -68,6 +71,7 @@ def main() -> None:
         analysis_name=lambda: "Synthetic map fit", analysis_profile=lambda: {},
         create_signal_output=lambda: False, create_peak_output=lambda: False,
         create_fit_output=lambda: False,
+        result_sheet_name=lambda: "Synthetic corrected map",
     )
     ticks: list[float] = []
     progress: list[tuple[float, int, int]] = []
@@ -80,13 +84,13 @@ def main() -> None:
 
     def tick() -> None:
         ticks.append(time.perf_counter())
-        if not window._jobs.is_running and window._peak_fit_token is None:
+        if not window._jobs.is_running and window._spectral_job_token is None:
             loop.quit()
 
     def cancel() -> None:
         if window._jobs.is_running:
             cancelled.append(time.perf_counter())
-            window._cancel_peak_fit()
+            window._cancel_spectral_job()
 
     heartbeat.timeout.connect(tick)
     before = memory_mib()
@@ -94,7 +98,10 @@ def main() -> None:
         started = time.perf_counter()
         ticks.append(started)
         heartbeat.start()
-        window._run_peak_analysis_batch_or_map(source, dialog, {})
+        if args.baseline_only:
+            window._run_baseline_map(source, dialog, {})
+        else:
+            window._run_peak_analysis_batch_or_map(source, dialog, {})
         if args.cancel_after_ms:
             QTimer.singleShot(args.cancel_after_ms, cancel)
         loop.exec()
@@ -102,7 +109,17 @@ def main() -> None:
         heartbeat.stop()
     intervals = np.diff(ticks)
     analyses = window._workspace.list_spectral_analyses()
+    outputs = [dataset for dataset in window._workspace.list_datasets() if dataset is not source]
+    failed_pixels = sum(int((analysis.metrics_frame["status"] == "failed").sum()) for analysis in analyses)
+    if args.baseline_only:
+        failed_pixels += sum(int(dataset.worksheet_metadata.import_details["Failed pixels"]) for dataset in outputs)
+    if args.cancel_after_ms and not cancelled:
+        errors.append("Run completed before cancellation delivery; increase --pixels")
+    if cancelled and (analyses or outputs):
+        errors.append("Cancelled run published output")
     payload = {
+        "operation": "baseline_map" if args.baseline_only else "peak_fit_map",
+        "baseline_method": baseline_settings.method,
         "pixels": args.pixels, "samples_per_pixel": args.samples, "seed": 123,
         "input_mib": float(frame.memory_usage(deep=True).sum() / 2**20),
         "elapsed_s": finished - started,
@@ -115,8 +132,9 @@ def main() -> None:
         "last_completed": max((completed for _, completed, _ in progress), default=0),
         "published_analyses": [analysis.name for analysis in analyses],
         "published_metrics": sum(len(analysis.metrics_frame) for analysis in analyses),
-        "failed_pixels": sum(int((analysis.metrics_frame["status"] == "failed").sum()) for analysis in analyses),
-        "published_optional_worksheets": [name for name in window._workspace.dataset_names() if name != source.name],
+        "failed_pixels": failed_pixels,
+        "published_worksheets": [dataset.name for dataset in outputs],
+        "published_rows": sum(len(dataset.frame) for dataset in outputs),
         "memory_before": before, "memory_after": memory_mib(),
         "environment": {"python": sys.version, "pandas": pd.__version__,
                         "numpy": np.__version__, "qt": PySide6.__version__},

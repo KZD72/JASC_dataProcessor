@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from core.jobs import JobCancelled, JobContext
+from core.spectral_jobs import SpectralSource as PeakFitSource, map_spectrum_jobs
 from core.spectral_analysis import SpectralAnalysisSession
 from core.workspace import Dataset, set_dataset_operation_comments
 from math_engine.baseline import BaselineParameters, correct_baseline
@@ -19,14 +20,6 @@ from math_engine.composite_peak_fit import (
     build_peak_component_spec, fit_composite_peaks,
 )
 from math_engine.peak_detection import PeakDetectionParameters, PeakRecord, detect_peaks
-
-
-@dataclass(frozen=True, slots=True)
-class PeakFitSource:
-    """Independent projection of one source worksheet, captured on the GUI thread."""
-
-    name: str
-    frame: pd.DataFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,26 +64,7 @@ def _source_jobs(
         return len(request.sources), ((source.name, source.frame, {}) for source in request.sources)
     if request.scope != "map" or len(request.sources) != 1:
         raise MathOperationError("Choose a worksheet batch or one normalized X/Y map.")
-    source = request.sources[0]
-    for column in ("X", "Y"):
-        if column not in source.frame:
-            raise MathOperationError("Map fitting requires normalized X and Y coordinate columns.")
-        numeric = pd.to_numeric(source.frame[column], errors="coerce")
-        validate_numeric_column_metadata(source.frame, column, numeric)
-        context.check_cancelled()
-    grouped = source.frame.groupby(["X", "Y"], sort=False, dropna=False)
-    total = grouped.ngroups
-
-    def pixels() -> Iterator[tuple[str, pd.DataFrame, dict[str, float]]]:
-        for (x_coordinate, y_coordinate), group in grouped:
-            context.check_cancelled()
-            yield (
-                f"{source.name} [X={x_coordinate}, Y={y_coordinate}]",
-                group.reset_index(drop=True),
-                {"X": float(x_coordinate), "Y": float(y_coordinate)},
-            )
-
-    return total, pixels()
+    return map_spectrum_jobs(request.sources[0], context)
 
 
 def prepare_peak_fit(context: JobContext, request: PeakFitRequest) -> PreparedPeakFit:

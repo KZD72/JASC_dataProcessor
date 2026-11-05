@@ -210,11 +210,12 @@ class BackgroundPeakFitTests(unittest.TestCase):
             with patch("core.peak_fit_jobs.correct_baseline", side_effect=self.blocked_baseline), \
                     patch.object(workspace, "add_spectral_analysis", side_effect=commit):
                 self.start()
-                token = self.window._peak_fit_token
+                token = self.window._spectral_job_token
                 self.start()  # A second run cannot replace a live worker.
-                self.assertIs(self.window._peak_fit_token, token)
-                self.wait_until(lambda: self.entered.is_set() and len(ticks) >= 4)
-                self.assertIn("1/2", self.window._peak_fit_progress._label.text())
+                self.assertIs(self.window._spectral_job_token, token)
+                self.wait_until(lambda: self.entered.is_set() and len(ticks) >= 4
+                                and "1/2" in self.window._spectral_job_progress._label.text())
+                self.assertIn("1/2", self.window._spectral_job_progress._label.text())
                 self.assertFalse(workspace.spectral_analysis_names())
                 self.release.set()
                 self.wait_until(lambda: not self.window._jobs.is_running)
@@ -223,7 +224,7 @@ class BackgroundPeakFitTests(unittest.TestCase):
             self.assertEqual(workspace.dataset_names(), ["Map"])
             metrics = workspace.get_spectral_analysis("Map fit").metrics_frame
             np.testing.assert_allclose(metrics["peak_1_position"], [245.0, 248.0], atol=0.1)
-            self.assertIsNone(self.window._peak_fit_progress)
+            self.assertIsNone(self.window._spectral_job_progress)
             self.assertTrue(self.window._import_action.isEnabled())
             self.errors.assert_not_called()
         finally:
@@ -242,13 +243,13 @@ class BackgroundPeakFitTests(unittest.TestCase):
         with patch("core.peak_fit_jobs.fit_composite_peaks", side_effect=block_second):
             self.start(replace(self.request, fit_name="curves", parameter_name="parameters"))
             self.wait_until(self.entered.is_set)
-            self.window._cancel_peak_fit()
+            self.window._cancel_spectral_job()
             self.release.set()
             self.wait_until(lambda: not self.window._jobs.is_running)
         self.assertEqual(self.window._workspace.dataset_names(), ["Map"])
         self.assertEqual(self.window._workspace.spectral_analysis_names(), [])
         self.assertIn("cancelled", self.window.statusBar().currentMessage())
-        self.assertIsNone(self.window._peak_fit_token)
+        self.assertIsNone(self.window._spectral_job_token)
         self.start()
         self.wait_until(lambda: not self.window._jobs.is_running)
         self.assertEqual(self.window._workspace.spectral_analysis_names(), ["Map fit"])
@@ -305,7 +306,7 @@ class BackgroundPeakFitTests(unittest.TestCase):
                 self.wait_until(lambda: not self.window._jobs.is_running)
         self.assertEqual(workspace.dataset_names(), ["Map"])
         self.assertEqual(workspace.spectral_analysis_names(), [])
-        self.assertIsNone(self.window._peak_fit_token)
+        self.assertIsNone(self.window._spectral_job_token)
         self.assertTrue(self.window._import_action.isEnabled())
         self.errors.assert_called_once()
 
@@ -314,7 +315,7 @@ class BackgroundPeakFitTests(unittest.TestCase):
         # Join without pumping the GUI: the successful result is queued but has
         # not reached the GUI callback when the user cancellation arrives.
         self.assertTrue(self.window._jobs._thread.wait(5000))
-        self.window._cancel_peak_fit()
+        self.window._cancel_spectral_job()
         self.wait_until(lambda: not self.window._jobs.is_running)
         self.assertEqual(self.window._workspace.dataset_names(), ["Map"])
         self.assertEqual(self.window._workspace.spectral_analysis_names(), [])

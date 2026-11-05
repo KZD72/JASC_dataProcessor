@@ -1,5 +1,7 @@
 # Plot Inspector Final-State Review
 
+> Ownership update (2026-11-05): the current trial uses independent plot documents and tabs. The inspector follows the active document, and Save Project persists all plot/editor states. Earlier single-draft ownership guidance is superseded; canvas/control recommendations remain applicable.
+
 Date: 2026-08-17
 
 ## Outcome

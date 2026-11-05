@@ -10,6 +10,7 @@ import re
 import time
 from io import StringIO
 from pathlib import Path
+from typing import TypeVar
 
 import numpy as np
 import pandas as pd
@@ -52,11 +53,13 @@ from PySide6.QtWidgets import (
 )
 
 from core.import_jobs import PreparedTextBatch, inspect_text_files, prepare_text_files
+from core.baseline_jobs import BaselineMapRequest, PreparedBaselineMap, prepare_baseline_map
 from core.jobs import JobContext, JobProgress
 from core.peak_fit_jobs import (
-    PeakFitRequest, PeakFitSource, PreparedPeakFit, match_peak_components,
+    PeakFitRequest, PreparedPeakFit, match_peak_components,
     peak_fit_map_row, prepare_peak_fit,
 )
+from core.spectral_jobs import SpectralSource
 from core.large_data import LargeDataset, TablePage, open_large_dataset
 from ui.large_data_view import LargeDataView
 from ui.background_jobs import BackgroundJobController, JobProgressWidget
@@ -133,7 +136,6 @@ from math_engine.calculus import (
     integral_column,
     validate_numeric_column_metadata,
 )
-from math_engine.baseline import correct_baseline
 from math_engine.composite_peak_fit import CompositeFitResult
 from math_engine.curve_fitting import FIT_METHODS, FitResult, fit_curve
 from math_engine.interpolation import (
@@ -191,11 +193,12 @@ from ui.dialogs import (
     WorksheetMetadataDialog,
 )
 from ui.plot_canvas import PlotSeries
-from ui.plot_tab import PlotTab
+from ui.plot_documents import PlotDocuments
 from ui.spectral_analysis_viewer import SpectralAnalysisExportDialog, SpectralAnalysisViewer
 
 
 _DATASET_COLUMNS_MIME = "application/x-jasc-dataframe-columns"
+_SpectralResult = TypeVar("_SpectralResult")
 
 
 class MainWindow(QMainWindow):
@@ -207,16 +210,18 @@ class MainWindow(QMainWindow):
         self._workspace = Workspace()
         self._jobs = BackgroundJobController(self)
         self._jobs.progress.connect(self._update_import_progress)
-        self._jobs.progress.connect(self._update_peak_fit_progress)
+        self._jobs.progress.connect(self._update_spectral_job_progress)
         self._jobs.finished.connect(self._finish_deferred_close)
         self._text_import_token: object | None = None
         self._text_import_workspace: Workspace | None = None
         self._text_import_progress: JobProgressWidget | None = None
         self._text_import_cancel_requested = False
-        self._peak_fit_token: object | None = None
-        self._peak_fit_progress: JobProgressWidget | None = None
-        self._peak_fit_cancel_requested = False
+        self._spectral_job_token: object | None = None
+        self._spectral_job_progress: JobProgressWidget | None = None
+        self._spectral_job_cancel_requested = False
+        self._spectral_job_label = "Analysis"
         self._closing_when_idle = False
+        self._closing_preview_dialogs: set[PeakAnalysisDialog] = set()
         self._project_path: Path | None = None
         self._project_password: str | None = None
         self._project_signing_identity: project_io.SigningPrivateIdentity | None = None
@@ -251,6 +256,7 @@ class MainWindow(QMainWindow):
         self._plot_list = QListWidget()
         self._plot_list.itemDoubleClicked.connect(lambda _item: self._load_selected_plot())
         self._plot_list.currentItemChanged.connect(self._handle_saved_plot_selection)
+        self._plot_list.itemClicked.connect(self._handle_plot_navigator_click)
         self._plot_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self._plot_list.customContextMenuRequested.connect(self._show_plot_context_menu)
 
@@ -289,7 +295,7 @@ class MainWindow(QMainWindow):
         self._tabs.currentChanged.connect(self._sync_inspector_to_current_tab)
         self._data_tab_widget = self._build_dataset_editor()
         self._tabs.addTab(self._data_tab_widget, "Data")
-        self._plot_tab_widget = PlotTab(self._workspace, parent=self, external_options=True)
+        self._plot_tab_widget = PlotDocuments(self._workspace, parent=self)
         self._plot_tab_widget.status_message.connect(self.statusBar().showMessage)
         self._plot_tab_widget.plot_rendered.connect(self._update_plot_action_state)
         self._plot_tab_widget.save_plot_requested.connect(self._save_current_plot)
@@ -300,10 +306,10 @@ class MainWindow(QMainWindow):
         self._plot_tab_widget.options_visibility_changed.connect(self._handle_plot_options_visibility_changed)
         self._plot_tab_widget.dataset_created.connect(self._refresh_map_analysis_dataset)
         self._plot_tab_widget.plot_created.connect(lambda _name: self._refresh_plot_list())
-        self._tabs.addTab(self._plot_tab_widget, "Plot")
+        self._tabs.addTab(self._plot_tab_widget, "Plots")
         self._spectral_analysis_viewer = SpectralAnalysisViewer(self)
         self._spectral_analysis_viewer.map_analysis_created.connect(
-            self._plot_tab_widget._commit_surface_analysis
+            lambda *args: self._plot_tab_widget._commit_surface_analysis(*args)
         )
         self._spectral_analysis_viewer.export_requested.connect(
             self._export_spectral_analysis
@@ -316,6 +322,7 @@ class MainWindow(QMainWindow):
         self._build_workspace_dock()
         self._build_inspector_dock()
         self._create_actions()
+        self._plot_tab_widget.documents_changed.connect(self._plot_documents_changed)
         self._refresh_plot_list()
         self._refresh_spectral_analysis_list()
         self._apply_visual_style()
@@ -489,7 +496,7 @@ class MainWindow(QMainWindow):
         self._plot_nav_page = plot_page
         plot_layout = QVBoxLayout(plot_page)
         plot_layout.addWidget(self._plot_list)
-        self._duplicate_plot_button = QPushButton("Duplicate Saved Plot")
+        self._duplicate_plot_button = QPushButton("Duplicate Plot")
         self._duplicate_plot_button.clicked.connect(self._duplicate_selected_plot)
         plot_layout.addWidget(self._duplicate_plot_button)
 
@@ -1450,7 +1457,7 @@ class MainWindow(QMainWindow):
         show_workspace_action.setChecked(True)
         show_workspace_action.toggled.connect(self._set_workspace_section_visible)
 
-        show_plots_action = view_menu.addAction("Show Saved &Plots")
+        show_plots_action = view_menu.addAction("Show &Plots")
         show_plots_action.setCheckable(True)
         show_plots_action.setChecked(True)
         show_plots_action.toggled.connect(self._set_plots_section_visible)
@@ -1583,11 +1590,11 @@ class MainWindow(QMainWindow):
         fit_action.triggered.connect(self._run_curve_fit)
 
         plot_menu = self.menuBar().addMenu("&Plot")
-        new_plot_action = plot_menu.addAction("&New Empty Plot")
+        new_plot_action = plot_menu.addAction("&New Plot")
         new_plot_action.setShortcut("Ctrl+Alt+N")
         new_plot_action.triggered.connect(self._start_new_plot)
 
-        save_plot_action = plot_menu.addAction("&Save Current Plot...")
+        save_plot_action = plot_menu.addAction("&Rename Current Plot...")
         save_plot_action.setShortcut("Ctrl+Alt+S")
         save_plot_action.triggered.connect(self._save_current_plot)
 
@@ -1597,13 +1604,13 @@ class MainWindow(QMainWindow):
             self._plot_tab_widget.copy_plot_to_clipboard
         )
 
-        load_plot_action = plot_menu.addAction("&Load Selected Plot")
+        load_plot_action = plot_menu.addAction("&Open Selected Plot")
         load_plot_action.triggered.connect(self._load_selected_plot)
 
         duplicate_plot_action = plot_menu.addAction("&Duplicate Selected Plot")
         duplicate_plot_action.triggered.connect(self._duplicate_selected_plot)
 
-        delete_plot_action = plot_menu.addAction("&Remove Selected Plot")
+        delete_plot_action = plot_menu.addAction("&Delete Selected Plot")
         delete_plot_action.triggered.connect(self._delete_selected_plot)
 
         file_menu.addSeparator()
@@ -2517,11 +2524,21 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Keep worker owners alive until cooperative cancellation has finished."""
+        if not self._closing_when_idle and not self._confirm_project_plot_changes():
+            event.ignore()
+            return
         self._closing_when_idle = True
         self._large_data_view.shutdown()
-        if self._jobs.is_running or self._large_data_view.jobs.is_running:
+        for dialog in self.findChildren(PeakAnalysisDialog):
+            if dialog.preview_busy:
+                if dialog not in self._closing_preview_dialogs:
+                    dialog.finished.connect(self._finish_deferred_close)
+                    self._closing_preview_dialogs.add(dialog)
+                dialog.reject()
+        preview_running = any(dialog.preview_busy for dialog in self.findChildren(PeakAnalysisDialog))
+        if self._jobs.is_running or self._large_data_view.jobs.is_running or preview_running:
             self._cancel_text_import()
-            self._cancel_peak_fit()
+            self._cancel_spectral_job()
             self._jobs.cancel()
             event.ignore()
             return
@@ -2529,7 +2546,9 @@ class MainWindow(QMainWindow):
 
     def _finish_deferred_close(self) -> None:
         if (self._closing_when_idle and not self._jobs.is_running
-                and not self._large_data_view.jobs.is_running):
+                and not self._large_data_view.jobs.is_running
+                and not any(dialog.preview_busy for dialog in self.findChildren(PeakAnalysisDialog))):
+            self._closing_preview_dialogs.clear()
             QTimer.singleShot(0, self.close)
 
     def _confirm_delimited_batch_pattern(
@@ -8493,126 +8512,50 @@ class MainWindow(QMainWindow):
         )
 
     def _run_baseline_map(
-        self,
-        source_dataset: Dataset,
-        dialog: PeakAnalysisDialog,
-        detail: dict[str, str],
+        self, source_dataset: Dataset, dialog: PeakAnalysisDialog, detail: dict[str, str],
     ) -> None:
-        """Apply one reviewed baseline setup independently to every X/Y pixel."""
-        frame = source_dataset.frame
-        if not {"X", "Y"}.issubset({str(column) for column in frame.columns}):
-            QMessageBox.warning(
-                self,
-                "Baseline Correction Map",
-                "Map processing requires normalized X and Y coordinate columns.",
-            )
+        """Capture reviewed settings and correct map pixels in the shared worker."""
+        if not self._spectral_job_available():
             return
-        x_column = dialog.x_column()
-        y_column = dialog.y_column()
-        if x_column not in frame or y_column not in frame:
-            QMessageBox.warning(
-                self,
-                "Baseline Correction Map",
-                f"Required columns '{x_column}' and '{y_column}' were not found.",
-            )
-            return
-        try:
-            for column in dict.fromkeys(("X", "Y", x_column, y_column)):
-                numeric = pd.to_numeric(frame[column], errors="coerce")
-                validate_numeric_column_metadata(frame, column, numeric)
-        except MathOperationError as exc:
-            QMessageBox.warning(self, "Baseline Correction Map", str(exc))
-            return
-        jobs = list(frame.groupby(["X", "Y"], sort=False, dropna=False))
-        if not jobs:
-            QMessageBox.warning(self, "Baseline Correction Map", "No X/Y pixel groups were found.")
-            return
-
-        parameters = dialog.baseline_parameters()
-        analysis_range = dialog.analysis_range()
-        output_frames: list[pd.DataFrame] = []
-        failure_messages: list[str] = []
-        progress = self._batch_progress_dialog("Raman Map Baseline Correction", len(jobs))
-        for job_index, (coordinates, group) in enumerate(jobs, start=1):
-            x_coordinate, y_coordinate = coordinates
-            label = f"X={x_coordinate}, Y={y_coordinate}"
-            if self._batch_progress_canceled(
-                progress,
-                job_index - 1,
-                f"Baseline correction: {label}",
-            ):
-                break
-            try:
-                x_values = pd.to_numeric(group[x_column], errors="coerce").to_numpy(dtype=float)
-                y_values = pd.to_numeric(group[y_column], errors="coerce").to_numpy(dtype=float)
-                if analysis_range is not None:
-                    lower, upper = analysis_range
-                    outside = (x_values < lower) | (x_values > upper)
-                    x_values = x_values.copy()
-                    y_values = y_values.copy()
-                    x_values[outside] = np.nan
-                    y_values[outside] = np.nan
-                result = correct_baseline(
-                    x_values,
-                    y_values,
-                    parameters,
-                    provenance={
-                        "source_sheet": source_dataset.name,
-                        "X": float(x_coordinate),
-                        "Y": float(y_coordinate),
-                    },
-                )
-                output_frames.append(pd.DataFrame({
-                    "X": float(x_coordinate),
-                    "Y": float(y_coordinate),
-                    x_column: result.x,
-                    y_column: result.raw,
-                    f"{y_column}_baseline": result.baseline,
-                    f"{y_column}_corrected": result.corrected,
-                }))
-            except Exception as exc:
-                failure_messages.append(f"{label}: {exc}")
-        if progress is not None:
-            progress.setValue(len(jobs))
-
-        if not output_frames:
-            message = "No map pixels were corrected successfully."
-            if failure_messages:
-                message += f" First error: {failure_messages[0]}"
-            QMessageBox.warning(self, "Baseline Correction Map", message)
-            return
-        output = self._workspace.add_dataset(
-            dialog.result_sheet_name(),
-            pd.concat(output_frames, ignore_index=True),
-            copy_frame=False,
+        x_column, y_column = dialog.x_column(), dialog.y_column()
+        columns = list(dict.fromkeys(("X", "Y", x_column, y_column)))
+        sources = self._capture_spectral_sources([source_dataset], columns)
+        request = BaselineMapRequest(
+            source=sources[0], x_column=x_column, y_column=y_column,
+            parameters=deepcopy(dialog.baseline_parameters()), analysis_range=dialog.analysis_range(),
+            output_name=dialog.result_sheet_name(), detail=deepcopy(detail),
         )
-        map_detail = dict(detail)
-        map_detail.update({
-            "Application scope": "Raman map",
-            "Requested pixels": str(len(jobs)),
-            "Successful pixels": str(len(output_frames)),
-            "Failed pixels": str(len(failure_messages)),
-            "Map errors": " | ".join(failure_messages),
-        })
-        output.worksheet_metadata.import_details.update(map_detail)
-        set_dataset_operation_comments(
-            output,
-            f"Baseline Correction map: source={source_dataset.name}; "
-            f"x={x_column}; y={y_column}; baseline={parameters.method}",
+        self._start_spectral_job(
+            lambda context: prepare_baseline_map(context, request), self._commit_baseline_map,
+            datasets=[source_dataset], sources=sources, columns=columns,
+            label="Baseline correction", error_title="Baseline Correction Map",
+        )
+
+    def _commit_baseline_map(self, result: PreparedBaselineMap) -> None:
+        """Publish the prepared worksheet on the GUI thread, rolling back failed insertion."""
+        workspace = self._workspace
+        datasets_before = set(workspace.dataset_names())
+        try:
+            prepared = result.worksheet
+            output = workspace.add_dataset(prepared.name, prepared.frame, copy_frame=False)
+            output.worksheet_metadata = prepared.worksheet_metadata
+            output.column_metadata = prepared.column_metadata
+            output.sync_column_metadata_attrs()
+        except Exception:
+            for name in set(workspace.dataset_names()) - datasets_before:
+                workspace.remove_dataset(name)
+            raise
+        self._finish_spectral_job(
+            f"Baseline map correction created {output.name}: "
+            f"{result.successes} succeeded, {result.failures} failed"
         )
         self._refresh_dataset_list(output.name)
-        self.statusBar().showMessage(
-            f"Baseline map correction created {output.name}: "
-            f"{len(output_frames)} succeeded, {len(failure_messages)} failed"
-        )
 
     def _run_peak_analysis_batch_or_map(
         self, preview_dataset: Dataset, dialog: PeakAnalysisDialog, detail: dict[str, str],
     ) -> None:
         """Capture reviewed inputs, then fit without touching live GUI/workspace state."""
-        if (self._jobs.is_running or self._text_import_token is not None
-                or self._peak_fit_token is not None or self._closing_when_idle):
-            self.statusBar().showMessage("Wait for the current background job to finish")
+        if not self._spectral_job_available():
             return
         scope = dialog.application_scope()
         names = dialog.batch_dataset_names() if scope == "batch" else [preview_dataset.name]
@@ -8628,13 +8571,7 @@ class MainWindow(QMainWindow):
         x_column, y_column = dialog.x_column(), dialog.y_column()
         coordinates = ["X", "Y"] if scope == "map" else []
         columns = list(dict.fromkeys([*coordinates, x_column, y_column]))
-        # Copy only analysis inputs. Grouping and output assembly happen in the
-        # worker; neither the live Dataset nor the dialog crosses the boundary.
-        sources = tuple(PeakFitSource(
-            dataset.name,
-            dataset.frame.loc[:, [name for name in columns if name in dataset.frame]].copy(deep=True),
-        ) for dataset in datasets)
-        metadata_snapshots = tuple(deepcopy(dataset.column_metadata) for dataset in datasets)
+        sources = self._capture_spectral_sources(datasets, columns)
         create_fit = dialog.create_fit_output()
         request = PeakFitRequest(
             scope=scope, source_dataset=preview_dataset.name, sources=sources,
@@ -8651,22 +8588,54 @@ class MainWindow(QMainWindow):
             fit_name=dialog.fit_sheet_name() if create_fit else None,
             parameter_name=dialog.fit_parameter_sheet_name() if create_fit else None,
         )
+        self._start_spectral_job(
+            lambda context: prepare_peak_fit(context, request),
+            lambda result: self._commit_peak_fit(result, scope),
+            datasets=datasets, sources=sources, columns=columns,
+            label="Peak fit", error_title="Peak Analysis Failed",
+        )
+
+    def _spectral_job_available(self) -> bool:
+        if (self._jobs.is_running or self._text_import_token is not None
+                or self._spectral_job_token is not None or self._closing_when_idle):
+            self.statusBar().showMessage("Wait for the current background job to finish")
+            return False
+        return True
+
+    @staticmethod
+    def _capture_spectral_sources(datasets: list[Dataset], columns: list[str]) -> tuple[SpectralSource, ...]:
+        """Copy only relevant columns before workers read input or group map pixels."""
+        return tuple(SpectralSource(
+            dataset.name,
+            dataset.frame.loc[:, [name for name in columns if name in dataset.frame]].copy(deep=True),
+        ) for dataset in datasets)
+
+    def _start_spectral_job(
+        self, operation: Callable[[JobContext], _SpectralResult],
+        ready: Callable[[_SpectralResult], None], *, datasets: list[Dataset],
+        sources: tuple[SpectralSource, ...], columns: list[str], label: str, error_title: str,
+    ) -> None:
+        """Share ownership, progress, source validation, cancellation, and safe completion."""
+        if not self._spectral_job_available():
+            return
+        metadata_snapshots = tuple(deepcopy(dataset.column_metadata) for dataset in datasets)
+        self._spectral_job_label = label
         token, workspace = object(), self._workspace
-        self._peak_fit_token = token
-        self._peak_fit_cancel_requested = False
+        self._spectral_job_token = token
+        self._spectral_job_cancel_requested = False
         progress = JobProgressWidget(self)
-        progress.setLabelText("Preparing peak-fit spectra...")
-        progress.canceled.connect(self._cancel_peak_fit)
+        progress.setLabelText(f"Preparing {label.lower()}...")
+        progress.canceled.connect(self._cancel_spectral_job)
         self.statusBar().addPermanentWidget(progress)
-        self._peak_fit_progress = progress
+        self._spectral_job_progress = progress
         self._import_action.setEnabled(False)
 
-        def succeeded(result: PreparedPeakFit) -> None:
-            if token is not self._peak_fit_token:
+        def succeeded(result: _SpectralResult) -> None:
+            if token is not self._spectral_job_token:
                 return
-            if (self._closing_when_idle or self._peak_fit_cancel_requested
+            if (self._closing_when_idle or self._spectral_job_cancel_requested
                     or self._workspace is not workspace):
-                self._finish_peak_fit("Peak fit discarded; workspace changed or run cancelled")
+                self._finish_spectral_job(f"{label} discarded; workspace changed or run cancelled")
                 return
             for dataset, source, metadata in zip(datasets, sources, metadata_snapshots):
                 current = workspace.get_dataset(source.name) if source.name in workspace.dataset_names() else None
@@ -8674,24 +8643,24 @@ class MainWindow(QMainWindow):
                         or not dataset.frame.loc[:, [name for name in columns if name in dataset.frame]].equals(source.frame)
                         or dataset.column_metadata != metadata
                         or dataset.frame.attrs != source.frame.attrs):
-                    self._finish_peak_fit("Peak fit discarded; source worksheet changed")
+                    self._finish_spectral_job(f"{label} discarded; source worksheet changed")
                     return
-            self._commit_peak_fit(result, scope)
+            ready(result)
 
         def failed(message: str) -> None:
-            if token is self._peak_fit_token:
-                self._finish_peak_fit("Peak fit failed; no results were added")
+            if token is self._spectral_job_token:
+                self._finish_spectral_job(f"{label} failed; no results were added")
                 if not self._closing_when_idle and self._workspace is workspace:
-                    QMessageBox.critical(self, "Peak Analysis Failed", message)
+                    QMessageBox.critical(self, error_title, message)
 
         try:
             self._jobs.start(
-                lambda context: prepare_peak_fit(context, request),
+                operation,
                 on_success=succeeded, on_error=failed,
-                on_cancelled=lambda: self._finish_peak_fit("Peak fit cancelled; no results were added"),
+                on_cancelled=lambda: self._finish_spectral_job(f"{label} cancelled; no results were added"),
             )
         except Exception:
-            self._finish_peak_fit("Peak fit could not start")
+            self._finish_spectral_job(f"{label} could not start")
             raise
 
     def _commit_peak_fit(self, result: PreparedPeakFit, scope: str) -> None:
@@ -8714,7 +8683,7 @@ class MainWindow(QMainWindow):
             for name in set(workspace.spectral_analysis_names()) - analyses_before:
                 workspace.remove_spectral_analysis(name)
             raise
-        self._finish_peak_fit(
+        self._finish_spectral_job(
             f"Peak fit {scope}: {result.successes} succeeded, {result.failures} failed; "
             f"saved analysis '{analysis.name}'; "
             f"created {', '.join(created) if created else 'no optional worksheets'}"
@@ -8723,28 +8692,28 @@ class MainWindow(QMainWindow):
         self._refresh_spectral_analysis_list(analysis.name)
         self._show_spectral_analysis(analysis)
 
-    def _update_peak_fit_progress(self, progress: JobProgress) -> None:
-        widget = self._peak_fit_progress
-        if widget is None or self._peak_fit_cancel_requested:
+    def _update_spectral_job_progress(self, progress: JobProgress) -> None:
+        widget = self._spectral_job_progress
+        if widget is None or self._spectral_job_cancel_requested:
             return
         widget.setLabelText(progress.message)
         widget.setRange(0, progress.total)
         if progress.total:
             widget.setValue(progress.completed)
 
-    def _cancel_peak_fit(self) -> None:
-        if self._peak_fit_token is None:
+    def _cancel_spectral_job(self) -> None:
+        if self._spectral_job_token is None:
             return
-        self._peak_fit_cancel_requested = True
+        self._spectral_job_cancel_requested = True
         self._jobs.cancel()
-        message = "Cancelling peak fit; waiting for the current calculation to stop..."
-        if self._peak_fit_progress is not None:
-            self._peak_fit_progress.setLabelText(message)
+        message = f"Cancelling {self._spectral_job_label.lower()}; waiting for the current calculation to stop..."
+        if self._spectral_job_progress is not None:
+            self._spectral_job_progress.setLabelText(message)
         self.statusBar().showMessage(message)
 
-    def _finish_peak_fit(self, message: str) -> None:
-        self._peak_fit_token = None
-        progress, self._peak_fit_progress = self._peak_fit_progress, None
+    def _finish_spectral_job(self, message: str) -> None:
+        self._spectral_job_token = None
+        progress, self._spectral_job_progress = self._spectral_job_progress, None
         if progress is not None:
             self.statusBar().removeWidget(progress)
             progress.close()
@@ -10485,8 +10454,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(has_dataset)
         for button in getattr(self, "_analysis_buttons", []):
             button.setEnabled(has_dataset)
-        self._undo_action.setEnabled(self._dataset_model.can_undo())
-        self._redo_action.setEnabled(self._dataset_model.can_redo())
+        self._update_history_actions()
         self._save_project_action.setEnabled(has_project_content)
         self._save_project_as_action.setEnabled(has_project_content)
         self._close_project_action.setEnabled(has_project_content)
@@ -10496,6 +10464,13 @@ class MainWindow(QMainWindow):
         """Refresh history/action state without rescanning the worksheet."""
         if hasattr(self, "_undo_action"):
             self._update_dataset_summary()
+
+    def _update_history_actions(self) -> None:
+        if not hasattr(self, "_undo_action"):
+            return
+        owner = self._plot_tab_widget if self._tabs.currentWidget() is self._plot_tab_widget else self._dataset_model
+        self._undo_action.setEnabled(owner.can_undo())
+        self._redo_action.setEnabled(owner.can_redo())
 
     def _handle_dataset_columns_renamed(self, rename_map: dict[str, str]) -> None:
         """Retarget plots after undo/redo restores renamed dataset columns."""
@@ -10512,6 +10487,9 @@ class MainWindow(QMainWindow):
 
     def _undo_dataset_edit(self) -> None:
         """Undo the most recent editable dataset operation."""
+        if self._tabs.currentWidget() is self._plot_tab_widget:
+            self._plot_tab_widget.undo()
+            return
         if not self._dataset_model.undo():
             return
         dataset = self._dataset_model.dataset
@@ -10523,6 +10501,9 @@ class MainWindow(QMainWindow):
 
     def _redo_dataset_edit(self) -> None:
         """Redo the most recently undone dataset operation."""
+        if self._tabs.currentWidget() is self._plot_tab_widget:
+            self._plot_tab_widget.redo()
+            return
         if not self._dataset_model.redo():
             return
         dataset = self._dataset_model.dataset
@@ -10563,6 +10544,7 @@ class MainWindow(QMainWindow):
             self._syncing_inspector_visibility = False
         self._sync_plot_options_action(self._plot_inspector_enabled)
         self._schedule_responsive_layout()
+        self._update_history_actions()
 
     def _toggle_workspace_section(self) -> None:
         """Toggle visibility of the workspace dataset section."""
@@ -10804,10 +10786,33 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("JASC Data Processor")
         else:
             self.setWindowTitle(f"JASC Data Processor - {self._project_path.name}")
+        if self._plot_tab_widget.is_dirty():
+            self.setWindowTitle(self.windowTitle() + " *")
+
+    def _confirm_project_plot_changes(self) -> bool:
+        """One project-wide save decision; cancelling keeps documents and workers alive."""
+        if not self._plot_tab_widget.is_dirty():
+            return True
+        prompt = QMessageBox(self)
+        prompt.setWindowTitle("Unsaved Plot Changes")
+        prompt.setText("Save changes to the project before closing or replacing it?")
+        prompt.setInformativeText("All plots, including closed tabs and pending editor fields, will be saved together.")
+        prompt.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        prompt.setDefaultButton(QMessageBox.Save)
+        choice = prompt.exec()
+        if choice == QMessageBox.Cancel:
+            return False
+        if choice == QMessageBox.Save:
+            self._save_project()
+            return not self._plot_tab_widget.is_dirty()
+        return choice == QMessageBox.Discard
 
     def _open_project(self) -> None:
         """Open a plain or encrypted JASC project, replacing the workspace."""
-        if self._has_project_content():
+        had_plot_changes = self._plot_tab_widget.is_dirty()
+        if not self._confirm_project_plot_changes():
+            return
+        if self._has_project_content() and not had_plot_changes:
             reply = QMessageBox.question(
                 self, "Open Project",
                 "Opening a project will replace your current workspace. Continue?",
@@ -10872,7 +10877,9 @@ class MainWindow(QMainWindow):
             return
 
         self._cancel_text_import()
-        self._cancel_peak_fit()
+        self._cancel_spectral_job()
+        for dialog in self.findChildren(PeakAnalysisDialog):
+            dialog.reject()
         self._large_data_view.set_source(None)
         self._workspace = loaded_workspace
         self._project_path = Path(file_name)
@@ -10900,6 +10907,7 @@ class MainWindow(QMainWindow):
 
     def _save_project(self) -> None:
         """Save the current workspace to its project path, or prompt for one."""
+        self._plot_tab_widget.flush()
         if not self._has_project_content():
             QMessageBox.information(self, "Save Project", "The workspace is empty.")
             return
@@ -10940,6 +10948,7 @@ class MainWindow(QMainWindow):
                 password=password,
                 signing_identity=signing_identity,
             )
+            self._plot_tab_widget.mark_saved()
             self._project_password = password
             self._project_signing_identity = signing_identity
             if signing_identity is not None:
@@ -10956,6 +10965,7 @@ class MainWindow(QMainWindow):
 
     def _save_project_as(self, *, force_encrypt: bool | None = None) -> None:
         """Prompt for a project path and save the current workspace there."""
+        self._plot_tab_widget.flush()
         if not self._has_project_content():
             QMessageBox.information(self, "Save Project", "The workspace is empty.")
             return
@@ -11006,6 +11016,7 @@ class MainWindow(QMainWindow):
 
         try:
             project_io.save_project(self._workspace, path, password=password)
+            self._plot_tab_widget.mark_saved()
             self._project_path = path
             self._project_password = password
             self._project_signing_identity = None
@@ -11020,6 +11031,7 @@ class MainWindow(QMainWindow):
 
     def _save_signed_project_as(self, *, force_encrypt: bool | None = None) -> None:
         """Save a project with an Ed25519 author signature, optionally encrypted."""
+        self._plot_tab_widget.flush()
         if not self._has_project_content():
             QMessageBox.information(self, "Save Signed Project", "The workspace is empty.")
             return
@@ -11077,6 +11089,7 @@ class MainWindow(QMainWindow):
                 password=password,
                 signing_identity=signing_identity,
             )
+            self._plot_tab_widget.mark_saved()
         except Exception as exc:
             QMessageBox.critical(self, "Signed Save Failed", str(exc))
             return
@@ -11334,11 +11347,14 @@ class MainWindow(QMainWindow):
 
     def _close_project(self) -> None:
         """Clear the current project without closing the application."""
+        had_plot_changes = self._plot_tab_widget.is_dirty()
+        if not self._confirm_project_plot_changes():
+            return
         if not self._has_project_content():
             self.statusBar().showMessage("No project is open")
             return
 
-        reply = QMessageBox.question(
+        reply = QMessageBox.Yes if had_plot_changes else QMessageBox.question(
             self,
             "Close Project",
             "Close the current project? Unsaved changes will be lost.",
@@ -11349,7 +11365,9 @@ class MainWindow(QMainWindow):
             return
 
         self._cancel_text_import()
-        self._cancel_peak_fit()
+        self._cancel_spectral_job()
+        for dialog in self.findChildren(PeakAnalysisDialog):
+            dialog.reject()
         self._large_data_view.set_source(None)
         self._workspace = Workspace()
         self._project_path = None
@@ -11439,7 +11457,7 @@ class MainWindow(QMainWindow):
 
         self._plot_list.blockSignals(True)
         self._plot_list.clear()
-        empty_item = QListWidgetItem("New / Empty Plot")
+        empty_item = QListWidgetItem("New plot...")
         empty_item.setData(Qt.UserRole, None)
         self._plot_list.addItem(empty_item)
         for plot_name in plot_names:
@@ -11629,55 +11647,29 @@ class MainWindow(QMainWindow):
                 return
             self._load_plot_by_name(plot_name, show_message=False)
         else:
-            self._start_new_plot(update_selection=False)
+            self._update_plot_action_state()
+
+    def _handle_plot_navigator_click(self, _item: QListWidgetItem) -> None:
+        # The open handler may have refreshed the list, so read its current item.
+        current = self._plot_list.currentItem()
+        if current is not None and current.data(Qt.UserRole) is None:
+            self._start_new_plot()
 
     def _start_new_plot(
-        self,
-        _checked: bool = False,
-        update_selection: bool = True,
+        self, _checked: bool = False, update_selection: bool = True,
         confirm_replacement: bool = True,
     ) -> bool:
-        """Detach from any saved definition and display a fresh empty plot."""
-        if confirm_replacement and not self._confirm_plot_replacement():
-            self._restore_active_plot_selection()
-            return False
-        self._active_plot_name = None
-        self._active_plot_baseline = None
-        self._plot_tab_widget.reset_plot_draft()
-        if update_selection and self._plot_list.count():
-            self._plot_list.blockSignals(True)
-            self._plot_list.setCurrentRow(0)
-            self._plot_list.blockSignals(False)
+        """Create another document without replacing existing plot work."""
+        self._plot_tab_widget.new_plot()
         self._tabs.setCurrentWidget(self._plot_tab_widget)
-        self._update_plot_action_state()
-        self.statusBar().showMessage("Started a new empty plot")
         return True
 
     def _plot_has_unsaved_changes(self) -> bool:
-        """Return whether replacing the editor would discard an unsaved definition."""
-        if not self._plot_tab_widget.has_plot_series():
-            return False
-        if self._plot_tab_widget.has_unapplied_series_edits():
-            return True
-        if self._active_plot_baseline is None:
-            return True
-        return self._plot_state_fingerprint() != self._active_plot_baseline
+        return self._plot_tab_widget.is_dirty()
 
     def _confirm_plot_replacement(self) -> bool:
-        """Offer Save, Discard, and Cancel before replacing unsaved plot work."""
-        if not self._plot_has_unsaved_changes():
-            return True
-        message = QMessageBox(self)
-        message.setIcon(QMessageBox.Warning)
-        message.setWindowTitle("Unsaved Plot")
-        message.setText("The current plot has unsaved changes.")
-        message.setInformativeText("Save it before replacing the plot?")
-        message.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
-        message.setDefaultButton(QMessageBox.Save)
-        choice = message.exec()
-        if choice == QMessageBox.Save:
-            return self._save_current_plot()
-        return choice == QMessageBox.Discard
+        """Opening or creating a document preserves the other plot documents."""
+        return True
 
     def _plot_state_fingerprint(self) -> str:
         """Return a stable JSON representation of the editable plot state."""
@@ -11701,100 +11693,53 @@ class MainWindow(QMainWindow):
         self._plot_list.blockSignals(False)
 
     def _mark_plot_as_unsaved(self) -> None:
-        """Detach an analysis-generated plot from a previously loaded saved plot."""
-        self._active_plot_name = None
-        self._active_plot_baseline = None
-        if self._plot_list.count():
-            self._plot_list.blockSignals(True)
-            self._plot_list.setCurrentRow(0)
-            self._plot_list.blockSignals(False)
-        self._update_plot_action_state()
+        self._plot_documents_changed()
+
+    def _plot_documents_changed(self) -> None:
+        """Keep the navigator, project dirty indication, and active inspector in sync."""
+        plot = self._plot_tab_widget.active_document
+        self._active_plot_name = plot.name if plot is not None else None
+        self._refresh_plot_list(self._active_plot_name)
+        self._set_project_window_title()
+        has_content = self._has_project_content()
+        self._save_project_action.setEnabled(has_content)
+        self._save_project_as_action.setEnabled(has_content)
+        self._close_project_action.setEnabled(has_content)
+        self._update_history_actions()
 
     def _save_current_plot(self) -> bool:
-        """Save or overwrite the current plot definition in the workspace."""
-        if not self._plot_tab_widget.has_plot_series():
-            QMessageBox.information(self, "Save Plot", "Create a plot before saving it.")
+        """Rename the active document; Save Project persists every plot together."""
+        plot = self._plot_tab_widget.active_document
+        if plot is None:
             return False
-        if self._plot_tab_widget.has_unapplied_series_edits():
-            QMessageBox.information(
-                self,
-                "Unapplied Series Edits",
-                "Click Update Series to keep the staged edits, or Revert Edits to discard them, before saving.",
-            )
-            return False
-
-        selected_name = self._active_plot_name
-        default_name = selected_name or self._plot_tab_widget.suggested_plot_name()
-        plot_name, accepted = QInputDialog.getText(
-            self,
-            "Save Plot",
-            "Plot name:",
-            text=default_name,
-        )
+        name, accepted = QInputDialog.getText(self, "Rename Plot", "Plot name:", text=plot.name)
         if not accepted:
             return False
-
-        clean_name = plot_name.strip() or "Plot"
-        state = self._plot_tab_widget.current_plot_state()
-
         try:
-            if clean_name in self._workspace.plot_names():
-                reply = QMessageBox.question(
-                    self,
-                    "Save Plot",
-                    f"Replace saved plot '{clean_name}'?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes,
-                )
-                if reply != QMessageBox.Yes:
-                    return False
-                saved_plot = self._workspace.update_plot(clean_name, state)
-            else:
-                saved_plot = self._workspace.add_plot(clean_name, state)
-        except Exception as exc:
-            QMessageBox.critical(self, "Save Plot Failed", str(exc))
+            renamed = self._plot_tab_widget.rename_active(name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Rename Plot", str(exc))
             return False
-
-        self._active_plot_name = saved_plot.name
-        self._active_plot_baseline = self._plot_state_fingerprint()
-        self._refresh_plot_list(saved_plot.name)
-        self.statusBar().showMessage(f"Saved plot '{saved_plot.name}'")
+        self.statusBar().showMessage(f"Renamed plot '{renamed.name}'")
         return True
 
     def _load_selected_plot(self) -> None:
-        """Load the currently selected saved plot with user feedback."""
-        plot_name = self._selected_plot_name()
-        if plot_name is None:
-            QMessageBox.information(self, "Load Plot", "Select a saved plot before loading it.")
-            return
-
-        if plot_name != self._active_plot_name and not self._confirm_plot_replacement():
-            self._restore_active_plot_selection()
-            return
-
-        self._load_plot_by_name(plot_name, show_message=True)
+        name = self._selected_plot_name()
+        if name is not None:
+            self._load_plot_by_name(name, show_message=True)
 
     def _load_plot_by_name(self, plot_name: str, show_message: bool) -> None:
-        """Load a saved plot by name into the Plot tab."""
         if plot_name not in self._workspace.plot_names():
-            self._update_plot_action_state()
             return
-
         try:
-            saved_plot = self._workspace.get_plot(plot_name)
-            self._plot_tab_widget.load_plot_state(saved_plot.state)
+            self._plot_tab_widget.open_plot(plot_name)
         except Exception as exc:
-            QMessageBox.critical(self, "Load Plot Failed", str(exc))
+            QMessageBox.critical(self, "Open Plot Failed", str(exc))
             return
-
-        self._active_plot_name = saved_plot.name
-        self._active_plot_baseline = self._plot_state_fingerprint()
         self._tabs.setCurrentWidget(self._plot_tab_widget)
-        self._update_plot_action_state()
+        self._plot_documents_changed()
         if show_message:
-            self.statusBar().showMessage(f"Loaded plot '{plot_name}'")
-        else:
-            self.statusBar().showMessage(f"Selected saved plot '{plot_name}' for editing")
+            self.statusBar().showMessage(f"Opened plot '{plot_name}'")
 
     def _duplicate_selected_plot(self) -> None:
         """Duplicate the selected saved plot and load the independent copy."""
@@ -11807,6 +11752,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_plot_replacement():
             self._restore_active_plot_selection()
             return
+        self._plot_tab_widget.flush()
         try:
             duplicate = self._workspace.duplicate_plot(plot_name)
         except Exception as exc:
@@ -11822,13 +11768,13 @@ class MainWindow(QMainWindow):
         """Remove the currently selected saved plot from the workspace."""
         plot_name = self._selected_plot_name()
         if plot_name is None:
-            QMessageBox.information(self, "Remove Plot", "Select a saved plot before removing it.")
+            QMessageBox.information(self, "Delete Plot", "Select a saved plot before removing it.")
             return
 
         reply = QMessageBox.question(
             self,
-            "Remove Plot",
-            f"Remove saved plot '{plot_name}'?",
+            "Delete Plot",
+            f"Delete plot '{plot_name}'?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -11836,15 +11782,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self._workspace.remove_plot(plot_name)
+            self._plot_tab_widget.delete_plot(plot_name)
         except Exception as exc:
-            QMessageBox.critical(self, "Remove Plot Failed", str(exc))
+            QMessageBox.critical(self, "Delete Plot Failed", str(exc))
             return
 
-        if self._active_plot_name == plot_name:
-            self._active_plot_name = None
-            self._active_plot_baseline = None
-            self._plot_tab_widget.reset_plot_draft()
         self._refresh_plot_list()
         self.statusBar().showMessage(f"Removed plot '{plot_name}'")
 
@@ -11875,15 +11817,15 @@ class MainWindow(QMainWindow):
     def _build_plot_context_menu(self, plot_name: object) -> tuple[QMenu, dict[str, object]]:
         """Build the saved-plot context menu and its named actions."""
         menu = QMenu(self)
-        new_action = menu.addAction("New Empty Plot")
-        save_action = menu.addAction("Save Current Plot...")
+        new_action = menu.addAction("New Plot")
+        save_action = menu.addAction("Rename Current Plot...")
         save_action.setEnabled(self._plot_tab_widget.has_plot_series())
         menu.addSeparator()
-        load_action = menu.addAction("Load Plot")
+        load_action = menu.addAction("Open Plot")
         load_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
-        duplicate_action = menu.addAction("Duplicate Saved Plot")
+        duplicate_action = menu.addAction("Duplicate Plot")
         duplicate_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
-        delete_action = menu.addAction("Remove Saved Plot")
+        delete_action = menu.addAction("Delete Plot")
         delete_action.setEnabled(isinstance(plot_name, str) and bool(plot_name))
         return menu, {
             "new": new_action,
@@ -11898,9 +11840,10 @@ class MainWindow(QMainWindow):
         selected_plot_name = self._selected_plot_name()
         has_saved_plot = selected_plot_name is not None
         has_current_plot = self._plot_tab_widget.has_plot_series()
+        has_document = self._plot_tab_widget.active_document is not None
 
         if hasattr(self, "_save_plot_action"):
-            self._save_plot_action.setEnabled(has_current_plot)
+            self._save_plot_action.setEnabled(has_document)
             self._copy_plot_action.setEnabled(has_current_plot)
             self._load_plot_action.setEnabled(has_saved_plot)
             self._duplicate_plot_action.setEnabled(has_saved_plot)
@@ -11909,7 +11852,7 @@ class MainWindow(QMainWindow):
         self._duplicate_plot_button.setEnabled(has_saved_plot)
 
         self._plot_tab_widget.set_plot_actions_enabled(
-            can_save=has_current_plot,
+            can_save=has_document,
             can_load=has_saved_plot,
             can_remove=has_saved_plot,
         )
@@ -11921,9 +11864,7 @@ class MainWindow(QMainWindow):
         if ok and new_name and new_name != old_name:
             try:
                 final_name = self._workspace.rename_dataset(old_name, new_name)
-                self._plot_tab_widget.clear_plot_state()
-                self._active_plot_name = None
-                self._active_plot_baseline = None
+                self._plot_tab_widget.dataset_renamed(old_name, final_name)
                 self._refresh_plot_list()
                 self._refresh_dataset_list(final_name)
                 self.statusBar().showMessage(f"Renamed '{old_name}' to '{final_name}'")
@@ -11970,9 +11911,7 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             try:
                 self._workspace.remove_dataset(name)
-                self._plot_tab_widget.clear_plot_state()
-                self._active_plot_name = None
-                self._active_plot_baseline = None
+                self._plot_tab_widget.dataset_removed(name)
                 self._refresh_dataset_list()
                 self._refresh_plot_list()
                 self.statusBar().showMessage(f"Deleted dataset '{name}'")

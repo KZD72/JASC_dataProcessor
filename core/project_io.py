@@ -231,6 +231,8 @@ def _write_project_archive(
             metadata["plots"].append({
                 "name": plot.name,
                 "state": plot.state,
+                "plot_id": plot.plot_id,
+                "editor_state": plot.editor_state,
             })
 
         for model in workspace.list_custom_fit_models():
@@ -387,7 +389,11 @@ def _load_project_archive(
             name = entry.get("name")
             state = entry.get("state")
             if isinstance(name, str) and isinstance(state, dict):
-                workspace.add_plot(name, state)
+                workspace.add_plot(
+                    name, state,
+                    plot_id=entry.get("plot_id") if isinstance(entry.get("plot_id"), str) else None,
+                    editor_state=entry.get("editor_state") if isinstance(entry.get("editor_state"), dict) else None,
+                )
 
         for entry in metadata.get("custom_fit_models", []):
             try:

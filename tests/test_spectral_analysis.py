@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import pandas as pd
@@ -99,7 +100,8 @@ class SpectralAnalysisSessionTests(unittest.TestCase):
             window._plot_tab_widget.load_plot_state(saved.state)
             self.assertEqual(len(window._plot_tab_widget._plot_canvas.axes.lines), 1)
         finally:
-            window.close()
+            with patch.object(window, "_confirm_project_plot_changes", return_value=True):
+                window.close()
             window.deleteLater()
 
     def test_raman_horizontal_and_vertical_cuts_use_selected_metric(self) -> None:
@@ -247,7 +249,7 @@ class SpectralAnalysisSessionTests(unittest.TestCase):
         try:
             self.assertEqual(
                 [window._tabs.tabText(index) for index in range(window._tabs.count())],
-                ["Data", "Plot"],
+                ["Data", "Plots"],
             )
             self.assertEqual(window._tabs.indexOf(window._spectral_analysis_viewer), -1)
             analysis_nav_index = window._workspace_nav_tabs.indexOf(
@@ -273,4 +275,5 @@ class SpectralAnalysisSessionTests(unittest.TestCase):
             self.assertEqual(window._tabs.indexOf(window._spectral_analysis_viewer), -1)
             self.assertIs(window._tabs.currentWidget(), window._data_tab_widget)
         finally:
-            window.close()
+            with patch.object(window, "_confirm_project_plot_changes", return_value=True):
+                window.close()
