@@ -15,8 +15,8 @@ def rename_editor_dataset(editor: dict[str, object], old: str, new: str) -> None
 def rename_editor_columns(editor: dict[str, object], dataset: str, names: dict[str, str]) -> None:
     controls = editor.get("controls", {})
     bindings = {
-        "_x_dataset_combo": ("_x_column_combo", "_x_err_column_combo"),
-        "_y_dataset_combo": ("_y_column_combo", "_y_err_column_combo"),
+        "_x_dataset_combo": ("_x_column_combo", "_x_err_column_combo", "_x_bounds_lower_combo", "_x_bounds_upper_combo"),
+        "_y_dataset_combo": ("_y_column_combo", "_y_err_column_combo", "_y_bounds_lower_combo", "_y_bounds_upper_combo"),
         "_z_dataset_combo": ("_z_column_combo",),
         "_spectral_dataset_combo": ("_spectral_column_combo",),
     }

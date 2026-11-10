@@ -98,6 +98,12 @@ At first launch, JASC opens an empty workspace. Create a sheet, import data, or 
 
 JASC automatically follows the operating-system light or dark palette and reapplies theme-aware table, input, dock, and dialog styling when the Qt palette changes.
 
+Checkboxes, radios, and toggle buttons now have explicit visible states, including
+partial/disabled states. Inputs have contrasting boundaries and keyboard focus
+outlines; navigation icons adapt to checked and highlighted backgrounds. Colour
+swatches choose readable text. Comparison readouts use their own contrasting
+surface; the scientific figure/export palette remains controlled by plot settings.
+
 Window dimensions are calculated in Qt logical pixels from the active monitor's available work area, so operating-system scaling and taskbar space are respected. Resizing or moving the window between monitors triggers a debounced dock rebalance. Inspector forms wrap long rows and keep their editors usable; Plot actions that do not fit move into the toolbar overflow menu. In a very narrow Plot layout, JASC temporarily collapses the Workspace Navigator to protect the plot canvas. Selecting **View > Show Workspace Navigator** explicitly restores it even at that width.
 
 ### View controls
@@ -411,6 +417,12 @@ To attach uncertainty to a manual point:
 3. Alternatively, click **4-Point Error** and pick the X-low, X-high, Y-low, and Y-high boundaries.
 
 Manual uncertainties appear as blue error bars and are exported in both pixel and calibrated data units.
+
+Four-point picks retain their separate graphical endpoints in `x_lower_bound`,
+`x_upper_bound`, `y_lower_bound`, and `y_upper_bound`, including asymmetric and
+logarithmically calibrated bounds. The original symmetric maximum-width columns
+remain for compatibility. Digitized geometry has no inferred percentile coverage;
+specify the probability levels and centre meaning before using it for fitting.
 
 ### XY graph: Step 3B, automatic curve or line tracing
 
@@ -1216,6 +1228,51 @@ Blank bounds are unbounded. Built-in models prefill recommended domain bounds fo
 
 Selecting an X uncertainty column automatically switches to ODR and locks the optimizer control. Error/sigma values must be positive and finite where used.
 
+### Asymmetric percentile bounds
+
+In the **Uncertainty** tab, enable **Use X percentile bounds** and/or **Use Y
+percentile bounds**. Select separate lower/upper endpoint columns and their
+percentile levels (default 16% and 84%). These are values in the same units as the
+central column, not negative/positive error widths. Choose the meaning of the
+central values and whether the bounds are measurement/sampling or posterior
+quantiles. Scroll this tab if both axis editors exceed the available height.
+
+Example: a median of 10 with lower endpoint 8 at 16% and upper endpoint 14 at 84%
+defines a 68% interval with unequal plotted errors of 2 and 4. The probability
+levels remain explicit; those distances are not automatically standard deviations.
+
+For **median measurement values**, the method switches to **Percentile likelihood
+(median model)**. The quantile-normal model exactly matches both selected
+percentiles and the median. Its CDF smoothly transforms residuals to a normal
+distribution with Gaussian tails beyond the selected interval; fitting includes
+the density transformation, not just a rescaled least-squares residual. This is
+an explicit distribution assumption, since percentile bounds do not uniquely
+determine a full probability distribution.
+
+With X bounds, independent latent true X positions are fitted jointly with model
+parameters. A symmetric X sigma can also accompany asymmetric Y bounds, or vice
+versa. If no Y uncertainty is selected, the likelihood explicitly assumes unit Y
+standard deviation and reports this. Symmetric and percentile uncertainty cannot
+both be selected for the same axis. A Y-bound pair currently maps to one selected
+response column per dialog; the same mapping can run across batch worksheets.
+
+Fitting requires finite, strictly ordered bounds around every retained median.
+Posterior quantiles and non-median centres are supported for plotting only; they
+are not silently interpreted as sampling likelihoods. Correlated/shared systematic
+errors are not represented by this independent-point model.
+
+Generated fit plots retain the asymmetric input bars. Fit/residual worksheet
+metadata records columns, levels, model version, and negative log likelihood;
+residuals include original bounds and latent X when applicable. Parameter errors
+and curve bands use a **local Hessian/normal approximation**, with fixed
+parameters retained. A singular/nonpositive curvature or parameter at a constraint
+makes these local errors unavailable rather than reporting misleading bounds.
+Bootstrap/profile percentile intervals are not implemented in this slice.
+
+The composite-peak numerical API accepts the same quantile likelihood through
+`uncertainty=QuantileNormal(...)`. Its dedicated Peak/Raman dialog retains its
+existing controls and does not yet expose percentile-column mapping.
+
 ### Outputs and report
 
 Configure:
@@ -1286,7 +1343,7 @@ Accepted changes redraw immediately and update the corresponding lateral Plot In
 | XY / Categorical | Line | X and Y; line style/width; optional left/right Y axis |
 | XY / Categorical | Scatter | X and Y; marker and size; optional left/right Y axis |
 | XY / Categorical | Line + Markers | X and Y; line and marker controls; optional left/right Y axis |
-| XY / Categorical | Errorbar | X/Y plus optional X-error and Y-error columns |
+| XY / Categorical | Errorbar | X/Y with symmetric errors or separate lower/upper percentile endpoints |
 | XY / Categorical | Vertical Bar | Numeric positions or text categories plus values; bar width and fill alpha |
 | XY / Categorical | Horizontal Bar | Numeric positions or text categories plus values; bar width and fill alpha |
 | XY / Categorical | Area | X/Y filled area, line controls, fill alpha |
@@ -1471,6 +1528,20 @@ deleting it leaves a visible placeholder that can be replaced through selection.
 1000 x 750 pixels per cell into one PNG, independently of window size, then restores
 the live view. Vector/PDF comparison export, shared legends, inset panels, and a
 general page composition editor are follow-ups.
+
+### Plotting asymmetric bounds
+
+Choose the **Errorbar** subtype and enable the X/Y percentile controls in the Series
+inspector. Select endpoint columns and probability levels, then **Add Series** or
+**Update Series**. Each axis may independently use symmetric errors or percentile
+bounds. The endpoint columns belong to that axis's selected worksheet.
+
+Bounds must bracket the displayed value. Zero-width sides may be drawn; fitting
+requires positive widths. Logarithmic axes require positive endpoints. Probability
+levels, centre/origin meaning, applied mappings, and pending edits persist with the
+project and follow column renames. Closing/reopening a tab or arranging comparison
+panels preserves the unequal error bars. Plotting mean/mode/other estimates or
+posterior quantiles does not turn them into an eligible measurement likelihood.
 
 ### Navigating with the mouse
 
@@ -1744,6 +1815,7 @@ Consult `Roadmap.md` for planned work; roadmap entries are not instructions for 
 | Z | Surface/map value |
 | Error | Generic uncertainty fallback |
 | X error / Y error | Errorbar uncertainty and explicit fit-uncertainty choices |
+| X/Y lower bound / upper bound | Endpoint columns; percentile levels and centre/origin are chosen explicitly in plot/fit controls |
 | Group | Statistics factor/group default |
 | Label | Categorical/composition labels |
 | Weight | Semantic hint for an explicitly selected curve-fit weight |

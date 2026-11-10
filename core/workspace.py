@@ -25,6 +25,10 @@ COLUMN_ROLE_LABELS: dict[str, str] = {
     "error": "Error",
     "x_error": "X error",
     "y_error": "Y error",
+    "x_lower_bound": "X lower bound",
+    "x_upper_bound": "X upper bound",
+    "y_lower_bound": "Y lower bound",
+    "y_upper_bound": "Y upper bound",
     "group": "Group",
     "label": "Label",
     "weight": "Weight",
@@ -570,9 +574,15 @@ class Workspace:
                 if series.get("x_dataset") == dataset_name:
                     self._rename_series_column(series, "x_column", rename_map)
                     self._rename_series_column(series, "x_err_column", rename_map)
+                    if isinstance(series.get("x_bounds"), dict):
+                        for key in ("lower_column", "upper_column"):
+                            self._rename_series_column(series["x_bounds"], key, rename_map)
                 if series.get("y_dataset") == dataset_name:
                     self._rename_series_column(series, "y_column", rename_map)
                     self._rename_series_column(series, "y_err_column", rename_map)
+                    if isinstance(series.get("y_bounds"), dict):
+                        for key in ("lower_column", "upper_column"):
+                            self._rename_series_column(series["y_bounds"], key, rename_map)
                     self._rename_series_column(series, "lower_column", rename_map)
                     self._rename_series_column(series, "upper_column", rename_map)
                     distribution_columns = series.get("distribution_columns")

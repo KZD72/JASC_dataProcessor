@@ -195,6 +195,7 @@ from ui.dialogs import (
 from ui.plot_canvas import PlotSeries
 from ui.plot_documents import PlotDocuments
 from ui.plot_comparison import ComparePlotsDialog
+from models.uncertainty import PercentileBounds
 from core.plot_comparison import is_comparison
 from ui.spectral_analysis_viewer import SpectralAnalysisExportDialog, SpectralAnalysisViewer
 
@@ -1727,332 +1728,14 @@ class MainWindow(QMainWindow):
 
     @classmethod
     def _dark_visual_style(cls, palette: QPalette) -> str:
-        """Return a dark-theme stylesheet derived from the active Qt palette."""
-        window = palette.color(cls._palette_role("Window"))
-        text = palette.color(cls._palette_role("Text"))
-        base = cls._dark_safe_color(palette.color(cls._palette_role("Base")), window, text, 0.08)
-        button = cls._dark_safe_color(palette.color(cls._palette_role("Button")), window, text, 0.10)
-        button_text = palette.color(cls._palette_role("ButtonText"))
-        highlight = palette.color(cls._palette_role("Highlight"))
-        highlighted_text = palette.color(cls._palette_role("HighlightedText"))
-        border = cls._mix_colors(window, text, 0.28)
-        soft_border = cls._mix_colors(window, text, 0.18)
-        panel = cls._mix_colors(window, base, 0.45)
-        raised = cls._mix_colors(button, text, 0.06)
-        hover = cls._mix_colors(button, highlight, 0.30)
-        pressed = cls._mix_colors(button, highlight, 0.45)
-        disabled_bg = cls._mix_colors(button, window, 0.55)
-        disabled_text = cls._mix_colors(text, window, 0.50)
-        selected_tab_text = cls._mix_colors(text, highlight, 0.18)
-        table_alternate = cls._mix_colors(base, text, 0.05)
-
-        colors = {
-            "window": cls._qss_color(window),
-            "base": cls._qss_color(base),
-            "button": cls._qss_color(button),
-            "raised": cls._qss_color(raised),
-            "text": cls._qss_color(text),
-            "button_text": cls._qss_color(button_text),
-            "highlight": cls._qss_color(highlight),
-            "highlighted_text": cls._qss_color(highlighted_text),
-            "border": cls._qss_color(border),
-            "soft_border": cls._qss_color(soft_border),
-            "panel": cls._qss_color(panel),
-            "hover": cls._qss_color(hover),
-            "pressed": cls._qss_color(pressed),
-            "disabled_bg": cls._qss_color(disabled_bg),
-            "disabled_text": cls._qss_color(disabled_text),
-            "selected_tab_text": cls._qss_color(selected_tab_text),
-            "table_alternate": cls._qss_color(table_alternate),
-        }
-        return """
-            QMainWindow {{
-                background: {window};
-                color: {text};
-            }}
-            QMenuBar {{
-                background: {base};
-                color: {text};
-                border-bottom: 1px solid {border};
-                padding: 2px 4px;
-            }}
-            QMenuBar::item:selected, QMenu::item:selected {{
-                background: {highlight};
-                color: {highlighted_text};
-            }}
-            QToolBar {{
-                background: {panel};
-                border-bottom: 1px solid {border};
-                spacing: 4px;
-                padding: 4px;
-            }}
-            QDockWidget {{
-                color: {text};
-                font-weight: 700;
-            }}
-            QDockWidget::title {{
-                background: {panel};
-                border: 1px solid {border};
-                padding: 6px;
-                text-align: left;
-            }}
-            QToolButton, QPushButton {{
-                background: {button};
-                border: 1px solid {border};
-                border-radius: 4px;
-                color: {button_text};
-                padding: 5px 10px;
-            }}
-            QToolButton:hover, QPushButton:hover {{
-                background: {hover};
-                border-color: {highlight};
-            }}
-            QToolButton:pressed, QPushButton:pressed {{
-                background: {pressed};
-                border-color: {highlight};
-                padding-top: 6px;
-                padding-bottom: 4px;
-            }}
-            QToolButton:disabled, QPushButton:disabled {{
-                background: {disabled_bg};
-                border-color: {soft_border};
-                color: {disabled_text};
-            }}
-            QLabel#SectionLabel {{
-                color: {text};
-                font-weight: 700;
-                padding: 8px 2px 3px 2px;
-            }}
-            QListWidget, QTableView, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
-                background: {base};
-                border: 1px solid {border};
-                border-radius: 4px;
-                color: {text};
-                selection-background-color: {highlight};
-                selection-color: {highlighted_text};
-            }}
-            QSpinBox, QDoubleSpinBox {{
-                padding-right: 24px;
-            }}
-            QSpinBox::up-button, QDoubleSpinBox::up-button {{
-                subcontrol-origin: border;
-                subcontrol-position: top right;
-                width: 20px;
-            }}
-            QSpinBox::down-button, QDoubleSpinBox::down-button {{
-                subcontrol-origin: border;
-                subcontrol-position: bottom right;
-                width: 20px;
-            }}
-            QTableView {{
-                alternate-background-color: {table_alternate};
-                gridline-color: {soft_border};
-            }}
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableView:focus {{
-                border: 1px solid {highlight};
-            }}
-            QListWidget::item {{
-                padding: 4px 6px;
-                border-radius: 3px;
-            }}
-            QListWidget::item:selected {{
-                background: {highlight};
-                color: {highlighted_text};
-            }}
-            QListWidget::item:hover {{
-                background: {hover};
-                color: {button_text};
-            }}
-            QTabWidget::pane {{
-                border: 1px solid {border};
-                background: {base};
-                border-radius: 4px;
-            }}
-            QTabBar::tab {{
-                background: {raised};
-                border: 1px solid {border};
-                border-bottom: none;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                color: {text};
-                padding: 6px 12px;
-                margin-right: 2px;
-            }}
-            QTabBar::tab:selected {{
-                background: {base};
-                color: {selected_tab_text};
-                font-weight: 700;
-            }}
-            QGroupBox {{
-                border: 1px solid {border};
-                border-radius: 5px;
-                margin-top: 10px;
-                padding: 8px;
-                background: {panel};
-                color: {text};
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-                color: {text};
-                font-weight: 700;
-            }}
-            QHeaderView::section {{
-                background: {panel};
-                border: 1px solid {border};
-                color: {text};
-                padding: 4px;
-                font-weight: 700;
-            }}
-            QStatusBar {{
-                background: {base};
-                border-top: 1px solid {border};
-                color: {text};
-            }}
-        """.format(**colors)
+        from ui.theme import stylesheet
+        return stylesheet(palette, dark=True)
 
     @staticmethod
     def _light_visual_style() -> str:
-        """Return the polished light stylesheet used for non-dark palettes."""
-        return """
-            QMainWindow {
-                background: #f4f7fa;
-            }
-            QMenuBar {
-                background: #ffffff;
-                border-bottom: 1px solid #c7d0da;
-                padding: 2px 4px;
-            }
-            QMenuBar::item:selected, QMenu::item:selected {
-                background: #d8e8ff;
-                color: #102a43;
-            }
-            QToolBar {
-                background: #edf2f7;
-                border-bottom: 1px solid #c7d0da;
-                spacing: 4px;
-                padding: 4px;
-            }
-            QDockWidget {
-                font-weight: 700;
-            }
-            QDockWidget::title {
-                background: #edf2f7;
-                border: 1px solid #c7d0da;
-                padding: 6px;
-                text-align: left;
-            }
-            QToolButton, QPushButton {
-                background: #ffffff;
-                border: 1px solid #aeb9c5;
-                border-radius: 4px;
-                color: #182430;
-                padding: 5px 10px;
-            }
-            QToolButton:hover, QPushButton:hover {
-                background: #eaf3ff;
-                border-color: #5c8fc7;
-            }
-            QToolButton:pressed, QPushButton:pressed {
-                background: #cfe3fb;
-                border-color: #2f6fae;
-                padding-top: 6px;
-                padding-bottom: 4px;
-            }
-            QToolButton:disabled, QPushButton:disabled {
-                background: #eef1f4;
-                border-color: #d2d8de;
-                color: #8b98a5;
-            }
-            QLabel#SectionLabel {
-                color: #263747;
-                font-weight: 700;
-                padding: 8px 2px 3px 2px;
-            }
-            QListWidget, QTableView, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {
-                background: #ffffff;
-                border: 1px solid #b7c1cc;
-                border-radius: 4px;
-                selection-background-color: #2f77bc;
-                selection-color: #ffffff;
-            }
-            QSpinBox, QDoubleSpinBox {
-                padding-right: 24px;
-            }
-            QSpinBox::up-button, QDoubleSpinBox::up-button {
-                subcontrol-origin: border;
-                subcontrol-position: top right;
-                width: 20px;
-            }
-            QSpinBox::down-button, QDoubleSpinBox::down-button {
-                subcontrol-origin: border;
-                subcontrol-position: bottom right;
-                width: 20px;
-            }
-            QTableView {
-                alternate-background-color: #f7fbff;
-                gridline-color: #dbe3ec;
-            }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableView:focus {
-                border: 1px solid #2f77bc;
-            }
-            QListWidget::item {
-                padding: 4px 6px;
-                border-radius: 3px;
-            }
-            QListWidget::item:selected {
-                background: #2f77bc;
-                color: #ffffff;
-            }
-            QListWidget::item:hover {
-                background: #e7f1fc;
-                color: #182430;
-            }
-            QTabWidget::pane {
-                border: 1px solid #c7d0da;
-                background: #ffffff;
-                border-radius: 4px;
-            }
-            QTabBar::tab {
-                background: #e6ebf1;
-                border: 1px solid #c7d0da;
-                border-bottom: none;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                padding: 6px 12px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: #ffffff;
-                color: #174f86;
-                font-weight: 700;
-            }
-            QGroupBox {
-                border: 1px solid #c3ccd6;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding: 8px;
-                background: #fbfcfe;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-                color: #263747;
-                font-weight: 700;
-            }
-            QHeaderView::section {
-                background: #edf2f7;
-                border: 1px solid #c7d0da;
-                padding: 4px;
-                font-weight: 700;
-            }
-            QStatusBar {
-                background: #ffffff;
-                border-top: 1px solid #c7d0da;
-            }
-        """
+        from ui.theme import stylesheet
+        app = QApplication.instance()
+        return stylesheet(app.palette() if app is not None else QPalette(), dark=False)
 
     @staticmethod
     def _qss_color(color: QColor) -> str:
@@ -2866,6 +2549,7 @@ class MainWindow(QMainWindow):
             "z",
             "x_uncertainty",
             "y_uncertainty",
+            "x_lower_bound", "x_upper_bound", "y_lower_bound", "y_upper_bound",
             "pixel_x",
             "pixel_y",
             "pixel_x_uncertainty",
@@ -2976,6 +2660,12 @@ class MainWindow(QMainWindow):
             f"Figure digitization from {Path(result.source_path).name}; "
             f"{result.calibration_summary}; {result.extraction_summary}"
         )
+        for column in ("x_lower_bound", "x_upper_bound", "y_lower_bound", "y_upper_bound"):
+            if column in dataset.frame.columns:
+                metadata = dataset.metadata_for_column(column)
+                metadata.role = column
+                metadata.value_type = "numeric"
+                metadata.comment = "Digitized graphical bound; probability coverage must be specified before percentile fitting."
         set_dataset_operation_comments(dataset, operation)
         dataset.sync_column_metadata_attrs()
 
@@ -8787,6 +8477,8 @@ class MainWindow(QMainWindow):
         requested_y_columns = dialog.y_columns()
         requested_x_weight_column = dialog.x_weight_column()
         requested_weight_columns = dialog.weight_columns()
+        requested_x_bounds = getattr(dialog, "x_bounds", lambda: None)()
+        requested_y_bounds = getattr(dialog, "y_bounds", lambda: None)()
         multiple_y_columns = len(requested_y_columns) > 1
         residual_needed = dialog.create_residual_sheet() or dialog.plot_residuals()
         custom_models = self._workspace.list_custom_fit_models()
@@ -8948,6 +8640,19 @@ class MainWindow(QMainWindow):
                     if x_column is None or y_column is None:
                         raise MathOperationError("Choose X and at least one Y column.")
 
+                    def resolve_bounds(specification: PercentileBounds | None, axis: str) -> PercentileBounds | None:
+                        if specification is None:
+                            return None
+                        names = {}
+                        for column in (specification.lower_column, specification.upper_column):
+                            names[column] = self._resolve_batch_column(
+                                reference_dataset=current_dataset, target_dataset=source_dataset,
+                                source_column=column, binding_mode=column_binding_mode,
+                                field_label=f"{axis} percentile bound")
+                        return specification.renamed(names)
+
+                    resolved_x_bounds = resolve_bounds(requested_x_bounds, "X")
+                    resolved_y_bounds = resolve_bounds(requested_y_bounds, "Y")
                     fit_result = fit_curve(
                         source_dataset.frame,
                         x_column=x_column,
@@ -8966,6 +8671,8 @@ class MainWindow(QMainWindow):
                         fit_points=dialog.fit_points(),
                         x_weight_column=x_weight_column,
                         custom_models=custom_models,
+                        x_bounds=resolved_x_bounds,
+                        y_bounds=resolved_y_bounds,
                     )
                     fit_dataset = self._workspace.add_dataset(requested_fit_sheet, fit_result.fit_frame)
                     fit_datasets.append(fit_dataset)
@@ -8980,6 +8687,11 @@ class MainWindow(QMainWindow):
                         column_binding_mode=column_binding_mode,
                     )
                     set_dataset_operation_comments(fit_dataset, fit_operation_comment)
+                    if fit_result.report.x_bounds or fit_result.report.y_bounds:
+                        details = json.dumps({"x": fit_result.report.x_bounds, "y": fit_result.report.y_bounds,
+                                              "negative_log_likelihood": fit_result.report.negative_log_likelihood,
+                                              "parameter_intervals": "local Hessian approximation"}, sort_keys=True)
+                        fit_dataset.worksheet_metadata.fields.append(("Percentile uncertainty", details))
 
                     residual_dataset = None
                     if residual_needed:
@@ -8991,6 +8703,8 @@ class MainWindow(QMainWindow):
                             residual_dataset,
                             f"Fit residuals: {fit_operation_comment}",
                         )
+                        if fit_result.report.x_bounds or fit_result.report.y_bounds:
+                            residual_dataset.worksheet_metadata.fields.append(("Percentile uncertainty", details))
 
                     if first_fit_result is None:
                         first_fit_result = fit_result
@@ -9175,6 +8889,8 @@ class MainWindow(QMainWindow):
                 show_residuals=dialog.plot_residuals(),
                 x_err_column=x_error_column or "",
                 y_err_column=y_error_column or "",
+                x_bounds=PercentileBounds.from_state(current_fit_result.report.x_bounds),
+                y_bounds=PercentileBounds.from_state(current_fit_result.report.y_bounds),
             )
             self._tabs.setCurrentWidget(self._plot_tab_widget)
 
@@ -9279,6 +8995,13 @@ class MainWindow(QMainWindow):
                 weight_column = resolved_weight or ""
                 if not x_column or not y_column:
                     raise MathOperationError("Choose X and at least one Y column.")
+                for axis in ("x", "y"):
+                    spec = getattr(dialog, f"{axis}_bounds", lambda: None)()
+                    if spec is not None:
+                        for column in (spec.lower_column, spec.upper_column):
+                            self._resolve_batch_column(reference_dataset=current_dataset, target_dataset=source_dataset,
+                                                       source_column=column, binding_mode=column_binding_mode,
+                                                       field_label=f"{axis.upper()} percentile bound")
             except Exception as exc:
                 status = "failed"
                 error = str(exc)

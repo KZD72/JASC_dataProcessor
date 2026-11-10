@@ -13,7 +13,8 @@ from matplotlib.backend_bases import MouseEvent
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.path import Path as MplPath
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import QEvent, Signal, Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QSizePolicy, QVBoxLayout, QWidget
 from scipy import ndimage
 from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator, SmoothBivariateSpline
@@ -22,6 +23,7 @@ from scipy.spatial import ConvexHull, Delaunay
 from core.workspace import COLUMN_NUMERIC_TYPES, Workspace, dataframe_column_metadata
 from models.plot_settings import LegendSettings
 from ui.plot_navigation import PlotMouseNavigation
+from models.uncertainty import PercentileBounds
 
 try:
     import scienceplots  # noqa: F401
@@ -51,6 +53,8 @@ class PlotSeries:
     plot_type: str = "line"
     x_err_column: str = ""
     y_err_column: str = ""
+    x_bounds: PercentileBounds | None = None
+    y_bounds: PercentileBounds | None = None
     color: str = ""
     line_style: str = "-"
     marker: str = ""
@@ -216,6 +220,12 @@ class PlotNavigationToolbar(NavigationToolbar2QT):
             lambda _checked=False: plot_canvas.copy_to_clipboard()
         )
 
+    def _icon(self, name: str) -> QIcon:
+        from ui.theme import navigation_icon
+        app = QApplication.instance()
+        return navigation_icon(super()._icon(name), app.palette() if app else self.palette(),
+                               self.iconSize(), self.devicePixelRatioF())
+
     def home(self, *args: object) -> None:
         self._plot_canvas_owner._mouse_navigation.finish()
         super().home(*args)
@@ -271,7 +281,7 @@ class PlotCanvas(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create the Matplotlib figure, toolbar, and empty plot placeholder."""
         super().__init__(parent)
-
+        self.setObjectName("PlotCanvasPanel")
         self._export_width = 7.0
         self._export_height = 4.8
         self._export_size_mode = "figure"
@@ -319,6 +329,16 @@ class PlotCanvas(QWidget):
         self._export_width = float(width)
         self._export_height = float(height)
         self._export_size_mode = size_mode
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() in {QEvent.PaletteChange, QEvent.ApplicationPaletteChange} and hasattr(self, "toolbar"):
+            # Matplotlib chooses light/dark toolbar glyphs when they are created.
+            # Recreate them after a runtime palette change as well.
+            for _text, _tip, image_name, callback in self.toolbar.toolitems:
+                action = self.toolbar._actions.get(callback)
+                if image_name and action is not None:
+                    action.setIcon(self.toolbar._icon(f"{image_name}.png"))
 
     def copy_to_clipboard(self) -> bool:
         """Copy the current interactive canvas image without applying export geometry."""
@@ -1170,6 +1190,17 @@ class PlotCanvas(QWidget):
                 series.y_err_column,
                 "Y error",
             )
+        for axis, bounds, dataset_name in (("x", series.x_bounds, series.x_dataset),
+                                            ("y", series.y_bounds, series.y_dataset)):
+            if bounds is None:
+                continue
+            if getattr(series, f"{axis}_err_column"):
+                raise ValueError(f"Choose symmetric errors or percentile bounds for {axis.upper()}, not both.")
+            for side, column in (("lower", bounds.lower_column), ("upper", bounds.upper_column)):
+                frame = workspace.get_dataset(dataset_name).frame
+                if column not in frame.columns:
+                    raise ValueError(f"Missing {axis.upper()} percentile column '{column}'.")
+                cols[f"{axis}_{side}"] = self._numeric_column_values(workspace, dataset_name, column, f"{axis.upper()} {side} bound")
 
         # Find the minimum valid length across all provided columns
         point_count = min(len(col) for col in cols.values())
@@ -1181,6 +1212,13 @@ class PlotCanvas(QWidget):
             cols[key] = cols[key].iloc[:point_count].to_numpy()
 
         aligned = pd.DataFrame(cols).dropna()
+        for axis, bounds in (("x", series.x_bounds), ("y", series.y_bounds)):
+            if bounds is not None:
+                low, high, centre = aligned[f"{axis}_lower"], aligned[f"{axis}_upper"], aligned[axis]
+                if not np.isfinite(np.column_stack((low, high, centre))).all() or (low > centre).any() or (high < centre).any():
+                    raise ValueError(f"{axis.upper()} percentile bounds must be finite and bracket each central value.")
+                if (x_scale if axis == "x" else y_scale) == "log" and (low <= 0).any():
+                    raise ValueError(f"{axis.upper()} percentile bounds must be positive on a logarithmic axis.")
 
         if series.plot_type == "barh":
             if x_scale == "log":
@@ -1198,6 +1236,10 @@ class PlotCanvas(QWidget):
 
         x_err_out = aligned["x_err"] if "x_err" in aligned.columns else None
         y_err_out = aligned["y_err"] if "y_err" in aligned.columns else None
+        if series.x_bounds is not None:
+            x_err_out = np.vstack((aligned["x"] - aligned["x_lower"], aligned["x_upper"] - aligned["x"]))
+        if series.y_bounds is not None:
+            y_err_out = np.vstack((aligned["y"] - aligned["y_lower"], aligned["y_upper"] - aligned["y"]))
         return aligned["x"], aligned["y"], x_err_out, y_err_out
 
     def _categorical_x_series_values(
@@ -1616,7 +1658,7 @@ class PlotCanvas(QWidget):
     ) -> None:
         """Draw one aligned series using its explicit plot type."""
         plot_type = series.plot_type or "line"
-        if plot_type == "scatter":
+        if plot_type == "scatter" and x_err is None and y_err is None:
             scatter_kwargs: dict[str, object] = {
                 "label": series.legend_label,
                 "marker": series.marker or "o",
@@ -1627,7 +1669,7 @@ class PlotCanvas(QWidget):
             target_axes.scatter(x_values, y_values, **scatter_kwargs)
             return
 
-        if plot_type == "line_marker":
+        if plot_type == "line_marker" and x_err is None and y_err is None:
             plot_kwargs["marker"] = series.marker or "o"
             plot_kwargs["linestyle"] = series.line_style or "-"
             target_axes.plot(x_values, y_values, **plot_kwargs)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ from scipy import integrate, optimize
 from math_engine.calculus import MathOperationError
 from math_engine.peak_detection import PeakRecord
 from models.fit_functions import FitModel, available_fit_models, get_fit_model
+from math_engine.uncertainty import QuantileNormal, likelihood_fit
 
 
 SUPPORTED_COMPOSITE_PEAK_MODELS: tuple[str, ...] = (
@@ -184,6 +186,7 @@ def fit_composite_peaks(
     *,
     provenance: dict[str, Any] | None = None,
     check_cancelled: Callable[[], None] | None = None,
+    uncertainty: QuantileNormal | None = None,
 ) -> CompositeFitResult:
     """Fit a shared baseline and peak components, optionally checking cancellation."""
     if check_cancelled is not None:
@@ -208,6 +211,13 @@ def fit_composite_peaks(
     order = np.argsort(fit_x, kind="stable")
     fit_x = fit_x[order]
     observed = observed[order]
+    if uncertainty is not None:
+        if uncertainty.lower_width.shape != x.shape:
+            raise MathOperationError("Composite percentile widths must align with the source arrays.")
+        if settings.loss != "linear":
+            raise MathOperationError("A percentile likelihood cannot be combined with a robust least-squares loss.")
+        uncertainty = QuantileNormal(uncertainty.lower_width[finite][order], uncertainty.upper_width[finite][order],
+                                     uncertainty.lower_probability, uncertainty.upper_probability)
     if np.any(np.diff(fit_x) <= 0):
         raise MathOperationError("Composite fitting requires unique X coordinates.")
 
@@ -277,6 +287,10 @@ def fit_composite_peaks(
         residual = total - observed
         return np.nan_to_num(residual, nan=1.0e30, posinf=1.0e30, neginf=-1.0e30)
 
+    likelihood_covariance = None
+    likelihood_warnings: list[str] = []
+    likelihood_nll = None
+    likelihood_evaluations = 0
     try:
         starts = _fano_multistart_parameters(
             initial_array,
@@ -284,17 +298,29 @@ def fit_composite_peaks(
             upper_array,
             layouts,
         )
-        solutions = [
-            optimize.least_squares(
-                residuals,
-                start[free_indices],
-                bounds=(lower_array[free_indices], upper_array[free_indices]),
-                max_nfev=max(100, int(settings.maximum_evaluations)),
-                loss=settings.loss,
-            )
-            for start in starts
-        ]
-        solution = min(solutions, key=lambda candidate: float(np.sum(candidate.fun**2)))
+        if uncertainty is not None:
+            def median_model(_x: np.ndarray, *values: float) -> np.ndarray:
+                nonlocal likelihood_evaluations
+                likelihood_evaluations += 1
+                return calculate(np.asarray(values))[0]
+            candidates = [likelihood_fit(median_model, fit_x, observed, start, lower_array, upper_array,
+                                          free_indices, uncertainty, check_cancelled=check_cancelled,
+                                          maximum_iterations=settings.maximum_evaluations) for start in starts]
+            values, likelihood_covariance, _latent, likelihood_nll, likelihood_warnings = min(candidates, key=lambda item: item[3])
+            solution = SimpleNamespace(x=values[free_indices], success=True,
+                                       message="Quantile-normal percentile likelihood converged", nfev=likelihood_evaluations)
+        else:
+            solutions = [
+                optimize.least_squares(
+                    residuals,
+                    start[free_indices],
+                    bounds=(lower_array[free_indices], upper_array[free_indices]),
+                    max_nfev=max(100, int(settings.maximum_evaluations)),
+                    loss=settings.loss,
+                )
+                for start in starts
+            ]
+            solution = min(solutions, key=lambda candidate: float(np.sum(candidate.fun**2)))
     except (ValueError, RuntimeError, FloatingPointError) as exc:
         raise MathOperationError(f"Composite peak fit failed: {exc}") from exc
 
@@ -315,7 +341,10 @@ def fit_composite_peaks(
     bic = float(point_count * np.log(safe_rss / point_count) + free_count * np.log(point_count))
     covariance, standard_errors, covariance_warning = _covariance_from_solution(
         solution, point_count, free_count, len(initial_array), free_indices, rss
-    )
+    ) if likelihood_covariance is None else (likelihood_covariance, np.sqrt(np.diag(likelihood_covariance)), "")
+    if likelihood_nll is not None:
+        aic = float(2*likelihood_nll + 2*free_count)
+        bic = float(2*likelihood_nll + free_count*np.log(point_count))
 
     fit_data: dict[str, np.ndarray] = {
         "x": fit_x,
@@ -412,6 +441,7 @@ def fit_composite_peaks(
             ))
 
     warning_values = [value for value in (covariance_warning,) if value]
+    warning_values.extend(likelihood_warnings)
     if any(component.model_key == "fano_peak" for component in active):
         warning_values.append(
             "Fano areas are signed integrals over the selected fitting window; "
@@ -433,7 +463,10 @@ def fit_composite_peaks(
         parameters=settings,
         components=active,
         warnings=warnings,
-        provenance=dict(provenance or {}),
+        provenance={**dict(provenance or {}), **({"uncertainty": {"distribution": "quantile_normal", "model_version": 1,
+                    "lower_probability": uncertainty.lower_probability, "upper_probability": uncertainty.upper_probability,
+                    "centre": "median", "negative_log_likelihood": likelihood_nll,
+                    "interval_method": "local Hessian approximation"}} if uncertainty is not None else {})},
     )
 
 

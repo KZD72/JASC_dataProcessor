@@ -1,0 +1,547 @@
+{
+  "platform": "offscreen",
+  "profiles": {
+    "Fusion_light": {
+      "Unchecked": {
+        "checkbox": {
+          "text": "#000000",
+          "background_role": "#efefef",
+          "contrast_ratio": 18.263
+        },
+        "button": {
+          "text": "#182430",
+          "background_role": "#ffffff",
+          "contrast_ratio": 15.744
+        },
+        "field": {
+          "text": "#000000",
+          "background_role": "#ffffff",
+          "contrast_ratio": 21.0
+        }
+      },
+      "Checked": {
+        "checkbox": {
+          "text": "#000000",
+          "background_role": "#efefef",
+          "contrast_ratio": 18.263
+        },
+        "button": {
+          "text": "#182430",
+          "background_role": "#ffffff",
+          "contrast_ratio": 15.744
+        },
+        "field": {
+          "text": "#000000",
+          "background_role": "#ffffff",
+          "contrast_ratio": 21.0
+        }
+      },
+      "Partially checked": {
+        "checkbox": {
+          "text": "#000000",
+          "background_role": "#efefef",
+          "contrast_ratio": 18.263
+        },
+        "button": {
+          "text": "#182430",
+          "background_role": "#ffffff",
+          "contrast_ratio": 15.744
+        },
+        "field": {
+          "text": "#000000",
+          "background_role": "#ffffff",
+          "contrast_ratio": 21.0
+        }
+      },
+      "Disabled unchecked": {
+        "checkbox": {
+          "text": "#bebebe",
+          "background_role": "#efefef",
+          "contrast_ratio": 1.616
+        },
+        "button": {
+          "text": "#8b98a5",
+          "background_role": "#eef1f4",
+          "contrast_ratio": 2.597
+        },
+        "field": {
+          "text": "#bebebe",
+          "background_role": "#ffffff",
+          "contrast_ratio": 1.859
+        }
+      },
+      "Disabled checked": {
+        "checkbox": {
+          "text": "#bebebe",
+          "background_role": "#efefef",
+          "contrast_ratio": 1.616
+        },
+        "button": {
+          "text": "#8b98a5",
+          "background_role": "#eef1f4",
+          "contrast_ratio": 2.597
+        },
+        "field": {
+          "text": "#bebebe",
+          "background_role": "#ffffff",
+          "contrast_ratio": 1.859
+        }
+      },
+      "toggle_off_on_raster_equal": true
+    },
+    "Fusion_dark": {
+      "Unchecked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#e5e9ef",
+          "background_role": "#303844",
+          "contrast_ratio": 9.71
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "Checked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#e5e9ef",
+          "background_role": "#303844",
+          "contrast_ratio": 9.71
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "Partially checked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#e5e9ef",
+          "background_role": "#303844",
+          "contrast_ratio": 9.71
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "Disabled unchecked": {
+        "checkbox": {
+          "text": "#7b8594",
+          "background_role": "#252a32",
+          "contrast_ratio": 3.863
+        },
+        "button": {
+          "text": "#858a90",
+          "background_role": "#2a303a",
+          "contrast_ratio": 3.814
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "Disabled checked": {
+        "checkbox": {
+          "text": "#7b8594",
+          "background_role": "#252a32",
+          "contrast_ratio": 3.863
+        },
+        "button": {
+          "text": "#858a90",
+          "background_role": "#2a303a",
+          "contrast_ratio": 3.814
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "toggle_off_on_raster_equal": true
+    },
+    "Fusion_mixed_dark": {
+      "Unchecked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#101820",
+          "background_role": "#383d45",
+          "contrast_ratio": 1.637
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "Checked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#101820",
+          "background_role": "#383d45",
+          "contrast_ratio": 1.637
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "Partially checked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#101820",
+          "background_role": "#383d45",
+          "contrast_ratio": 1.637
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "Disabled unchecked": {
+        "checkbox": {
+          "text": "#7b8594",
+          "background_role": "#252a32",
+          "contrast_ratio": 3.863
+        },
+        "button": {
+          "text": "#858a90",
+          "background_role": "#2e333b",
+          "contrast_ratio": 3.652
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "Disabled checked": {
+        "checkbox": {
+          "text": "#7b8594",
+          "background_role": "#252a32",
+          "contrast_ratio": 3.863
+        },
+        "button": {
+          "text": "#858a90",
+          "background_role": "#2e333b",
+          "contrast_ratio": 3.652
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "toggle_off_on_raster_equal": true
+    },
+    "windowsvista_light": {
+      "Unchecked": {
+        "checkbox": {
+          "text": "#000000",
+          "background_role": "#d4d0c8",
+          "contrast_ratio": 13.656
+        },
+        "button": {
+          "text": "#182430",
+          "background_role": "#ffffff",
+          "contrast_ratio": 15.744
+        },
+        "field": {
+          "text": "#000000",
+          "background_role": "#ffffff",
+          "contrast_ratio": 21.0
+        }
+      },
+      "Checked": {
+        "checkbox": {
+          "text": "#000000",
+          "background_role": "#d4d0c8",
+          "contrast_ratio": 13.656
+        },
+        "button": {
+          "text": "#182430",
+          "background_role": "#ffffff",
+          "contrast_ratio": 15.744
+        },
+        "field": {
+          "text": "#000000",
+          "background_role": "#ffffff",
+          "contrast_ratio": 21.0
+        }
+      },
+      "Partially checked": {
+        "checkbox": {
+          "text": "#000000",
+          "background_role": "#d4d0c8",
+          "contrast_ratio": 13.656
+        },
+        "button": {
+          "text": "#182430",
+          "background_role": "#ffffff",
+          "contrast_ratio": 15.744
+        },
+        "field": {
+          "text": "#000000",
+          "background_role": "#ffffff",
+          "contrast_ratio": 21.0
+        }
+      },
+      "Disabled unchecked": {
+        "checkbox": {
+          "text": "#6a6864",
+          "background_role": "#d4d0c8",
+          "contrast_ratio": 3.616
+        },
+        "button": {
+          "text": "#8b98a5",
+          "background_role": "#eef1f4",
+          "contrast_ratio": 2.597
+        },
+        "field": {
+          "text": "#6a6864",
+          "background_role": "#ffffff",
+          "contrast_ratio": 5.56
+        }
+      },
+      "Disabled checked": {
+        "checkbox": {
+          "text": "#6a6864",
+          "background_role": "#d4d0c8",
+          "contrast_ratio": 3.616
+        },
+        "button": {
+          "text": "#8b98a5",
+          "background_role": "#eef1f4",
+          "contrast_ratio": 2.597
+        },
+        "field": {
+          "text": "#6a6864",
+          "background_role": "#ffffff",
+          "contrast_ratio": 5.56
+        }
+      },
+      "toggle_off_on_raster_equal": true
+    },
+    "windowsvista_dark": {
+      "Unchecked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#e5e9ef",
+          "background_role": "#303844",
+          "contrast_ratio": 9.71
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "Checked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#e5e9ef",
+          "background_role": "#303844",
+          "contrast_ratio": 9.71
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "Partially checked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#e5e9ef",
+          "background_role": "#303844",
+          "contrast_ratio": 9.71
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "Disabled unchecked": {
+        "checkbox": {
+          "text": "#7b8594",
+          "background_role": "#252a32",
+          "contrast_ratio": 3.863
+        },
+        "button": {
+          "text": "#858a90",
+          "background_role": "#2a303a",
+          "contrast_ratio": 3.814
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "Disabled checked": {
+        "checkbox": {
+          "text": "#7b8594",
+          "background_role": "#252a32",
+          "contrast_ratio": 3.863
+        },
+        "button": {
+          "text": "#858a90",
+          "background_role": "#2a303a",
+          "contrast_ratio": 3.814
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#171c23",
+          "contrast_ratio": 14.048
+        }
+      },
+      "toggle_off_on_raster_equal": true
+    },
+    "windowsvista_mixed_dark": {
+      "Unchecked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#101820",
+          "background_role": "#383d45",
+          "contrast_ratio": 1.637
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "Checked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#101820",
+          "background_role": "#383d45",
+          "contrast_ratio": 1.637
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "Partially checked": {
+        "checkbox": {
+          "text": "#e5e9ef",
+          "background_role": "#252a32",
+          "contrast_ratio": 11.837
+        },
+        "button": {
+          "text": "#101820",
+          "background_role": "#383d45",
+          "contrast_ratio": 1.637
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "Disabled unchecked": {
+        "checkbox": {
+          "text": "#7b8594",
+          "background_role": "#252a32",
+          "contrast_ratio": 3.863
+        },
+        "button": {
+          "text": "#858a90",
+          "background_role": "#2e333b",
+          "contrast_ratio": 3.652
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "Disabled checked": {
+        "checkbox": {
+          "text": "#7b8594",
+          "background_role": "#252a32",
+          "contrast_ratio": 3.863
+        },
+        "button": {
+          "text": "#858a90",
+          "background_role": "#2e333b",
+          "contrast_ratio": 3.652
+        },
+        "field": {
+          "text": "#e5e9ef",
+          "background_role": "#343941",
+          "contrast_ratio": 9.534
+        }
+      },
+      "toggle_off_on_raster_equal": true
+    }
+  },
+  "control_styles": [
+    "Fusion",
+    "windowsvista"
+  ],
+  "dark_comparison": {
+    "readout_text": "#e5e9ef",
+    "grid_background_qss": "#ffffff",
+    "readout_contrast": 1.219
+  },
+  "light_qss_pairs": {
+    "editor_border_white": 1.824,
+    "button_border_white": 1.991,
+    "disabled_button_text": 2.597
+  }
+}

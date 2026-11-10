@@ -1,0 +1,23 @@
+{
+  "description": "Illustration only: reported values are exact 16th/50th/84th percentiles; naive Gaussian scales do not reproduce them.",
+  "target_percentiles": {
+    "p16": 8.0,
+    "p50": 10.0,
+    "p84": 14.0
+  },
+  "symmetric_normal_sigma_3_percentiles": {
+    "p16": 7.016626350370741,
+    "p50": 10.0,
+    "p84": 12.983373649629259
+  },
+  "naive_split_normal_mode_10_scales_2_4_percentiles": {
+    "p16": 8.587394874319825,
+    "p50": 11.2745574558575,
+    "p84": 14.699947168264362
+  },
+  "naive_split_normal_mass_below_reported_centre": 0.3333333333333333,
+  "split_normal_definition": {
+    "cdf_below_mode": "2*s_left/(s_left+s_right)*Phi((x-mode)/s_left)",
+    "cdf_above_mode": "1-2*s_right/(s_left+s_right)*(1-Phi((x-mode)/s_right))"
+  }
+}

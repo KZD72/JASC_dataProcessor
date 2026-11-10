@@ -421,8 +421,9 @@ class PlotSeriesAppearanceDialog(QDialog):
             self._colour_button.setStyleSheet("")
             return
         swatch = _MATPLOTLIB_COLOURS.get(self._colour, self._colour)
+        from ui.theme import readable_text
         self._colour_button.setText(self._colour)
-        self._colour_button.setStyleSheet(f"background-color: {swatch};")
+        self._colour_button.setStyleSheet(f"background-color: {swatch}; color: {readable_text(swatch)};")
 
     def series_updates(self) -> dict[str, object]:
         """Return dataclass fields represented by the focused controls."""

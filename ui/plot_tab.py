@@ -42,6 +42,8 @@ from models.plot_settings import (
     StyleSettings,
 )
 from models.plot_types import PLOT_TYPES, plot_type_label
+from models.uncertainty import PercentileBounds
+from ui.uncertainty_controls import PercentileBoundsEditor
 from ui.plot_canvas import SCIENCEPLOTS_AVAILABLE, LocatedPoint, PlotCanvas, PlotLocator, PlotSeries
 from ui.plot_element_dialogs import (
     PlotAxisEditDialog,
@@ -263,6 +265,7 @@ class PlotTab(QWidget):
         self._update_error_column_combo(self._x_dataset_combo, self._x_err_column_combo, ("x_error", "error"))
         self._update_column_combo(self._y_dataset_combo, self._y_column_combo, ("y",))
         self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo, ("y_error", "error"))
+        self._refresh_bounds_columns()
         self._update_column_combo(self._z_dataset_combo, self._z_column_combo, ("z",))
         self._update_spectral_column_combos()
         self._update_distribution_columns_list()
@@ -309,9 +312,13 @@ class PlotTab(QWidget):
             if series.x_dataset == dataset_name:
                 updates["x_column"] = rename_map.get(series.x_column, series.x_column)
                 updates["x_err_column"] = rename_map.get(series.x_err_column, series.x_err_column)
+                if series.x_bounds:
+                    updates["x_bounds"] = series.x_bounds.renamed(rename_map)
             if series.y_dataset == dataset_name:
                 updates["y_column"] = rename_map.get(series.y_column, series.y_column)
                 updates["y_err_column"] = rename_map.get(series.y_err_column, series.y_err_column)
+                if series.y_bounds:
+                    updates["y_bounds"] = series.y_bounds.renamed(rename_map)
                 updates["lower_column"] = rename_map.get(series.lower_column, series.lower_column)
                 updates["upper_column"] = rename_map.get(series.upper_column, series.upper_column)
                 updates["distribution_columns"] = tuple(
@@ -426,7 +433,7 @@ class PlotTab(QWidget):
                         widget.setCurrentIndex(index)
                     elif widget.isEditable():
                         widget.setEditText(str(value.get("text", "")))
-                    elif name.endswith(("_dataset_combo", "_column_combo", "_err_column_combo")) and value.get("text"):
+                    elif name.endswith(("_dataset_combo", "_column_combo", "_err_column_combo", "_bounds_lower_combo", "_bounds_upper_combo")) and value.get("text"):
                         widget.addItem(str(value["text"]), value.get("data"))
                         index = widget.count() - 1
                         widget.setItemData(index, "This source is unavailable; choose a replacement.", Qt.ToolTipRole)
@@ -505,6 +512,8 @@ class PlotTab(QWidget):
         show_residuals: bool = False,
         x_err_column: str = "",
         y_err_column: str = "",
+        x_bounds: PercentileBounds | None = None,
+        y_bounds: PercentileBounds | None = None,
     ) -> None:
         """Replace the current series queue with a data-vs-fit overlay."""
         fit_lower = "fit_lower" if "fit_lower" in fit_dataset.frame.columns else ""
@@ -515,7 +524,8 @@ class PlotTab(QWidget):
                 y_dataset=source_dataset.name, y_column=y_column,
                 x_err_column=x_err_column,
                 y_err_column=y_err_column,
-                plot_type="errorbar" if x_err_column or y_err_column else "scatter",
+                x_bounds=x_bounds, y_bounds=y_bounds,
+                plot_type="errorbar" if x_err_column or y_err_column or x_bounds or y_bounds else "scatter",
                 color="tab:blue", line_style="", marker="o",
                 custom_label=f"{source_dataset.name}: {y_column}",
             ),
@@ -674,6 +684,11 @@ class PlotTab(QWidget):
         self._y_dataset_combo = QComboBox()
         self._y_column_combo = QComboBox()
         self._y_err_column_combo = QComboBox()
+        self._x_bounds_editor = PercentileBoundsEditor("X")
+        self._y_bounds_editor = PercentileBoundsEditor("Y")
+        for axis, editor in (("x", self._x_bounds_editor), ("y", self._y_bounds_editor)):
+            for name, widget in editor.persisted_controls().items():
+                setattr(self, f"_{axis}_bounds_{name}", widget)
         self._z_dataset_combo = QComboBox()
         self._z_column_combo = QComboBox()
         self._spectral_dataset_combo = QComboBox()
@@ -1023,6 +1038,7 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "x_dataset", "X dataset", self._x_dataset_combo)
         self._add_series_row(sf, "x_column", "X column", self._x_column_combo)
         self._add_series_row(sf, "x_error", "X error", self._x_err_column_combo)
+        self._add_series_row(sf, "x_bounds", "X uncertainty", self._x_bounds_editor)
         self._add_series_row(sf, "y_dataset", "Y dataset", self._y_dataset_combo)
         self._add_series_row(sf, "y_column", "Y column", self._y_column_combo)
         self._add_series_row(sf, "z_dataset", "Z dataset", self._z_dataset_combo)
@@ -1047,6 +1063,7 @@ class PlotTab(QWidget):
         )
         self._add_series_row(sf, "distribution_columns", "Columns", self._distribution_columns_list)
         self._add_series_row(sf, "y_error", "Y error", self._y_err_column_combo)
+        self._add_series_row(sf, "y_bounds", "Y uncertainty", self._y_bounds_editor)
         self._add_series_row(sf, "y_axis", "Y axis", self._y_axis_combo)
         self._add_series_row(sf, "label", "Label", self._series_label_edit)
         self._add_series_row(
@@ -1284,6 +1301,10 @@ class PlotTab(QWidget):
         self._locator_mode_combo.currentIndexChanged.connect(self._update_locator_mode_controls)
         self._connect_axis_label_prefill_signals()
         self._connect_series_editor_signals()
+        self._x_dataset_combo.currentTextChanged.connect(self._refresh_bounds_columns)
+        self._y_dataset_combo.currentTextChanged.connect(self._refresh_bounds_columns)
+        self._x_bounds_editor.changed.connect(self._bounds_edited)
+        self._y_bounds_editor.changed.connect(self._bounds_edited)
         self._connect_global_preview_signals()
         self._legend_checkbox.toggled.connect(self._update_legend_controls_enabled)
         self._legend_frame_checkbox.toggled.connect(self._update_legend_controls_enabled)
@@ -1301,6 +1322,19 @@ class PlotTab(QWidget):
         self.refresh_controls()
 
     # -- helpers ------------------------------------------------------------
+
+    def _refresh_bounds_columns(self, *_args: object) -> None:
+        for combo, editor in ((self._x_dataset_combo, self._x_bounds_editor), (self._y_dataset_combo, self._y_bounds_editor)):
+            name = combo.currentText()
+            names = [str(column) for column in self._workspace.get_dataset(name).frame.columns] if name in self._workspace.dataset_names() else []
+            editor.set_columns(names)
+
+    def _bounds_edited(self) -> None:
+        for editor, combo in ((self._x_bounds_editor, self._x_err_column_combo), (self._y_bounds_editor, self._y_err_column_combo)):
+            if editor.enabled_check.isChecked():
+                combo.setCurrentIndex(0)
+            combo.setEnabled(not editor.enabled_check.isChecked())
+        self._handle_series_editor_changed()
 
     @staticmethod
     def _configure_responsive_form(form: QFormLayout) -> None:
@@ -2212,6 +2246,8 @@ class PlotTab(QWidget):
     def _plot_series_from_state(state: dict[str, object]) -> PlotSeries:
         """Deserialize one saved series dictionary into a PlotSeries."""
         clean_state = {key: value for key, value in state.items() if key in _PLOT_SERIES_FIELDS}
+        for key in ("x_bounds", "y_bounds"):
+            clean_state[key] = PercentileBounds.from_state(clean_state.get(key))
 
         def choice(key: str, default: str, allowed: set[str]) -> None:
             value = str(clean_state.get(key, default) or default)
@@ -2614,9 +2650,10 @@ class PlotTab(QWidget):
                 "New series - choose the mapping, then click Add Series"
             )
         else:
-            self._series_editor_dirty = (
-                self._series_from_controls() != self._plot_series[row]
-            )
+            try:
+                self._series_editor_dirty = self._series_from_controls() != self._plot_series[row]
+            except ValueError:
+                self._series_editor_dirty = True
             self._commit_series_button.setText("Update Series")
             if self._series_editor_dirty:
                 self._series_editor_status_label.setText(
@@ -2660,7 +2697,11 @@ class PlotTab(QWidget):
         ):
             QMessageBox.information(self, "Add Series", "Import or create a dataset before adding a series.")
             return
-        series = self._series_from_controls()
+        try:
+            series = self._series_from_controls()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Series Uncertainty", str(exc))
+            return
         self._plot_series.append(series)
         self._series_list.addItem(self._series_text(series))
         self._series_list.setCurrentRow(len(self._plot_series) - 1)
@@ -2689,6 +2730,8 @@ class PlotTab(QWidget):
             z_dataset=z_dataset if plot_type in _SURFACE_PLOT_TYPES else "",
             z_column=z_column if plot_type in _SURFACE_PLOT_TYPES else "",
             y_err_column=self._y_err_column_combo.currentText() if plot_type == "errorbar" else "",
+            x_bounds=self._x_bounds_editor.specification() if plot_type == "errorbar" else None,
+            y_bounds=self._y_bounds_editor.specification() if plot_type == "errorbar" else None,
             plot_type=plot_type,
             color=str(self._color_combo.currentData() or ""),
             line_style=str(line_style_data) if line_style_data is not None else "-",
@@ -2761,7 +2804,11 @@ class PlotTab(QWidget):
             QMessageBox.information(self, "Update Series", "Select a queued series before updating it.")
             return
 
-        series = self._series_from_controls()
+        try:
+            series = self._series_from_controls()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Series Uncertainty", str(exc))
+            return
         self._plot_series[row] = series
         self._series_list.item(row).setText(self._series_text(series))
         self._refresh_locator_series_combo()
@@ -2811,6 +2858,9 @@ class PlotTab(QWidget):
         self._update_error_column_combo(self._y_dataset_combo, self._y_err_column_combo)
         self._y_column_combo.setCurrentText(series.y_column)
         self._y_err_column_combo.setCurrentText(series.y_err_column)
+        self._refresh_bounds_columns()
+        self._x_bounds_editor.load(series.x_bounds)
+        self._y_bounds_editor.load(series.y_bounds)
         self._z_dataset_combo.setCurrentText(series.z_dataset or series.y_dataset)
         self._update_column_combo(self._z_dataset_combo, self._z_column_combo)
         self._z_column_combo.setCurrentText(series.z_column)
@@ -2966,6 +3016,8 @@ class PlotTab(QWidget):
         self._set_series_row_visible("x_column", plot_type in coordinate_types)
         self._set_series_row_visible("x_error", plot_type == "errorbar")
         self._set_series_row_visible("y_error", plot_type == "errorbar")
+        self._set_series_row_visible("x_bounds", plot_type == "errorbar")
+        self._set_series_row_visible("y_bounds", plot_type == "errorbar")
         self._set_series_row_visible("y_dataset", not is_spectral)
         self._set_series_row_visible("y_column", plot_type not in distribution_types)
         self._set_series_row_visible("z_dataset", plot_type in _SURFACE_PLOT_TYPES and not is_spectral)
@@ -3211,7 +3263,10 @@ class PlotTab(QWidget):
         if len(self._plot_series) == 1:
             self._prefill_axis_labels_for_series(self._plot_series[0])
         elif not self._plot_series and self._workspace.dataset_names():
-            self._prefill_axis_labels_for_series(self._series_from_controls())
+            try:
+                self._prefill_axis_labels_for_series(self._series_from_controls())
+            except ValueError:
+                return
 
     def _prefill_axis_labels_for_series(
         self,

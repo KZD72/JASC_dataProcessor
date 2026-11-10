@@ -244,7 +244,7 @@ class PlotComparisonView(QWidget):
         copy_action = toolbar.addWidget(self._copy_plot_button)
         copy_action.setText("Copy")
         self._grid_widget = QWidget()
-        self._grid_widget.setStyleSheet("background: white;")
+        self._grid_widget.setObjectName("PlotComparisonGrid")
         self._grid = QGridLayout(self._grid_widget)
         self._grid.setContentsMargins(2, 2, 2, 2)
         self._grid.setSpacing(8)

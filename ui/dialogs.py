@@ -83,6 +83,8 @@ from core.workspace import (
     normalize_display_precision,
 )
 from math_engine.curve_fitting import FIT_METHODS
+from models.uncertainty import PercentileBounds
+from ui.uncertainty_controls import PercentileBoundsEditor
 from math_engine.calculus import (
     DERIVATIVE_METHODS,
     INTEGRATION_METHODS,
@@ -2013,6 +2015,16 @@ class FigureDigitizerDialog(QDialog):
                 }
             )
 
+            if isinstance(manual_point, dict) and manual_point.get("boundary_pixels"):
+                endpoints = [self._pixel_to_data(float(point[0]), float(point[1]))
+                             for point in manual_point["boundary_pixels"]]
+                if data is not None and all(point is not None for point in endpoints):
+                    endpoints.append(data)
+                    rows[-1].update(x_lower_bound=min(point[0] for point in endpoints),
+                                    x_upper_bound=max(point[0] for point in endpoints),
+                                    y_lower_bound=min(point[1] for point in endpoints),
+                                    y_upper_bound=max(point[1] for point in endpoints))
+
         for method, points in (("auto_trace", self._auto_points),):
             for pixel_x, pixel_y in points:
                 data = self._pixel_to_data(pixel_x, pixel_y)
@@ -3315,6 +3327,7 @@ class FigureDigitizerDialog(QDialog):
             pixel_y_uncertainty,
             "four-point",
         )
+        manual_point["boundary_pixels"] = [list(point) for point in self._manual_error_samples]
         self._manual_error_samples.clear()
         self._manual_error_target_index = None
         self._set_click_target("none")
@@ -3370,6 +3383,8 @@ class FigureDigitizerDialog(QDialog):
         point["pixel_x_uncertainty"] = pixel_x_uncertainty
         point["pixel_y_uncertainty"] = pixel_y_uncertainty
         point["uncertainty_source"] = source
+        if source != "four-point":
+            point.pop("boundary_pixels", None)
         if hasattr(self, "_manual_status_label"):
             self._manual_status_label.setText(
                 f"{self._manual_error_target_label().capitalize()} uncertainty: "
@@ -3442,9 +3457,11 @@ class FigureDigitizerDialog(QDialog):
         if not hasattr(self, "_trace_color_button"):
             return
         color_name = self._trace_color.name()
+        from ui.theme import readable_text
+        foreground = readable_text(color_name)
         self._trace_color_button.setText(color_name)
         self._trace_color_button.setStyleSheet(
-            f"QPushButton {{ background: {color_name}; color: #ffffff; font-weight: 700; }}"
+            f"QPushButton {{ background: {color_name}; color: {foreground}; font-weight: 700; }}"
         )
 
     def _begin_symbol_sample(self, pixel_x: float, pixel_y: float) -> None:
@@ -4413,6 +4430,7 @@ class FigureDigitizerDialog(QDialog):
                     pixel_y_uncertainty or 0.0,
                     "#2563eb",
                     f"Manual point {index} uncertainty",
+                    boundary_pixels=manual_point.get("boundary_pixels") if isinstance(manual_point, dict) else None,
                 )
         for index, (pixel_x, pixel_y) in enumerate(self._auto_points, start=1):
             self._add_marker(pixel_x, pixel_y, "#dc2626", f"Auto trace point {index}", radius=2.5)
@@ -4504,6 +4522,7 @@ class FigureDigitizerDialog(QDialog):
         pixel_y_uncertainty: float,
         color: str,
         tooltip: str,
+        boundary_pixels: list[list[float]] | None = None,
     ) -> None:
         """Add simple cross error bars around a point."""
         pen = QPen(QColor(color), 1.1)
@@ -4511,7 +4530,10 @@ class FigureDigitizerDialog(QDialog):
         pen_color.setAlpha(170)
         pen.setColor(pen_color)
         items: list[QGraphicsLineItem] = []
-        if pixel_x_uncertainty > 0:
+        if boundary_pixels and len(boundary_pixels) == 4:
+            for first, second in ((boundary_pixels[0], boundary_pixels[1]), (boundary_pixels[2], boundary_pixels[3])):
+                items.append(QGraphicsLineItem(float(first[0]), float(first[1]), float(second[0]), float(second[1])))
+        elif pixel_x_uncertainty > 0:
             items.append(
                 QGraphicsLineItem(
                     pixel_x - pixel_x_uncertainty,
@@ -4520,7 +4542,7 @@ class FigureDigitizerDialog(QDialog):
                     pixel_y,
                 )
             )
-        if pixel_y_uncertainty > 0:
+        if not boundary_pixels and pixel_y_uncertainty > 0:
             items.append(
                 QGraphicsLineItem(
                     pixel_x,
@@ -5035,7 +5057,7 @@ class ColorPlotDigitizerDialog(FigureDigitizerDialog):
         self._color_palette_label.setAlignment(Qt.AlignCenter)
         self._color_palette_label.setMinimumHeight(34)
         self._color_palette_label.setStyleSheet(
-            "QLabel { background: #f3f4f6; border: 1px solid #9ca3af; padding: 4px; }"
+            "QLabel { background: #f3f4f6; color: #182430; border: 1px solid #64748b; padding: 4px; }"
         )
         self._color_scale_status_label = QLabel("Colour scale is not calibrated.")
         self._color_scale_status_label.setWordWrap(True)
@@ -7972,6 +7994,8 @@ class FitDialog(QDialog):
         self._weight_mode_combo.addItem("Weight (larger = stronger)", "weight")
 
         self._absolute_sigma_checkbox = QCheckBox("Treat sigma as absolute")
+        self._x_bounds_editor = PercentileBoundsEditor("X", column_names)
+        self._y_bounds_editor = PercentileBoundsEditor("Y", column_names)
 
         self._confidence_checkbox = QCheckBox("Create confidence band")
         self._confidence_checkbox.setChecked(True)
@@ -8053,13 +8077,20 @@ class FitDialog(QDialog):
         setup_row.addWidget(source_group, 1)
         setup_row.addWidget(model_group, 2)
 
-        uncertainty_tab = QWidget()
-        uncertainty_form = QFormLayout(uncertainty_tab)
+        uncertainty_content = QWidget()
+        uncertainty_form = QFormLayout(uncertainty_content)
+        self._fit_uncertainty_form = uncertainty_form
         uncertainty_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         uncertainty_form.addRow("X weight/sigma column", self._x_weight_column_combo)
         uncertainty_form.addRow("Y weight/sigma columns", self._weight_column_list)
         uncertainty_form.addRow("Weight mode", self._weight_mode_combo)
         uncertainty_form.addRow("", self._absolute_sigma_checkbox)
+        uncertainty_form.addRow("X percentile uncertainty", self._x_bounds_editor)
+        uncertainty_form.addRow("Y percentile uncertainty", self._y_bounds_editor)
+        uncertainty_tab = QScrollArea()
+        uncertainty_tab.setWidgetResizable(True)
+        uncertainty_tab.setWidget(uncertainty_content)
+        self._uncertainty_scroll = uncertainty_tab
 
         confidence_row = QWidget()
         confidence_layout = QHBoxLayout(confidence_row)
@@ -8106,9 +8137,44 @@ class FitDialog(QDialog):
         self._x_weight_column_combo.currentTextChanged.connect(self._on_x_weight_changed)
         self._update_parameter_hint()
         self._on_x_weight_changed()
+        self._x_bounds_editor.changed.connect(self._update_percentile_mode)
+        self._y_bounds_editor.changed.connect(self._update_percentile_mode)
+
+    def _update_percentile_mode(self) -> None:
+        active_x = self._x_bounds_editor.enabled_check.isChecked()
+        active_y = self._y_bounds_editor.enabled_check.isChecked()
+        if active_x:
+            self._x_weight_column_combo.setCurrentIndex(0)
+        if active_y:
+            self._weight_column_list.clearSelection()
+        self._x_weight_column_combo.setEnabled(not active_x)
+        self._weight_column_list.setEnabled(not active_y)
+        self._absolute_sigma_checkbox.setEnabled(not (active_x or active_y))
+        self._fit_uncertainty_form.setRowVisible(self._x_weight_column_combo, not active_x)
+        self._fit_uncertainty_form.setRowVisible(self._weight_column_list, not active_y)
+        self._fit_uncertainty_form.setRowVisible(self._weight_mode_combo, not (active_x and active_y))
+        self._fit_uncertainty_form.setRowVisible(self._absolute_sigma_checkbox, not (active_x or active_y))
+        if active_x or active_y:
+            self._absolute_sigma_checkbox.setChecked(True)
+            self._method_combo.setCurrentIndex(self._method_combo.findData("percentile"))
+            self._method_combo.setEnabled(False)
+        else:
+            if self._method_combo.currentData() == "percentile":
+                self._method_combo.setCurrentIndex(self._method_combo.findData("trf"))
+            self._on_x_weight_changed()
+
+    def x_bounds(self) -> PercentileBounds | None:
+        return self._x_bounds_editor.specification()
+
+    def y_bounds(self) -> PercentileBounds | None:
+        return self._y_bounds_editor.specification()
 
     def _on_x_weight_changed(self) -> None:
         """Lock method to ODR if X errors are provided."""
+        if self._x_bounds_editor.enabled_check.isChecked() or self._y_bounds_editor.enabled_check.isChecked():
+            self._method_combo.setCurrentIndex(self._method_combo.findData("percentile"))
+            self._method_combo.setEnabled(False)
+            return
         has_x_weight = self.x_weight_column() is not None
         if has_x_weight:
             self._method_combo.setCurrentText(FIT_METHODS.get("odr", "Orthogonal Distance Regression"))
@@ -8241,6 +8307,19 @@ class FitDialog(QDialog):
 
     def accept(self) -> None:
         """Validate curve-fit batch selection before accepting."""
+        try:
+            specs = (self.x_bounds(), self.y_bounds())
+            if self.method() == "percentile" and not any(specs):
+                raise ValueError("Select X or Y percentile columns for the percentile likelihood method.")
+            if any(spec is not None and spec.origin != "measurement" for spec in specs):
+                raise ValueError("Posterior quantiles are available for plotting, not as measurement likelihoods.")
+            if any(spec is not None and spec.centre != "median" for spec in specs):
+                raise ValueError("Percentile fitting requires median central values; means/modes/other estimates can be plotted.")
+            if specs[1] is not None and len(self.y_columns()) != 1:
+                raise ValueError("Choose one Y column for a lower/upper Y percentile pair. Batch sheets are supported.")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Percentile Bounds", str(exc))
+            return
         y_columns = self.y_columns()
         weight_columns = self.weight_columns()
         if not self.x_column() or not y_columns:

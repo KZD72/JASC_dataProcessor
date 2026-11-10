@@ -14,6 +14,7 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 - **Interpolation Workbench**: Generate 1D, 2D, and N-D prediction datasets with linear, spline, piecewise cubic, nearest-neighbor, and RBF methods.
 - **Statistics Workbench**: Generate single-column summaries, multi-column summaries/correlations/covariance/PCA, grouped/factor analyses, normality tests, outlier checks, regression metrics, paired tests, independent-sample tests, one-way ANOVA, Kruskal-Wallis, post-hoc comparisons, and optional companion plots.
 - **Curve Fitting**: Fit 66 categorized analytical models spanning polynomials, decay/growth, symmetric and asymmetric peaks, transitions/waveforms, kinetics, rheology, probability distributions, and physical functions, with customizable parameters and LM, trust-region, Dogbox, or ODR optimization.
+- **Percentile Error Bounds**: Map separate X/Y lower and upper endpoint columns and their probability levels for asymmetric error bars. Curve Fit supports a calibrated quantile-normal measurement likelihood for median data, including latent-X fitting when X bounds are supplied. Bounds, levels, and provenance are retained in projects, generated plots, and fit worksheets; ordinary symmetric sigma/weight fits remain available. Parameter errors/bands are local approximations, not bootstrap intervals.
 - **Custom Fit Models**: Define project-saved fit models from safe NumPy/SciPy expressions and use them in the standard fitting workflow.
 - **Dynamic Plotting**: High-performance multi-axis plotting with Matplotlib, featuring data locators, scaling controls, SciencePlots journal styling, visual customization, error bars, reporting plots, histograms, box/violin distribution comparisons, and native-grid or interpolated 2D and Raman/frequency-slice maps. Scientific map controls include automatic/manual/percentile colour ranges, linear/log/symmetric/diverging normalization, explicit contour levels and labels, measured-point/triangulation/boundary overlays, measured or interpolated extrema with provenance, aspect control, and live X/Y/intensity readout. Rendered grids, horizontal/vertical/arbitrary profiles, rectangular ROI statistics, and contour vertices can be exported as normal worksheets. Each cut also creates a persistent editable workspace plot. Peak/Raman result maps offer Map Cuts and mouse-picked cut lines for the selected metric.
 - **Independent Plot Tabs**: Each plot is a project document with its own editor, pending fields, view, and undo history. Open existing plots without reloading over edits; analysis results create new tabs. Close tabs without deleting plots, reopen them from Workspace, and use Save Project to persist every plot together. Rename and Delete are separate actions; project/app closure asks to save unsaved plot work.
@@ -21,6 +22,7 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 - **Plot Comparisons**: Choose and order 2-16 plots through **Plot > Compare Plots...**. Open a persistent comparison tab or pop-out window, arrange equal-sized grid cells, optionally match numeric X/left-Y limits, and copy or export the grid as PNG. Source plots remain independently editable.
 - **Data Preparation**: Create non-destructive result sheets for filtering, sorting, duplicate removal, missing-value cleanup, binning, grouping, joins, and reshaping.
 - **Responsive Docked Workspace Layout**: Size the initial window from the active screen work area, proportionally rebalance docks after window or DPI changes, and reflow the Plot Inspector without collapsing its editors. Plot actions move into a toolbar overflow menu when horizontal room is limited; on very narrow Plot layouts the Workspace navigator collapses automatically to preserve the canvas and can still be explicitly restored from View. Datasets, saved plots, and spectral-analysis sessions remain separate navigator sections, while Data receives the full central width and Raman Results appears only when a result exists or is explicitly opened.
+- **Readable Light/Dark Controls**: Explicit checkbox/radio/toggle states, keyboard focus, contrasted input boundaries, readable colour swatches, and state-aware navigation icons support light, dark, and mixed palettes. Comparison readouts retain readable text while scientific figure canvases keep their chosen/export styling.
 - **Project Persistence and Protection**: Save complete workspaces as open `.jasc` ZIP/CSV packages or optional password-encrypted `.jascx` packages. Encrypted saves use Scrypt-derived AES-256-GCM authenticated encryption; ordinary `.jasc` files remain directly inspectable for open-science use. Version 8 packages retain the uniquely salted JASC Package Seal over every member name, byte size, and SHA-256 digest, store spectral-analysis tables as readable CSV members, and can optionally add an Ed25519 author signature. JASC creates password-encrypted private identity files, exports shareable public identities, maintains a local trusted-fingerprint list, and distinguishes trusted, valid-but-unknown, unsigned, and invalid signatures.
 
 ## Installation
@@ -38,6 +40,24 @@ A lightweight, modular application for data ingestion, visualization, mathematic
    Run `main.py` from the repository root; `ui/main_window.py` is an internal module and is not a standalone entry point. In VS Code, use the **Run JASC Data Processor** launch configuration.
 
 ## Development
+
+To try asymmetric data, choose the **Errorbar** plot subtype and enable **Use X/Y
+percentile bounds** in the Series inspector. Select endpoint columns (not widths),
+set their percentile levels, and identify the centre/origin. In **Curve Fit >
+Uncertainty**, the same controls select the median measurement likelihood. A
+single Y-bound pair maps to one response column; batch worksheets and optional X
+uncertainty are supported. Posterior quantiles and non-median centres can be
+plotted but are not used as measurement likelihoods. The documented quantile
+model assumes independent points and Gaussian tails; correlated/systematic
+errors and bootstrap/profile intervals remain follow-ups. The composite peak
+core accepts the same likelihood through its numerical API; its dedicated
+Peak/Raman dialog does not yet expose bound-column mapping.
+
+`benchmarks/theme_visibility_audit.py --output artifacts/theme_visibility_fixed`
+captures actual controls in six style/palette combinations and a comparison
+readout. The full regression suite also checks percentile calibration, normalized
+densities, fit recovery, asymmetric plotting, and persistence. UI previews are in
+`artifacts/asymmetric_uncertainty/`.
 
 The independent-plot document/tab layout now includes comparison views. Run
 `main.py`, select **Plots**, and use **New Plot** or **+**. Open two plots, edit one,

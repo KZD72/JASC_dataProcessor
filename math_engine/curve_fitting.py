@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.stats import t as student_t
+from scipy.stats import norm
 
 from math_engine.calculus import MathOperationError, validate_numeric_column_metadata
 from models.fit_functions import CustomFitModel, default_initial_parameters, get_fit_model
+from models.uncertainty import PercentileBounds
+from math_engine.uncertainty import QuantileNormal, likelihood_fit
+from core.jobs import JobCancelled
 
 
 FIT_METHODS: dict[str, str] = {
@@ -19,6 +24,7 @@ FIT_METHODS: dict[str, str] = {
     "trf": "Trust Region Reflective",
     "dogbox": "Dogbox",
     "odr": "Orthogonal Distance Regression",
+    "percentile": "Percentile likelihood (median model)",
 }
 
 _ODR_MAX_ITERATIONS = 1000
@@ -54,6 +60,9 @@ class FitReport:
     residual_std: float
     point_count: int
     warnings: tuple[str, ...] = ()
+    x_bounds: dict[str, object] | None = None
+    y_bounds: dict[str, object] | None = None
+    negative_log_likelihood: float | None = None
 
     def to_text(self) -> str:
         """Return a plain-text report for display/export."""
@@ -91,6 +100,13 @@ class FitReport:
                 ]
             )
 
+        if self.x_bounds or self.y_bounds:
+            lines.extend(["", "Percentile measurement likelihood (central values are medians):"])
+            for axis, bounds in (("X", self.x_bounds), ("Y", self.y_bounds)):
+                if bounds:
+                    lines.append(f"  {axis}: {bounds['lower_column']} ({100*bounds['lower_probability']:g}%) / "
+                                 f"{bounds['upper_column']} ({100*bounds['upper_probability']:g}%); {bounds['distribution']}")
+            lines.append(f"  Negative log likelihood: {_format_number(self.negative_log_likelihood)}")
         if self.confidence_level:
             lines.extend(
                 [
@@ -152,13 +168,27 @@ def fit_curve(
     fit_points: int = 400,
     x_weight_column: str | None = None,
     custom_models: list[CustomFitModel] | None = None,
+    x_bounds: PercentileBounds | None = None,
+    y_bounds: PercentileBounds | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> FitResult:
     """Fit a registered analytical model to two numeric columns."""
     if method not in FIT_METHODS:
         raise MathOperationError(f"Unknown fitting method: {method}")
 
     model = get_fit_model(model_key, custom_models)
-    aligned = _fit_input_frame(frame, x_column, y_column, weight_column, x_weight_column)
+    x_bounds, y_bounds = PercentileBounds.from_state(x_bounds), PercentileBounds.from_state(y_bounds)
+    percentile = x_bounds is not None or y_bounds is not None
+    if method == "percentile" and not percentile:
+        raise MathOperationError("Select X or Y percentile bounds for percentile likelihood fitting.")
+    for axis, bounds, weight in (("X", x_bounds, x_weight_column), ("Y", y_bounds, weight_column)):
+        if bounds is not None and bounds.origin != "measurement":
+            raise MathOperationError(f"{axis} posterior quantiles cannot be used as a measurement likelihood.")
+        if bounds is not None and bounds.centre != "median":
+            raise MathOperationError(f"{axis} percentile fitting requires median central values; other centres are plot-only.")
+        if bounds is not None and weight:
+            raise MathOperationError(f"Choose either {axis} symmetric weights or percentile bounds.")
+    aligned = _fit_input_frame(frame, x_column, y_column, weight_column, x_weight_column, x_bounds, y_bounds)
     x_values = aligned["x"].to_numpy(dtype=float)
     y_values = aligned["y"].to_numpy(dtype=float)
 
@@ -184,7 +214,10 @@ def fit_curve(
 
     free_indices = tuple(index for index, is_fixed in enumerate(fixed) if not is_fixed)
     prefit_warnings: list[str] = []
-    if x_weight_column and method != "odr":
+    if percentile:
+        method = "percentile"
+        absolute_sigma = True
+    if x_weight_column and method != "odr" and not percentile:
         prefit_warnings.append("X uncertainty requires Orthogonal Distance Regression; method was switched to ODR.")
         method = "odr"
 
@@ -198,15 +231,36 @@ def fit_curve(
 
     sigma = _sigma_values(aligned, "weight" if weight_column else None, "Y", weight_mode)
     x_sigma = _sigma_values(aligned, "x_weight" if x_weight_column else None, "X", weight_mode)
+
+    def error_model(axis: str, bounds: PercentileBounds | None, sigma: np.ndarray | None) -> QuantileNormal:
+        if bounds is not None:
+            return QuantileNormal(aligned[axis].to_numpy() - aligned[f"{axis}_lower"].to_numpy(),
+                                  aligned[f"{axis}_upper"].to_numpy() - aligned[axis].to_numpy(),
+                                  bounds.lower_probability, bounds.upper_probability)
+        return QuantileNormal.normal(sigma if sigma is not None else np.ones(len(aligned)))
+
+    evaluation_x = x_values
+    negative_log_likelihood = None
     
     captured_warnings: list[str] = list(prefit_warnings)
-    if free_indices:
+    if free_indices or percentile:
         try:
             with warnings.catch_warnings(record=True) as warning_records:
                 warnings.simplefilter("always")
                 warnings.filterwarnings("ignore", message=".*scipy\\.odr.*", category=Warning)
                 
-                if method == "odr":
+                if percentile:
+                    likelihood_parameters, likelihood_covariance, evaluation_x, negative_log_likelihood, messages = likelihood_fit(
+                        model.function, x_values, y_values, np.asarray(p0), np.asarray(lower), np.asarray(upper),
+                        np.asarray(free_indices, dtype=int), error_model("y", y_bounds, sigma),
+                        error_model("x", x_bounds, x_sigma) if x_bounds is not None or x_sigma is not None else None,
+                        check_cancelled=check_cancelled)
+                    free_parameters = likelihood_parameters[list(free_indices)]
+                    free_covariance = likelihood_covariance[np.ix_(free_indices, free_indices)]
+                    captured_warnings.extend(messages)
+                    if y_bounds is None and sigma is None:
+                        captured_warnings.append("Y likelihood uses unit standard deviation because no Y uncertainty was selected.")
+                elif method == "odr":
                     free_parameters, free_covariance, odr_warnings = _run_odr_fit(
                         function=model.function,
                         initial_parameters=p0,
@@ -240,6 +294,8 @@ def fit_curve(
                         **curve_fit_kwargs,
                     )
                 captured_warnings.extend(str(record.message) for record in warning_records)
+        except JobCancelled:
+            raise
         except Exception as exc:
             raise MathOperationError(f"Curve fit failed: {exc}") from exc
 
@@ -258,7 +314,7 @@ def fit_curve(
         covariance = np.zeros((parameter_count, parameter_count), dtype=float)
         captured_warnings.append("All parameters were fixed; no optimization was performed.")
 
-    fitted_y = np.asarray(model.function(x_values, *parameters), dtype=float)
+    fitted_y = np.asarray(model.function(evaluation_x, *parameters), dtype=float)
     residuals = y_values - fitted_y
     report = _build_report(
         model_key=model_key,
@@ -282,6 +338,11 @@ def fit_curve(
         residuals=residuals,
         warnings=captured_warnings,
     )
+    if percentile:
+        from dataclasses import replace
+        report = replace(report, x_bounds=x_bounds.to_state() if x_bounds else None,
+                         y_bounds=y_bounds.to_state() if y_bounds else None,
+                         negative_log_likelihood=negative_log_likelihood)
 
     x_min = float(np.nanmin(x_values))
     x_max = float(np.nanmax(x_values))
@@ -297,6 +358,7 @@ def fit_curve(
             covariance,
             confidence_level=confidence_level,
             degrees_of_freedom=max(len(x_values) - len(free_indices), 1),
+            normal_approximation=percentile,
         )
         fit_frame["fit_lower"] = lower_band
         fit_frame["fit_upper"] = upper_band
@@ -313,6 +375,15 @@ def fit_curve(
         residual_frame["sigma"] = sigma
     if x_sigma is not None:
         residual_frame["x_sigma"] = x_sigma
+    for axis, bounds in (("x", x_bounds), ("y", y_bounds)):
+        if bounds:
+            residual_frame[f"{axis}_lower_bound"] = aligned[f"{axis}_lower"].to_numpy()
+            residual_frame[f"{axis}_upper_bound"] = aligned[f"{axis}_upper"].to_numpy()
+    if percentile:
+        residual_frame["likelihood_residual"] = error_model("y", y_bounds, sigma).transform(residuals)[0]
+        if x_bounds is not None or x_sigma is not None:
+            residual_frame["latent_x"] = evaluation_x
+            residual_frame["x_residual"] = x_values - evaluation_x
 
     return FitResult(fit_frame=fit_frame, residual_frame=residual_frame, report=report)
 
@@ -323,6 +394,8 @@ def _fit_input_frame(
     y_column: str,
     weight_column: str | None,
     x_weight_column: str | None = None,
+    x_bounds: PercentileBounds | None = None,
+    y_bounds: PercentileBounds | None = None,
 ) -> pd.DataFrame:
     """Return aligned numeric fit inputs and optional weights."""
     if x_column not in frame.columns:
@@ -338,6 +411,16 @@ def _fit_input_frame(
         "x": x_values,
         "y": y_values,
     }
+    for axis, bounds in (("x", x_bounds), ("y", y_bounds)):
+        if bounds is not None:
+            for side, column in (("lower", bounds.lower_column), ("upper", bounds.upper_column)):
+                if column not in frame.columns:
+                    raise MathOperationError(f"Percentile column '{column}' does not exist.")
+                numeric = pd.to_numeric(frame[column], errors="coerce")
+                validate_numeric_column_metadata(frame, column, numeric)
+                if not np.isfinite(numeric.to_numpy(dtype=float)).all():
+                    raise MathOperationError(f"Percentile column '{column}' must contain finite bounds for every row.")
+                values[f"{axis}_{side}"] = numeric
     if weight_column:
         if weight_column not in frame.columns:
             raise MathOperationError(f"Weight column '{weight_column}' does not exist.")
@@ -573,6 +656,7 @@ def _confidence_band(
     covariance: np.ndarray,
     confidence_level: float,
     degrees_of_freedom: int,
+    normal_approximation: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Estimate pointwise confidence bands from covariance and a Jacobian."""
     fit_y = np.asarray(function(x_values, *parameters), dtype=float)
@@ -585,7 +669,8 @@ def _confidence_band(
     prediction_variance = np.maximum(prediction_variance, 0.0)
     standard_error = np.sqrt(prediction_variance)
     alpha = 1.0 - min(max(confidence_level, 0.001), 0.999)
-    critical_value = float(student_t.ppf(1.0 - alpha / 2.0, degrees_of_freedom))
+    critical_value = float(norm.ppf(1.0 - alpha / 2.0) if normal_approximation
+                           else student_t.ppf(1.0 - alpha / 2.0, degrees_of_freedom))
     margin = critical_value * standard_error
     return fit_y - margin, fit_y + margin
 

@@ -25,6 +25,18 @@ Shift+wheel/middle-button pan, and synchronized image-map navigation through the
 comparison's X/Y options. These gestures preserve log/reversed axes and toolbar
 navigation history.
 
+At the user's 2026-11-10 priority, light/dark visibility issues are addressed with
+shared contrasted theme tokens, explicit checkbox/radio/toggle/focus states,
+state-aware navigation glyphs, readable swatches, and scoped comparison readouts.
+Asymmetric X/Y percentile endpoint mapping is implemented in plots and Curve Fit.
+Median measurement values use a calibrated quantile-normal likelihood, with
+latent X for errors in both axes; projects/results preserve levels and provenance.
+The shared composite numerical core accepts this uncertainty model. Dedicated
+Peak/Raman bound-column controls, correlated/systematic error models, and
+bootstrap/profile percentile intervals remain follow-ups; current errors/bands
+are explicitly local approximations. These user-prioritized changes precede the
+remaining general worker migrations.
+
 Reviewed on 2026-09-24 against the current repository state, session changelog, and automated test suite.
 
 ### Implemented or Started
