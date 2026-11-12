@@ -1,5 +1,5 @@
 {
-  "data": "Seeded synthetic photoluminescence spectra and Raman scan; no experimental data",
+  "data": "Synthetic spectra, raster charts, signals, spatial fields and study data; no experimental data",
   "seed": 20261112,
   "weighted_fit_r_squared": [
     0.9971081065341523,
@@ -8,6 +8,24 @@
     0.9977165584120171
   ],
   "raman_pixels": 252,
+  "checks": {
+    "experiment_seed": 20261113,
+    "curve_points": 93,
+    "curve_maximum_absolute_y_error": 0.012529646418099838,
+    "colour_probes": 7,
+    "colour_maximum_absolute_z_error": 0.003784994269212305,
+    "fft_peak_frequencies_hz": [
+      4.999999999999989,
+      16.99999999999996
+    ],
+    "map_profile_rows": 81,
+    "map_roi_rows": 15,
+    "statistics_report_rows": 122,
+    "regression_report_rows": 6,
+    "calibration_slope": 2.370839647416536,
+    "gui_recording_replayed": true,
+    "recorded_smoothing_rows": 600
+  },
   "images": [
     {
       "file": "01-workspace.png",
@@ -32,6 +50,48 @@
       "width": 1880,
       "height": 1080,
       "bytes": 160304
+    },
+    {
+      "file": "05-image-digitization.png",
+      "width": 1680,
+      "height": 980,
+      "bytes": 149387
+    },
+    {
+      "file": "06-heatmap-digitization.png",
+      "width": 1680,
+      "height": 980,
+      "bytes": 125083
+    },
+    {
+      "file": "07-macro-recording.png",
+      "width": 1660,
+      "height": 1040,
+      "bytes": 188608
+    },
+    {
+      "file": "08-recorded-api-calls.png",
+      "width": 1420,
+      "height": 960,
+      "bytes": 80556
+    },
+    {
+      "file": "09-signal-processing.png",
+      "width": 1880,
+      "height": 1080,
+      "bytes": 210548
+    },
+    {
+      "file": "10-maps-and-profiles.png",
+      "width": 1880,
+      "height": 1080,
+      "bytes": 174682
+    },
+    {
+      "file": "11-statistics.png",
+      "width": 1880,
+      "height": 1080,
+      "bytes": 149851
     }
   ]
 }

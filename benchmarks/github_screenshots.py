@@ -26,6 +26,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyleFactory, QWidget
 
 from benchmarks.gallery_demo import create_demo
+from benchmarks.gallery_workflows import capture_more
 from core import project_io
 from jasc_api import Session
 from models.plot_settings import AxisSettings, LegendSettings
@@ -145,10 +146,12 @@ def main() -> None:
         if viewer._map_axis is None or len(viewer._map_points) != 252:
             raise RuntimeError("The Raman viewer did not render the complete spatial map.")
         images.append(capture(window, "04-raman-analysis.png"))
+        more_images, checks = capture_more(window, project_path.parent, capture)
+        images.extend(more_images)
         (OUTPUT / "capture.json").write_text(json.dumps({
-            "data": "Seeded synthetic photoluminescence spectra and Raman scan; no experimental data",
+            "data": "Synthetic spectra, raster charts, signals, spatial fields and study data; no experimental data",
             "seed": 20261112, "weighted_fit_r_squared": demo.fit_r_squared,
-            "raman_pixels": len(demo.analysis.metrics_frame), "images": images,
+            "raman_pixels": len(demo.analysis.metrics_frame), "checks": checks, "images": images,
         }, indent=2) + "\n", encoding="utf-8")
         with patch.object(window, "_confirm_project_plot_changes", return_value=True):
             window.close()

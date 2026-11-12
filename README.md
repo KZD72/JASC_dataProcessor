@@ -7,6 +7,23 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 *Independent plot documents, custom colours and scientific fitting in the JASC workspace. All screenshots use synthetic data and actual calculated results.*
 
 <details>
+<summary>Recover data from curve images and heatmaps</summary>
+
+**Calibrate image axes and trace a curve into a numerical worksheet.**
+
+![Image digitization showing a traced relaxation curve and 93 recovered data points](docs/screenshots/05-image-digitization.png)
+
+**Recover X/Y/Z probes from a heatmap using its displayed colour scale.**
+
+![Heatmap digitization showing calibrated probe locations, recovered values and colour validity diagnostics](docs/screenshots/06-heatmap-digitization.png)
+
+Extraction sessions retain the image and calibration in the project for later
+review. These are interactive workflows: the user chooses the reference points,
+trace colour and probe locations.
+
+</details>
+
+<details>
 <summary>See plot comparisons, curve fitting and Raman analysis</summary>
 
 **Compare independent plots in equal-sized panels with synchronized axes.**
@@ -23,6 +40,36 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 
 </details>
 
+<details>
+<summary>Record repeatable workflows as readable Python API calls</summary>
+
+**Record supported operations with a visible red window border and recording badge.**
+
+![JASC recording a smoothing operation and plot edits, with its red recording border and persistent status badge](docs/screenshots/07-macro-recording.png)
+
+**Inspect the captured calls, save the recording and replay it through JASC.**
+
+![Live recorded API calls showing worksheet selection, smoothing parameters and plot creation](docs/screenshots/08-recorded-api-calls.png)
+
+</details>
+
+<details>
+<summary>Explore signal processing, spatial maps and statistics</summary>
+
+**Compare a noisy signal with its smoothed result and recover its frequency components.**
+
+![Signal processing with Savitzky-Golay smoothing and FFT peaks at 5 and 17 Hz](docs/screenshots/09-signal-processing.png)
+
+**Explore filled contours, locate an extremum and extract a numerical line profile.**
+
+![A spatial intensity map with contour overlays and its exported horizontal profile](docs/screenshots/10-maps-and-profiles.png)
+
+**Compare group distributions and fit calibration data with a confidence band.**
+
+![Violin distributions for three study groups and a fitted calibration curve with a 95 percent confidence band](docs/screenshots/11-statistics.png)
+
+</details>
+
 ## Features
 
 - **Python API Recordings**: Record chronological calls to `jasc_api.Session`, then use **Macros > Run Python API Script** or the CLI to replay the supported command language. Playback validates the entire recording, restricts imports/exports to selected folders, and runs in a separate process with time/memory limits. Completed results replace the workspace only if it stayed unchanged; exports enter a new run folder. Arbitrary Python, shell calls, object introspection, style URLs/files and external LaTeX are rejected.
@@ -30,6 +77,7 @@ A lightweight, modular application for data ingestion, visualization, mathematic
 - **Disk-backed Large Tables**: File > Open Large Dataset opens regular CSV/DAT/TXT tables or Parquet through Polars and private Parquet storage. The read-only Large Data view replaces a cache of at most 1,000 rows, 32 columns, and 8 MiB; scroll past a window edge, use Previous/Next, or jump to a global row. Page reads run in the background, obsolete requests are discarded, and visited pages are evicted. Create an editable worksheet explicitly from the displayed window. Large sources are embedded as Parquet in version-9 projects; ordinary projects retain version 8. Text values remain strings to preserve IDs, late tokens, and locale values. Vendor-specific layouts and whitespace-separated tables continue through ordinary import; full-source analysis/filter UI is a later slice.
 
 - **Data Ingestion**: Text-file inspection and parsing run in the background with inline progress and Cancel; cancelled batches add no partial worksheets. Batch-import CSV/DAT/TXT data with encoding, delimiter, leading-metadata, header, and number-format preflight/inference; choose Auto, General table, Single spectrum, or Spectroscopy map plus an Auto/generic, Horiba LabSpec, or B&W Tek profile. Auto detects BOM-marked UTF-8/UTF-16, strict UTF-8, Windows-1252/ANSI, or Latin-1 without replacement-character data loss. Auto also safely recognizes unambiguous point/comma decimals and grouped forms, while explicit `1,234.56` and `1.234,56` modes resolve ambiguous values. Instrument preambles are retained as worksheet metadata, and legacy Horiba/B&WTech/Bruker IR text layouts are supported. Horiba LabSpec maps are normalized into `X`, `Y`, `Raman Shift`, and `Intensity`; B&W Tek is currently supported for single spectra only. Modern Excel `.xlsx`/`.xlsm` tabs can be imported as value-only datasets with explicit warnings for unsupported workbook objects; data can also be entered manually in the spreadsheet interface.
+- **Image Digitization**: Recover numerical data from raster figures using perspective correction, linear/log axis calibration, manual points, selected-colour tracing and symbol-centre detection. Probe heatmaps through a calibrated colour bar to obtain X/Y/Z estimates with colour-match diagnostics. Create multiple worksheets from an image and resume extraction from the saved project. Try the [interactive examples](Test_Data/Feature_Examples/12_Image_Digitization/README.txt).
 - **Data Editing**: Edit imported datasets directly with bounded undo/redo, append/insert/delete row and column operations, fast block-oriented spreadsheet copy/paste, whole-column copy/paste, large-dataset warnings, sampled table auto-sizing, and per-column name/role/unit/long-name/comment metadata.
 - **Formula Engine**: Apply safe math operations to columns using a sandboxed expression evaluator with NumPy/SciPy support, positional aliases such as `col1`, exact-name insertion helpers, worksheet batch targets, protected output naming, numeric-string promotion, and metadata-aware atomic result validation.
 - **Signal Processing & Calculus**: Perform numerical differentiation, cumulative integration, FFT, and previewed smoothing with adjacent-average, median, Savitzky-Golay, LOWESS, FFT low-pass, or derivative-smoothing reconstruction.
@@ -70,7 +118,12 @@ Regenerate these real Qt screenshots with `python -B benchmarks/github_screensho
 after installing the application dependencies. The script calculates seeded synthetic
 data, captures the GUI without opening desktop windows, and writes the PNGs and
 capture metadata to `docs/screenshots/`. It also saves an explorable demo project to
-`artifacts/github_screenshots/demo.jasc`. No executable build is involved.
+`artifacts/github_screenshots/demo.jasc`, including resumable image extractions,
+signal and map products, and statistical reports. Generated raster inputs, recovered
+CSV data and a replay-checked GUI recording are saved alongside it. The capture
+checks extraction against known formulas, recovers planted FFT frequencies and
+replays the recorded smoothing through JASC's restricted interpreter. No executable
+build is involved.
 
 To record Python API calls, save your starting project, choose **Macros > Record
 Macro**, perform supported operations, and open **View Recorded API Calls** to
