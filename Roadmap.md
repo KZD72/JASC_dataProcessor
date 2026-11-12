@@ -97,7 +97,7 @@ Reviewed on 2026-09-24 against the current repository state, session changelog, 
 - Plotting includes equal-cell comparison layouts but lacks a general graph-page editor, shared legends, insets, annotation tools, many specialized graph families, and true 3D graphing. Reusable plot/analysis templates are deliberately deferred to the final roadmap stage.
 - Batch analysis exists but lacks semantic role binding, a uniform timestamped audit-log schema, true background execution for most operation families, and workspace-level undo for edits to non-visible sheets.
 - Fitting lacks global multi-dataset fitting, general dynamic/robust initial-guess search, surface fitting, and advanced model comparison; Fano components now have dedicated multistart initialization.
-- A PyInstaller one-folder specification and repeatable Windows build now provide GUI/console executables with restricted script playback; installer, signing and fresh-machine release validation remain pending.
+- A rebuilt PyInstaller one-folder Windows release provides GUI/console executables, manual, logo and curated examples in a verified ZIP. A Python-based Linux .sh installer packages source/examples, creates an isolated environment and checks startup; Linux-native installation validation, native frozen Linux builds, signing and fresh-machine release validation remain pending.
 - JASC Package Seals provide normal-security forgery deterrence, `.jascx` provides authenticated encryption for sensitive packages, and optional Ed25519 signatures provide independently trustable author provenance through imported public-key fingerprints. Certificate-authority integration, revocation lists, hardware-token key storage, and trusted timestamp authorities remain optional future institutional-security extensions.
 
 ## Competitive Reference Points
@@ -169,7 +169,7 @@ The benchmark products emphasize:
 ### Phase 5: Polish and Packaging
 - Refine UI menus, icons, layout, and inspector workflows. (in progress)
 - Perform error handling and edge-case testing. (in progress)
-- PyInstaller one-folder GUI/CLI build and opt-in standalone replay/security tests implemented; continue installer/signing/fresh-machine validation.
+- PyInstaller one-folder GUI/CLI build, tested Windows release ZIP and opt-in standalone replay/security checks implemented. Python-based Linux .sh packaging/extraction/installer contracts are tested; continue native Linux installation, signing and fresh-machine validation.
 
 ## Competitive Gap Matrix
 
@@ -758,7 +758,7 @@ Tasks:
 - Add plot decimation/downsampling for interactive rendering.
 - Replace whole-DataFrame undo snapshots with delta-based or bounded-history undo for large sheets.
 - Add autosave, crash recovery, and project backups.
-- Add PyInstaller spec, icons/resources, version metadata, and a repeatable Windows build command.
+- Add PyInstaller spec, icons/resources, version metadata, and a repeatable Windows build command. (Windows build/ZIP and Python-based Linux .sh installer implemented; native Linux GUI installation and signing/fresh-machine release audits remain)
 - Add plugin/app extension points for importers, analysis operations, plot types, and fit models.
 - Add sample projects, tutorial datasets, and user documentation.
 

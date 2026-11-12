@@ -8,3 +8,5 @@
 /Test_Data/Feature_Examples/*/results/
 /Test_Data/Feature_Examples/*/jasc_script_outputs/
 /artifacts/feature_examples_review/
+/artifacts/releases/
+/artifacts/release_validation/

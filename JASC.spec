@@ -3,7 +3,8 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_dynamic_libs
 
 root = Path(SPECPATH)
-data = [(str(root / "JASC_Manual.pdf"), ".")] + collect_data_files("scienceplots")
+data = [(str(root / "JASC_Manual.pdf"), "."),
+        (str(root / "resources" / "logo.png"), "resources")] + collect_data_files("scienceplots")
 analysis = Analysis(
     [str(root / "main.py")], pathex=[str(root)],
     binaries=collect_dynamic_libs("odrpack"), datas=data,
@@ -15,6 +16,7 @@ analysis = Analysis(
 )
 archive = PYZ(analysis.pure)
 gui = EXE(archive, analysis.scripts, [], exclude_binaries=True, name="JASC", console=False,
+          icon=str(root / "resources" / "logo.png"),
           debug=False, strip=False, upx=False)
 cli = EXE(archive, analysis.scripts, [], exclude_binaries=True, name="JASC-cli", console=True,
           debug=False, strip=False, upx=False)

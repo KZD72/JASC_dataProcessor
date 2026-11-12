@@ -1,0 +1,44 @@
+{
+  "artifacts": {
+    "JASC-Windows-x86_64-0.1.0.zip": {
+      "bytes": 213610291,
+      "sha256": "b48a6d606d31f6f4dbf89a2e4dccd6b41fb747568d2d7380fe0fa84c59b83127"
+    },
+    "JASC-Linux-0.1.0.sh": {
+      "bytes": 1652264,
+      "sha256": "08e34e4c4e317358299c15f7992e607d48bf13de44e8d36078edf60ebe797585"
+    }
+  },
+  "windows": {
+    "standalone_tests": 3,
+    "standalone_tests_passed": true,
+    "fresh_zip_gui_smoke_passed": true,
+    "no_external_python": true,
+    "asymmetric_and_plot_family_replays": {
+      "09_Asymmetric_Uncertainty": {
+        "report": "Percentile report",
+        "slope": 1.706321592634488,
+        "intercept": 1.9624238336374185
+      },
+      "11_Plots_and_Maps": {
+        "plots": 23,
+        "exported_pngs": 23
+      }
+    },
+    "manual_sha256": "2208e84a5521fa1a4396fa7db0e7e11796789a49fe9c48acff36b5ec6d20555e",
+    "standalone_test_seconds": 9.512
+  },
+  "linux": {
+    "kind": "python-based source/dependency installer",
+    "packaging_tests_passed": 10,
+    "real_shell_verification_and_extraction": true,
+    "native_linux_installation_tested": false,
+    "python": "3.10-3.12",
+    "internet_required": true,
+    "root_required": false,
+    "source_files": 184,
+    "packaging_test_seconds": 1.11
+  },
+  "fresh_windows_vm_tested": false,
+  "pdf_pages": 72
+}

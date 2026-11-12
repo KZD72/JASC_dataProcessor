@@ -1,0 +1,15 @@
+test_corrupted_payload_is_rejected_before_extraction (tests.test_linux_package.LinuxPackageTests.test_corrupted_payload_is_rejected_before_extraction) ... ok
+test_extraction_never_overwrites_existing_directories_or_escapes (tests.test_linux_package.LinuxPackageTests.test_extraction_never_overwrites_existing_directories_or_escapes) ... ok
+test_failed_dependency_install_preserves_diagnostics_without_success_launchers (tests.test_linux_package.LinuxPackageTests.test_failed_dependency_install_preserves_diagnostics_without_success_launchers) ... ok
+test_install_commands_are_isolated_and_launchers_follow_successful_startup (tests.test_linux_package.LinuxPackageTests.test_install_commands_are_isolated_and_launchers_follow_successful_startup) ... ok
+test_install_preflight_refuses_non_linux_or_unsupported_python_without_writes (tests.test_linux_package.LinuxPackageTests.test_install_preflight_refuses_non_linux_or_unsupported_python_without_writes) ... ok
+test_launcher_preserves_arguments_and_ignores_hostile_python_environment (tests.test_linux_package.LinuxPackageTests.test_launcher_preserves_arguments_and_ignores_hostile_python_environment) ... ok
+test_member_hash_mismatch_is_rejected (tests.test_linux_package.LinuxPackageTests.test_member_hash_mismatch_is_rejected) ... ok
+test_real_shell_verifies_and_extracts_the_installer_with_quoted_paths (tests.test_linux_package.LinuxPackageTests.test_real_shell_verifies_and_extracts_the_installer_with_quoted_paths) ... ok
+test_release_is_reproducible_and_contains_curated_examples_without_private_files (tests.test_linux_package.LinuxPackageTests.test_release_is_reproducible_and_contains_curated_examples_without_private_files) ... ok
+test_traversal_absolute_backslash_and_link_members_are_rejected (tests.test_linux_package.LinuxPackageTests.test_traversal_absolute_backslash_and_link_members_are_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 1.110s
+
+OK
