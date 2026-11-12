@@ -2,6 +2,27 @@
 
 A lightweight, modular application for data ingestion, visualization, mathematical operations, and curve fitting. Built with Python, PySide6, Pandas, and SciPy.
 
+![JASC workspace with independent plot tabs, measurement error bars and a weighted Gaussian fit](docs/screenshots/01-workspace.png)
+
+*Independent plot documents, custom colours and scientific fitting in the JASC workspace. All screenshots use synthetic data and actual calculated results.*
+
+<details>
+<summary>See plot comparisons, curve fitting and Raman analysis</summary>
+
+**Compare independent plots in equal-sized panels with synchronized axes.**
+
+![Four synthetic photoluminescence spectra compared on matching X and Y scales](docs/screenshots/02-comparison.png)
+
+**Choose a worksheet, fit model, parameter bounds and measurement uncertainties.**
+
+![Curve Fit dialog configured for a weighted Gaussian model](docs/screenshots/03-curve-fit.png)
+
+**Explore a Raman parameter map alongside the selected pixel's fit and residuals.**
+
+![Raman analysis showing 252 fitted pixels, a selected spectrum and residual diagnostics](docs/screenshots/04-raman-analysis.png)
+
+</details>
+
 ## Features
 
 - **Python API Recordings**: Record chronological calls to `jasc_api.Session`, then use **Macros > Run Python API Script** or the CLI to replay the supported command language. Playback validates the entire recording, restricts imports/exports to selected folders, and runs in a separate process with time/memory limits. Completed results replace the workspace only if it stayed unchanged; exports enter a new run folder. Arbitrary Python, shell calls, object introspection, style URLs/files and external LaTeX are rejected.
@@ -44,6 +65,12 @@ A lightweight, modular application for data ingestion, visualization, mathematic
    Run `main.py` from the repository root; `ui/main_window.py` is an internal module and is not a standalone entry point. In VS Code, use the **Run JASC Data Processor** launch configuration.
 
 ## Development
+
+Regenerate these real Qt screenshots with `python -B benchmarks/github_screenshots.py`
+after installing the application dependencies. The script calculates seeded synthetic
+data, captures the GUI without opening desktop windows, and writes the PNGs and
+capture metadata to `docs/screenshots/`. It also saves an explorable demo project to
+`artifacts/github_screenshots/demo.jasc`. No executable build is involved.
 
 To record Python API calls, save your starting project, choose **Macros > Record
 Macro**, perform supported operations, and open **View Recorded API Calls** to
