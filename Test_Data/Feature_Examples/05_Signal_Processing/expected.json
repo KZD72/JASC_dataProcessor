@@ -1,0 +1,14 @@
+{
+  "derivative": "2*time_s",
+  "integral": "time_s**3/3",
+  "peak_amplitudes": [
+    2,
+    0.5
+  ],
+  "peak_frequencies_hz": [
+    5,
+    13
+  ],
+  "rows": 512,
+  "sample_rate_hz": 128
+}

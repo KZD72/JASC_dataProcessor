@@ -173,6 +173,7 @@ class PlotComparisonView(QWidget):
     options_visibility_changed = Signal(bool)
     dataset_created = Signal(str)
     plot_created = Signal(str)
+    figure_exported = Signal(str)
 
     def __init__(self, workspace: Workspace, state: dict[str, object], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -536,6 +537,7 @@ class PlotComparisonView(QWidget):
             painter.end()
         if not image.save(str(path), "PNG"):
             raise OSError("Could not write comparison PNG.")
+        self.figure_exported.emit(str(path))
 
     def _export_dialog(self) -> None:
         path, _filter = QFileDialog.getSaveFileName(self, "Export Comparison", "comparison.png", "PNG image (*.png)")

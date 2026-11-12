@@ -54,6 +54,8 @@ from PySide6.QtWidgets import (
 )
 from scipy import ndimage, signal
 
+from ui.fit_report_dialog import FitReportDialog
+
 from core.color_scale import ColorScaleCalibration
 from core.file_io import (
     AUTO_DATA_KIND,
@@ -7928,6 +7930,9 @@ class FitDialog(QDialog):
         dataset_names: list[str] | None = None,
         current_dataset_name: str = "",
         parent: QWidget | None = None,
+        *,
+        dataset_columns: dict[str, list[str]] | None = None,
+        dataset_x_columns: dict[str, str | None] | None = None,
     ) -> None:
         """Create controls for model selection, optimizer settings, and outputs."""
         super().__init__(parent)
@@ -7937,6 +7942,14 @@ class FitDialog(QDialog):
         self.resize(1020, 640)
         self._custom_models = custom_models or []
         self._current_dataset_name = current_dataset_name or default_dataset_name
+        self._dataset_columns = {name: list(columns) for name, columns in (dataset_columns or {}).items()}
+        self._dataset_columns.setdefault(self._current_dataset_name, list(column_names))
+        self._dataset_x_columns = dict(dataset_x_columns or {})
+        self._dataset_x_columns.setdefault(self._current_dataset_name, default_x_column)
+        self._source_dataset_combo = QComboBox()
+        self._source_dataset_combo.addItems(list(self._dataset_columns))
+        self._source_dataset_combo.setCurrentText(self._current_dataset_name)
+        self._source_dataset_combo.setToolTip("Choose the worksheet supplying X, Y and uncertainty columns. Use Batch for multiple sheets.")
 
         self._x_column_combo = QComboBox()
         self._x_column_combo.addItems(column_names)
@@ -8028,7 +8041,7 @@ class FitDialog(QDialog):
         self._dataset_list = QListWidget()
         self._dataset_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self._dataset_list.setMaximumHeight(96)
-        for dataset_name in dataset_names or [self._current_dataset_name]:
+        for dataset_name in dataset_names or list(self._dataset_columns):
             if not dataset_name:
                 continue
             self._dataset_list.addItem(dataset_name)
@@ -8044,6 +8057,7 @@ class FitDialog(QDialog):
         self._batch_hint.setWordWrap(True)
 
         for combo in (
+            self._source_dataset_combo,
             self._x_column_combo,
             self._model_category_combo,
             self._model_combo,
@@ -8058,6 +8072,7 @@ class FitDialog(QDialog):
         source_group = QGroupBox("Source")
         source_form = QFormLayout(source_group)
         source_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        source_form.addRow("Worksheet", self._source_dataset_combo)
         source_form.addRow("X column", self._x_column_combo)
         source_form.addRow("Y columns", self._y_column_list)
         source_form.addRow("Column matching", self._column_binding_combo)
@@ -8139,6 +8154,41 @@ class FitDialog(QDialog):
         self._on_x_weight_changed()
         self._x_bounds_editor.changed.connect(self._update_percentile_mode)
         self._y_bounds_editor.changed.connect(self._update_percentile_mode)
+        self._source_dataset_combo.currentTextChanged.connect(self._change_source_dataset)
+
+    def source_dataset_name(self) -> str:
+        """Return the worksheet used to configure fit-column mappings."""
+        return self._source_dataset_combo.currentText()
+
+    def _change_source_dataset(self, name: str) -> None:
+        """Refresh schema and clear explicit response/error mappings on a source change."""
+        if name not in self._dataset_columns:
+            return
+        previous = self._current_dataset_name
+        columns = self._dataset_columns[name]
+        targets = self.target_dataset_names()
+        self._current_dataset_name = name
+        self._x_column_combo.clear()
+        self._x_column_combo.addItems(columns)
+        self._set_combo_text_if_present(self._x_column_combo, self._dataset_x_columns.get(name))
+        for choices in (self._y_column_list, self._weight_column_list):
+            choices.clear()
+            choices.addItems(columns)
+        self._x_weight_column_combo.clear()
+        self._x_weight_column_combo.addItem("None", None)
+        for column in columns:
+            self._x_weight_column_combo.addItem(column, column)
+        for editor in (self._x_bounds_editor, self._y_bounds_editor):
+            editor.enabled_check.setChecked(False)
+            editor.lower_combo.setCurrentIndex(0)
+            editor.upper_combo.setCurrentIndex(0)
+            editor.set_columns(columns)
+        self._update_percentile_mode()
+        if not targets or targets == [previous]:
+            select_list_items(self._dataset_list, [name])
+        for control, suffix in ((self._target_dataset_edit, "fit"), (self._residual_dataset_edit, "residuals")):
+            if control.text() == f"{previous}_{suffix}":
+                control.setText(f"{name}_{suffix}")
 
     def _update_percentile_mode(self) -> None:
         active_x = self._x_bounds_editor.enabled_check.isChecked()
@@ -8425,28 +8475,6 @@ class FitDialog(QDialog):
             return float(text)
         except ValueError as exc:
             raise ValueError(f"{label.capitalize()} must be numeric.") from exc
-
-
-class FitReportDialog(QDialog):
-    """Display a curve-fitting report."""
-
-    def __init__(self, report_text: str, parent: QWidget | None = None) -> None:
-        """Create a read-only report viewer dialog."""
-        super().__init__(parent)
-        self.setWindowTitle("Fit Report")
-        self.setModal(True)
-        self.resize(640, 520)
-
-        report_edit = QPlainTextEdit()
-        report_edit.setReadOnly(True)
-        report_edit.setPlainText(report_text)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
-        buttons.accepted.connect(self.accept)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(report_edit)
-        layout.addWidget(buttons)
 
 
 def derivative_methods() -> dict[str, str]:

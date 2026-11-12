@@ -1,0 +1,49 @@
+{
+  "model": "signal = background + amplitude * exp(-0.5*((x-center)/sigma)**2) + noise",
+  "background": "Exact synthetic reference: background_offset + background_slope*x",
+  "noise": "Independent Gaussian measurement noise; signal_sigma is its known Y standard deviation",
+  "base_seed": 20261111,
+  "original_grid_rows": 401,
+  "raw_rows_per_file": 407,
+  "missing_signal_rows_per_file": 5,
+  "duplicate_rows_per_file": 6,
+  "processed_rows_per_file": 396,
+  "parameter_absolute_tolerances": {
+    "amplitude": 0.2,
+    "center": 0.04,
+    "sigma": 0.04,
+    "offset": 0.08
+  },
+  "spectra": {
+    "spectrum_01": {
+      "amplitude": 8.0,
+      "center": -0.8,
+      "sigma": 0.65,
+      "offset": 0.0,
+      "noise_std": 0.12,
+      "background_offset": 1.5,
+      "background_slope": 0.08,
+      "seed": 20261111
+    },
+    "spectrum_02": {
+      "amplitude": 10.0,
+      "center": 0.2,
+      "sigma": 0.8,
+      "offset": 0.0,
+      "noise_std": 0.15,
+      "background_offset": 2.1,
+      "background_slope": -0.04,
+      "seed": 20261112
+    },
+    "spectrum_03": {
+      "amplitude": 6.5,
+      "center": 1.0,
+      "sigma": 1.05,
+      "offset": 0.0,
+      "noise_std": 0.1,
+      "background_offset": 1.0,
+      "background_slope": 0.06,
+      "seed": 20261113
+    }
+  }
+}

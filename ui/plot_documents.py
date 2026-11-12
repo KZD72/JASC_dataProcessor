@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 import json
+import weakref
 from collections.abc import Iterator
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
@@ -41,8 +42,10 @@ class PlotDocuments(QWidget):
     plot_draft_replaced = Signal()
     options_visibility_changed = Signal(bool)
     dataset_created = Signal(str)
+    analysis_created = Signal(object, object, str, object)
     plot_created = Signal(str)
     documents_changed = Signal()
+    plot_exported = Signal(str, str)
 
     def __init__(self, workspace: Workspace, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -160,6 +163,13 @@ class PlotDocuments(QWidget):
                          "new_plot_requested", "dataset_created", "plot_created"):
                 getattr(editor, name).connect(getattr(self, name).emit)
             editor.plot_rendered.connect(lambda: self._rendered(editor))
+            if isinstance(editor, PlotTab):
+                editor.analysis_created.connect(self.analysis_created.emit)
+                reference = weakref.ref(editor)
+                editor._plot_canvas.figure_exported.connect(lambda path, ref=reference: self._figure_exported(ref(), path))
+            elif isinstance(editor, PlotComparisonView):
+                reference = weakref.ref(editor)
+                editor.figure_exported.connect(lambda path, ref=reference: self._figure_exported(ref(), path))
             editor.state_changed.connect(lambda: self._changed(editor))
             editor.plot_draft_replaced.connect(lambda: self._changed(editor))
             editor.detach_requested.connect(lambda: self.toggle_popout(editor))
@@ -404,6 +414,11 @@ class PlotDocuments(QWidget):
         if not self._mutating:
             self.plot_rendered.emit()
 
+    def _figure_exported(self, editor: PlotTab | PlotComparisonView | None, path: str) -> None:
+        plot = self._document(editor) if editor is not None else None
+        if plot is not None:
+            self.plot_exported.emit(plot.plot_id, path)
+
     def _finish_history_group(self) -> None:
         self._history_document = None
         self._history_timer.stop()
@@ -600,6 +615,7 @@ class PlotDocuments(QWidget):
         if temporary:
             editor = PlotTab(self._workspace, external_options=True)
             editor.dataset_created.connect(self.dataset_created.emit)
+            editor.analysis_created.connect(self.analysis_created.emit)
             editor.plot_created.connect(self.plot_created.emit)
             editor.status_message.connect(self.status_message.emit)
         try:

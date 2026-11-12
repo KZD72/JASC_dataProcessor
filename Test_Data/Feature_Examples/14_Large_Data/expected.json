@@ -1,0 +1,8 @@
+{
+  "first_id": 2500,
+  "last_id": 2899,
+  "signal_mean": 6.399,
+  "source_rows": 12000,
+  "window_rows": 400,
+  "window_start_zero_based": 2500
+}

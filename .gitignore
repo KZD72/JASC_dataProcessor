@@ -1,0 +1,10 @@
+# Generated Windows distribution and local packaging tools.
+/artifacts/build_tools/
+/artifacts/standalone/
+/artifacts/pyinstaller_build/
+/artifacts/pyinstaller_cache/
+/Test_Data/Macro_Example/results/
+/Test_Data/Macro_Example/jasc_script_outputs/
+/Test_Data/Feature_Examples/*/results/
+/Test_Data/Feature_Examples/*/jasc_script_outputs/
+/artifacts/feature_examples_review/

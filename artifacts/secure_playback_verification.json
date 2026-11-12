@@ -1,0 +1,85 @@
+{
+  "verified_utc": "2026-11-11T10:10:04+00:00",
+  "status": "passed",
+  "full_suite": {
+    "run": 486,
+    "passed": 482,
+    "skipped": 4,
+    "seconds": 176.227,
+    "exit_code": 0,
+    "log": "artifacts/secure_playback_suite.log",
+    "skip_reasons": [
+      "three opt-in bundle checks are run separately",
+      "file symlink creation requires a Windows privilege; directory junction checks passed"
+    ]
+  },
+  "focused_playback_suite": {
+    "run": 49,
+    "skipped": 1,
+    "seconds": 28.073,
+    "status": "passed"
+  },
+  "standalone_suite": {
+    "run": 3,
+    "passed": 3,
+    "skipped": 0,
+    "seconds": 16.536,
+    "exit_code": 0,
+    "log": "artifacts/standalone_script_tests.log",
+    "conditions": [
+      "Python removed from PATH",
+      "invalid PYTHONHOME and PYTHONPATH",
+      "both GUI and console executables",
+      "real fitting and PNG export",
+      "injected Python marker absent"
+    ]
+  },
+  "builder": {
+    "tool": "PyInstaller",
+    "version": "6.22.3",
+    "layout": "one-folder",
+    "log": "artifacts/standalone_build.log"
+  },
+  "example": "artifacts/secure_playback_preview/verification.json",
+  "limits": {
+    "source_bytes": 2097152,
+    "ast_nodes": 100000,
+    "depth": 64,
+    "execution_steps": 10000,
+    "folder_sheets": 256,
+    "default_seconds": 120,
+    "default_worker_memory_mib": 2048
+  },
+  "security_boundary": "Restricted JASC command interpreter and file capabilities; not a general-purpose Python or OS sandbox. Direct execution of arbitrary Python files is outside this boundary.",
+  "release_followups": [
+    "fresh Windows VM validation",
+    "installer",
+    "code signing"
+  ],
+  "binaries": {
+    "JASC.exe": {
+      "path": "artifacts\\standalone\\JASC\\JASC.exe",
+      "bytes": 20561194,
+      "sha256": "9193e159e4efec3ede14da080c00f84cb3a7a2c714e0cd2c01e664ce4973694a"
+    },
+    "JASC-cli.exe": {
+      "path": "artifacts\\standalone\\JASC\\JASC-cli.exe",
+      "bytes": 20564778,
+      "sha256": "a8724bd3cc20a6f189d29dae132cc22b17e8a54229c14ba98667a572d0f5a829"
+    }
+  },
+  "source_sha256": {
+    "main.py": "f0e0952831c2d7953b24fb5fb2f886495cc29ee9a8e00e3a3f003d367617a1e2",
+    "jasc_api.py": "253e618145bea001fd502aa2d5242e1358ca2767e33f344b09e0051808c4900e",
+    "core/script_language.py": "b46abd8c0aef58737c6ab507ad1f7d9bc83ac38e13c7ea5f786c554f37229994",
+    "core/script_runtime.py": "029b5a69fec397a983cce0383d94f3fe2a1f938cbef411f8464f332c921c4202",
+    "core/script_safety.py": "e1f837066d63f4f20173a2ed092ffb3eb4d3706950e25b0f533495b569a58654",
+    "core/script_jobs.py": "df985be4dbcaf1e9896649cc4fee118895a5efacc424c3965a7f73a51421995b",
+    "core/script_process.py": "0386ef5f753f1d904b4c7feb57b3966cab125c9af85e5d7b08a4777ed3a1e7d3",
+    "core/script_cli.py": "5321837a91f2baa2375bf56643c073f887d838b44575b02a1c44613b7d91a0f9",
+    "ui/script_dialog.py": "2d6315c8115477fb072406f5b8a577d769c8f9f718dd0f7222f4387d710489da",
+    "ui/script_controller.py": "2f93e2fe9de974e88b6a1db04fecddf4f660d4fd5eed1eb478eb7d07d25906e5",
+    "JASC.spec": "1947221a58422c853a8977de0094f5db09eeed4e4410a5d4cd084a3c6bc0740b",
+    "build_windows.py": "cf0fe702c1250e9c018733065ff4ac729bc230c7feabe15ef84c8686b20d708c"
+  }
+}

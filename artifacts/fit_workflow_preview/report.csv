@@ -1,0 +1,35 @@
+source_sheet,requested_y_column,y_column,output_fit_sheet,model_name,method,r_squared,rmse,report_text,model_key,equation,x_column,point_count,adjusted_r_squared,mae,residual_mean,residual_std,confidence_level,x_weight_column,weight_column,weight_mode,absolute_sigma,negative_log_likelihood,x_percentile_bounds,y_percentile_bounds,warnings,param_a,stderr_a,lower_a,upper_a,fixed_a,param_b,stderr_b,lower_b,upper_b,fixed_b
+Measurements,y,y,Measurements_fit,Linear,percentile,0.9988384596153813,0.1695530037339232,"Curve Fit Report
+
+Model: Linear
+Equation: a*x + b
+Method: Percentile likelihood (median model) (percentile)
+Source: y vs x
+Points used: 121
+
+Parameters:
+  a = 1.7063216 +/- 0.0046003303; bounds [-inf, inf]
+  b = 1.9624238 +/- 0.024511662; bounds [-inf, inf]
+
+Percentile measurement likelihood (central values are medians):
+  Y: y_p16 (16%) / y_p84 (84%); quantile_normal
+  Negative log likelihood: -49.766913
+
+Confidence band:
+  Level: 95%
+
+Goodness of fit:
+  R^2 = 0.99883846
+  Adjusted R^2 = 0.99881877
+  RMSE = 0.169553
+  MAE = 0.13455392
+  Residual mean = 0.018910566
+  Residual std = 0.16919574
+
+Covariance matrix:
+  2.1163038e-05  -9.6642059e-05
+  -9.6642059e-05  0.00060082155
+
+Warnings:
+  Quantile-normal measurement model: calibrated percentiles, median centres, Gaussian tails; independent points.
+  Parameter errors and bands use a local Hessian approximation, not bootstrap percentile intervals.",linear,a*x + b,x,121,0.9988187724902183,0.13455392330955682,0.018910565961151867,0.1691957446272706,0.95,,,sigma,True,-49.76691261324701,,"{""centre"": ""median"", ""distribution"": ""quantile_normal"", ""lower_column"": ""y_p16"", ""lower_probability"": 0.16, ""model_version"": 1, ""origin"": ""measurement"", ""upper_column"": ""y_p84"", ""upper_probability"": 0.84}","Quantile-normal measurement model: calibrated percentiles, median centres, Gaussian tails; independent points. | Parameter errors and bands use a local Hessian approximation, not bootstrap percentile intervals.",1.706321592331843,0.004600330256250668,-inf,inf,False,1.9624238338560744,0.02451166158041116,-inf,inf,False

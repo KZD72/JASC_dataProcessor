@@ -64,6 +64,8 @@ At first launch, JASC opens an empty workspace. Create a sheet, import data, or 
 | Tabular import | `.csv`, `.txt`, `.xlsx`, `.xlsm` (Excel worksheet values only) |
 | Tabular export | `.csv`, `.txt` / tab-delimited text |
 | Project save/open | `.jasc` |
+| Recorded macro save/load | `.jasc-macro.json` (separate from project files) |
+| Python API recording | `.py` script containing `run(session)` |
 | Figure digitizer | PNG, JPEG, BMP, TIFF, GIF, and other image formats readable by Qt |
 | Plot image export | Formats offered by the embedded Matplotlib toolbar |
 
@@ -135,6 +137,7 @@ The dataset navigator menu includes **Open Sheet**, **Create Plot from Dataset**
 | View | Navigator/section/inspector visibility and Reset View to Default |
 | Data | Duplicate/Rename/Remove Dataset; Add/Insert Row or Column; Resize Sheet; Fill Range; Smart Fill Selection; all Data Preparation tools; Column Metadata; Apply Formula |
 | Analysis | Derivative, Integral, Smoothing, Interpolation, FFT, Inverse FFT, Statistics, Baseline Correction, Peak Analysis, Raman Analysis, Custom Fit Models, Curve Fit |
+| Macros | Record Macro, Stop Recording, View Recorded API Calls, Save Python API Script, Review / Run Batch Recipe, Load Batch Recipe, Save Batch Recipe |
 | Plot | New Plot, Rename Current Plot, Copy Current Plot to Clipboard, Open/Duplicate/Delete Selected Plot |
 
 ### Keyboard shortcuts
@@ -1182,12 +1185,19 @@ Batch statistics creates long summary results and, when applicable, a wide summa
 
 Choose **Analysis > Curve Fit...** (`Ctrl+Shift+C`).
 
-1. Select one X column and one or more Y columns.
+1. Choose the input **Worksheet** in the Source group, then one X column and one or more Y columns.
 2. Select a model category, model, and optimizer.
 3. Edit each parameter's initial value, optional lower/upper bounds, and Fixed checkbox.
 4. Configure uncertainty, confidence, residual, and output options.
 5. Select target sheets and column matching.
 6. Confirm the batch preview and run.
+
+The Worksheet selector lists loaded editable sheets and initially uses the current
+worksheet. Changing it refreshes X/Y, weight and percentile-column choices; response
+and uncertainty mappings must be selected again. Ordinary single-sheet fitting
+follows that worksheet automatically. Explicit multi-sheet selections remain under
+**Batch > Apply to sheets**, using the chosen source sheet as their column-matching
+reference. Default output names follow worksheet changes; names you typed are kept.
 
 ### Built-in models
 
@@ -1285,6 +1295,19 @@ Configure:
 - Optional long-format parameter covariance/correlation sheet.
 
 The Fit Report includes model/method, parameter estimates, fixed/free state, bounds, standard errors, covariance, R-squared, adjusted R-squared, RMSE, MAE, residual mean/standard deviation, point counts, and warnings. Successful immediate plotting queues raw data, fitted curve, optional confidence band, and optional residuals.
+
+Every successful fit now retains its report in the workspace. A single fit creates
+`<fit-sheet>_report`; a batch creates `<reference-sheet>_fit_reports` with one row
+per successful fit. Existing sheets receive unique names rather than being
+overwritten. The table includes full `report_text`, separate numeric parameter
+estimates/errors/bounds/fixed states, fit metrics and percentile-setting provenance.
+Save Project to retain it in `.jasc`; use normal dataset export for CSV or
+tab-delimited tables. Failed fits do not create success reports.
+
+The single-fit viewer identifies its saved worksheet and provides **Copy Report**
+for plain text, **Export Table...** for recorded CSV/tab-delimited export, and
+**Open Report Sheet** to switch to the saved table. Report creation/export also
+participates in Python API recording and is recomputed on replay.
 
 ### Custom fit models
 
@@ -1389,11 +1412,20 @@ Depending on plot type, the inspector exposes:
 - Custom legend label and per-series **Show this series in legend**.
 - Solid, dashed, dotted, dash-dot, or no line.
 - Circle, square, triangle, diamond, cross, or dot markers.
-- Automatic or named colors.
+- Automatic style colours, 20 preset colours with swatches, or a custom RGB/hex colour.
 - Line width, marker size, fill alpha, and bar width.
 - Left or right Y-axis assignment.
 
 Column roles preselect likely mappings. Axis-label fields prefill from Long Name and Unit metadata while they remain blank or automatically managed; manually typed labels are not overwritten.
+
+In **Series > Color**, choose a preset or click **Custom...** to open the full
+colour picker. Select visually, enter RGB values, or enter an HTML hex value such
+as `#13a2a7`. Use **Update Series** to apply the choice; the series colour controls
+its lines, symbols and supported fills. **Auto (style cycle)** restores the active
+style's automatic colour. Custom choices remain available in that editor's dropdown
+and are retained with applied plots, pending tab edits, project saves and Python
+recordings. **Data Location > Color** offers the same custom picker for locators.
+Double-clicking a plotted series also opens its focused colour/appearance editor.
 
 ### Axes, style, and figure
 
@@ -1649,6 +1681,269 @@ Summaries include source sheets/columns, resolved mappings, requested outputs, s
 
 ---
 
+### Record Python API calls
+
+**Record Macro** captures successful application operations as chronological
+Python calls to the public `jasc_api.Session` API. The resulting `.py` file can
+be inspected, edited, and versioned as normal Python source. Plot creation and
+later edits appear in order as separate calls.
+
+While recording, the main window displays a red edge and a persistent
+**Recording (.py)** badge with a **Stop Recording** button in the status bar.
+The edge follows window resizing and adapts to light/dark palettes. Other status
+messages do not hide the badge. Both indicators disappear when recording stops,
+including when stopping to save the Python script.
+
+1. Save a starting project if the recording will use existing workspace sheets.
+2. Choose **Macros > Record Macro**, then perform operations normally. File
+   imports retain their paths and parser settings; existing sheets become
+   explicit `session.sheet(...)` references.
+3. Open **View Recorded API Calls** to inspect the script while recording.
+4. Choose **Stop Recording > Save Python API Script** and edit the saved file
+   in your Python editor if desired.
+5. Choose **Macros > Run Python API Script**, open the file, review its source,
+   choose the permitted input folder and output parent, and click **Run Recording**.
+   Playback uses the current workspace as its starting state. Alternatively, from
+   the repository root, run it with the project interpreter:
+
+```powershell
+python -m jasc_api recording.py --project starting.jasc --output results.jasc
+```
+
+Use the project saved **before** the recorded transformations as the input.
+`--project` is optional for scripts that import their own data; `--output` saves
+the final workspace as a new project. Add `--input-dir` to select the only folder
+from which a recording may import files; the default is the recording's folder.
+`--output-dir` selects the parent of the generated run folder. Recorded exports
+execute in their original order inside staging, then become visible together
+after success. The JSON batch-recipe dialog remains a separate workflow.
+
+The file has this general form (illustrative parameters):
+
+```python
+from jasc_api import Session, series
+
+def run(session):
+    sheet = session.sheet("sample")
+    session.smooth(sheet, x_column="x", y_column="y", method="savgol",
+                   output_column="smoothed", window_length=11)
+    fit = session.fit(sheet, x_column="x", y_column="smoothed",
+                      model_key="linear", method="trf")
+    plot = session.plot([
+        series(x=(sheet, "x"), y=(sheet, "smoothed")),
+        series(x=(fit.curve, "fit_x"), y=(fit.curve, "fit_y")),
+    ], name="Fit")
+    session.export_plot(plot, "fit.png")
+```
+
+GUI recording now covers the following operations:
+
+| Area | Recorded calls and behavior |
+| --- | --- |
+| Imports | Text-file parser choices, Excel worksheet tabs/header choices, and disk-backed large-data imports. |
+| Worksheets | New, duplicate, rename, delete, cell edits, paste, row/column insert/delete, resizing, clearing, Fill Range, Smart Fill, column metadata/renaming, and undo/redo. |
+| Data Prep | Filter, positional subset, sort, duplicates, missing values, binning, grouping/aggregation, joins, and reshape. |
+| Numerical analysis | Smoothing, derivative, integral, sequential/parallel Formula results, FFT/iFFT, all existing statistics scopes, and interpolation using generated, manual, or existing-column query points. |
+| Fitting | Curve Fit with seeds, bounds, fixed states, weights, percentile uncertainties, residuals, confidence settings, and custom-model definitions. |
+| Spectral analysis | Single-spectrum baseline/detection/composite fitting, explicit reviewed peak decisions, baseline maps, Peak/Raman batch/map fits, analysis duplicate/delete, and exporting internal analysis tables as worksheets. |
+| Maps and plots | Grid, axis/line cuts, ROI summaries, contour extraction, applied plot definitions/style updates/renaming/deletion, and comparisons. |
+| Results and files | Recomputed batch summaries, wide statistics tables, parameter correlations, fit reports, large-data window extraction, data/figure export, and ordinary project saves. |
+
+Results refer to earlier sheet, fit, and analysis variables. Batch tables are
+recomputed from these results at the corresponding step, including changed
+statistics group counts; measured values are not embedded as frozen result
+tables. Original GUI timings are replaced with zero in replay summaries. Failed
+or cancelled audit rows describe the original run; the script executes recorded
+successful operations and stops if a replayed operation raises an error. Background
+spectral calls are captured only after successful publication; cancellation,
+stale inputs, and failed publication do not add analysis calls.
+
+Reviewed peak enable/disable, removal, manual addition, and repositioning choices
+are retained. Replay detects fresh candidates and matches explicit review edits
+within the recorded physical-axis tolerance; an unmatched reviewed peak raises
+an error. Baseline and fit calculations use the replay input data. Template fit
+seeds remain independently reused for each fit.
+
+The API also provides `load_folder()` so authors can write ordinary Python loops
+over folder files and combine them with `sheet()` references to existing data:
+
+```python
+for sheet in session.load_folder("measurements"):
+    clean = session.prepare(sheet, operation="missing", name=sheet.name+"_clean",
+                            columns=["signal"], strategy="fill_mean")
+    report = session.statistics(clean, operation_key="single_summary",
+                                primary_column="signal", name=sheet.name+"_stats")
+```
+
+Image-digitizer extraction, project replacement during a recording, internal
+spectral-viewer presentation changes, and running another macro or batch recipe
+inside a recording are not yet supported by recording/replay adapters. Numerical
+spectral analysis and regular plot/comparison styling are supported as listed above.
+For images, digitize manually first, then apply macros to the extracted worksheets
+or exported CSVs. Future image replay would need explicit calibration, axis scales,
+regions, and trace-selection settings, with human review for ambiguous images;
+this is an adapter/design gap rather than a blanket security ban on image data.
+Encrypted/signed saves and security-key management are excluded from recordings
+and restricted playback; passwords and private keys are never written to scripts.
+Unsupported data changes, missing dependencies, or unknown
+outputs make a recording explicitly incomplete, with an explanatory error before
+its calls execute. Save a starting project before recording, inspect the script,
+and use **Save Python API Script** for this broader coverage;
+**Review / Run Batch Recipe** continues to support its smaller set of recipe steps. Numerical operations run
+without a window; map extraction and figure export lazily use the Qt renderer.
+
+### Restricted playback and Windows executables
+
+JASC reads recordings as a restricted command language; it does not import the
+file or execute it through `exec`, `eval`, `compile`, or `runpy`. The complete
+outer syntax is validated before any command runs. Approved `session` calls,
+literal values, named result references, the `series` helper, recorded count
+helpers and bounded loops over worksheet collections are supported. Imports other
+than the recognized JASC declaration, decorators, arbitrary attribute/method
+access, assignment to API objects, comprehensions, general control flow, expanded
+arguments, shell commands and arbitrary built-ins are rejected. Mathematical
+formula/model strings retain the existing numerical expression allowlists plus
+playback complexity/allocation checks; they cannot access general Python objects.
+
+The review dialog shows the exact captured source. Changing the file after review
+does not change the bytes that will run. Existing workspace data is copied to a
+starting snapshot. A separate worker process performs numerical operations and
+rendering, with a default two-minute time limit and 2 GiB memory limit. The GUI
+remains available; Cancel terminates the child and discards staged changes. Native
+calls in the child need not cooperate with Python thread cancellation. Preparing
+or loading the starting/result project may finish its current work unit before
+cancellation takes effect. Closing JASC also waits
+for the worker to stop. A changed worksheet, metadata, plot or project prevents
+publication, so replay cannot silently replace intervening user work.
+
+File imports are limited to the selected input folder and approved data formats.
+Traversal, URLs, UNC/device paths, alternate data streams, ambiguous/reserved
+Windows names, symbolic links and directory junctions below the access root are
+rejected. Relative exports retain their subfolders in a new output run folder;
+recorded absolute destinations use their filename there. Only data, ordinary
+`.jasc` projects and supported figure formats may be exported. Existing outputs,
+including duplicate exports within one run, cannot be overwritten. `_jasc_result.jasc`
+contains the completed workspace and `_jasc_run.json` records the script hash and
+run information. Encrypted/signed saves and security-key operations are excluded.
+Style files/URLs/module paths and external LaTeX tools are also excluded; installed
+Matplotlib/SciencePlots style names remain available without external TeX.
+
+These controls restrict JASC recordings; they are not an operating-system sandbox
+for arbitrary Python/native libraries. Review the approved operations and grant
+only the input folder needed for the task. Do not run downloaded `.py` files with
+the Python interpreter itself: top-level Python code can execute before any JASC
+launcher is reached. New generated files delegate their normal launcher to the
+restricted runner, while older generated launchers remain readable by that runner.
+
+Build Windows distributions using `python build_windows.py` after installing
+`requirements-build.txt` in the build environment. `JASC.spec` produces a one-folder
+bundle with `JASC.exe` for the GUI and `JASC-cli.exe` for console output. Both accept:
+
+```powershell
+JASC-cli.exe --run-script recording.py --project starting.jasc --input-dir measurements --output results.jasc
+```
+
+Distribute the entire generated `JASC` folder, including `_internal`. Python and
+the numerical/Qt runtime are bundled, so recipients do not need to install Python.
+`--self-test` constructs and closes the GUI offscreen for packaging checks.
+Automated bundle tests remove Python from `PATH`, set unusable Python environment
+paths, exercise both executable entry points, perform a fit/figure export and
+verify that injected Python does not create a marker file. This is distinct from
+validation on a fresh Windows VM, which remains a release check. Installer,
+code-signing and cross-platform distributions remain separate packaging work.
+
+During development, regenerate the PyInstaller executable package only when the
+user explicitly requests a build or rebuild. Ordinary implementation, fixes,
+documentation, and source testing do not trigger packaging. An existing bundle
+contains a snapshot of the application and its manual; updating source files or
+regenerating this PDF does not refresh an existing executable distribution.
+
+### Runnable synthetic macro example
+
+`Test_Data/Macro_Example` contains three supplied CSV spectra, the restricted
+`process_spectra.py` macro, independent `expected_truth.json`, a reproducible data
+generator, and `comparison_preview.png`. Detailed GUI, Python CLI, and packaged
+Windows commands are in `Test_Data/Macro_Example/README.txt`.
+
+1. Start a new, empty project so the example's sheet and plot names are available.
+2. Choose **Macros > Run Python API Script** and select
+   `Test_Data/Macro_Example/process_spectra.py`.
+3. Set the allowed input folder to `Test_Data/Macro_Example`, not its `input`
+   subfolder. The macro imports the relative `input` folder below that access root.
+4. Choose an output folder, for example `Test_Data/Macro_Example/results`, and
+   click **Run Recording**. Each run writes into a fresh subfolder.
+5. Inspect the processed sheets, fitted parameters, individual plots, and the
+   synchronized three-panel comparison. Start another empty project before retrying.
+
+The macro removes missing/duplicate samples, sorts X, subtracts an exact synthetic
+reference background, smooths for display with LOWESS, and fits the unsmoothed
+corrected observations using their known measurement sigmas. Each input has 407
+rows and each processed sheet has 396. A successful run produces 18 worksheets,
+four plots, 15 CSV exports, and four PNG exports plus the result project and run
+manifest. The fit does not read the independent truth file. Its 95% bands describe
+uncertainty of the fitted mean curve, not prediction intervals for observations.
+The optional `generate_data.py` is a trusted developer utility, not a restricted
+macro; the supplied inputs are ready to use without running it.
+
+### Batch recipes for folder/workspace replay
+
+The **Macros** menu records a sequence of supported operations and ordinary XY
+plot definitions, then repeats it for selected workspace sheets, disk-folder
+files, or both. This first release supports **Smoothing**, **Curve Fit**, and
+line/scatter/line+marker/errorbar plots. Text-file import settings can be captured
+while recording; folder inputs currently support CSV, DAT, and TXT.
+
+1. Choose **Macros > Record Macro** and enter a name. Use the selected worksheet
+   as the reference, or import representative data before applying operations.
+2. Demonstrate each operation on one sheet and one Y column using the normal
+   Smoothing and Curve Fit dialogs. A later fit may select the smoothed column.
+   Batch targets are chosen when replaying rather than during the demonstration.
+3. Create and style ordinary XY plots as usual. **Stop Recording** collects the
+   final applied definitions of plots created or changed during the recording.
+4. Choose **Review / Run Batch Recipe**. Inspect the ordered steps; edit supported
+   settings, remove steps, or move independent steps. Dependencies prevent
+   removing/reordering a step that later results or plots require.
+5. Check workspace sheets and/or use **Add Files** or **Add Folder**. Include
+   subfolders when needed. Imported columns match the reference by exact name;
+   there is no implicit positional or semantic-role fallback in this release.
+6. Select **Preview Compatibility**. Review ready/skipped inputs and their
+   reasons. The preview checks structure and source numeric metadata; numerical
+   requirements and optimizer convergence are also checked during execution.
+7. Optionally choose **Export Tables To...**, then **Run Macro**. Computation
+   runs in the background with progress and Cancel. The first generated plot
+   can open automatically; remaining plots are available in Workspace > Plots.
+
+Each successful folder input becomes a normal source worksheet. Replay of an
+existing worksheet leaves it unchanged. Derived results, fitted curves,
+residuals, and plots are separate project objects with collision-safe names.
+The run summary records source identity, operation/step, status, timing, warnings,
+and fit parameters/errors and metrics. Its worksheet metadata retains the macro
+definition; generated fit worksheets retain the full fit report.
+
+Only complete input results are published. A failed input adds a failure row
+while other inputs continue. Cancel retains already completed inputs and
+discards the incomplete input. Changed/replaced workspace sources are rejected
+before publication; changed folder files require another compatibility preview.
+Native numerical calls may return before cancellation takes effect. Source
+snapshots and retained outputs use memory; this is not an out-of-core runner.
+
+**Save Batch Recipe** writes a standalone `.jasc-macro.json` file. **Load Batch Recipe** opens it
+for review and reuse with different inputs. Save the project separately to retain
+the generated worksheets/plots. Unsaved macro files and macro-generated project
+outputs have save/discard/cancel protection. Optional CSV export writes tables,
+the summary, and macro definition into a new `jasc_macro_run_...` directory;
+existing files are not overwritten, and these generated run directories are
+excluded from recursive folder input discovery. Figure export remains available
+through the existing plot export commands.
+
+Unrecorded changes to a reference/result sheet, unknown dependencies, and
+unsupported plot kinds produce recording gaps that block replay. Start a clean
+recording from the intended input to resolve them. The recorder does not capture
+arbitrary cell editing, every analysis family, comparison creation, or export
+commands. Fit seeds/constraints repeat independently on each input. A transformed
+Y signal cannot reuse raw measurement sigma/percentile bounds without an explicit
+propagation rule; such weighted chains are blocked rather than inferred.
+
 ## 14. Export, Persistence, and Large Data
 
 ### Export a dataset
@@ -1768,7 +2063,7 @@ The current version does not provide:
 - Multi-condition filters, pivot tables, resampling, date/time tooling, or reusable preparation recipes.
 - Multi-panel pages, true 3D plots, polar/ternary plots, annotation objects, or general graph templates.
 - Global multi-dataset fitting, automated model ranking, peak deconvolution, or surface fitting.
-- A scripting console, macro recorder, plugins, autosave/recovery, or installer. Disk-backed large-table browsing is available, but full-source analysis controls, direct large-table editing, and vendor-map disk storage are not yet implemented.
+- A general scripting console, plugins, autosave/recovery, or installer. Restricted Python API recordings and batch recipes are available as described above. Disk-backed large-table browsing is available, but full-source analysis controls, direct large-table editing, and vendor-map disk storage are not yet implemented.
 
 Consult `Roadmap.md` for planned work; roadmap entries are not instructions for currently available features.
 
@@ -1786,6 +2081,43 @@ Consult `Roadmap.md` for planned work; roadmap entries are not instructions for 
 6. Create a plot document, configure axes/legend/locators, and save the project.
 7. Export final data/figures as needed.
 8. Save the `.jasc` project to retain the editable workspace.
+
+### Example data by feature family
+
+Start with `Test_Data/README.txt`, then `Test_Data/Feature_Examples/README.txt`.
+Each numbered directory contains ready-to-use synthetic inputs, `expected.json`
+with independent reference answers, and a GUI walkthrough. Thirteen families also
+include `run_example.py` for restricted replay. Start an empty project, select
+**Macros > Run Python API Script**, and use the numbered family directory as the
+allowed input folder, not its `input` subfolder. Select a separate output parent;
+each run creates a fresh results folder. The runner retains the completed workspace
+as `_jasc_result.jasc`. Inputs do not need to be regenerated before use.
+
+| Directory under `Test_Data/Feature_Examples` | Features and expected behavior |
+| --- | --- |
+| `01_Import` | Text delimiters/headers/preambles, encodings, decimal comma and two Excel tabs; numeric controls follow y=2x+1. |
+| `02_Worksheet_Editing` | Smart Fill, paste, Fill Range, metadata, undo/redo and sheet lifecycle; numeric seeds fill to x=1..6 and y=10..60. |
+| `03_Data_Preparation` | Missing values, duplicates, sort, filter, subset, group, join, bin and melt; ten raw rows become seven clean rows. |
+| `04_Formulas` | Safe expressions, cross-sheet background subtraction and selected rows; corrected=2.5x+4. |
+| `05_Signal_Processing` | Six smoothing methods, calculus, FFT/iFFT; known peaks at 5 and 13 Hz and inverse reconstruction. |
+| `06_Interpolation` | 1D, 2D and N-D prediction with known affine answers and explicit outside-range blanks. |
+| `07_Statistics` | Single/pair/multi/group complete reports, PCA and companion data; three groups of twenty and a regression control. |
+| `08_Curve_Fitting` | Linear, Gaussian, decay and custom fits with bounds/reports; further model-family responses for GUI exploration. |
+| `09_Asymmetric_Uncertainty` | Separate percentile endpoints, asymmetric plots and median-likelihood fitting; expected slope about 1.7. |
+| `10_Spectral_Analysis` | Baseline, detection/review, composite Gaussian fit and six-pixel Raman map with known parameter fields. |
+| `11_Plots_and_Maps` | Every registered plot subtype, dual Y, map products and comparisons; manual mouse/pop-out/theme checks. |
+| `12_Image_Digitization` | Manual linear/log XY and colour-map extraction with raster images and analytic reference values; no replay adapter. |
+| `13_Projects_and_Export` | Ordinary project round-trip and CSV/TSV/PNG/SVG/PDF export; encryption/signing remain manual. |
+| `14_Large_Data` | Disk-backed source and explicit 400-row extraction from a 12,000-row fixture, with window provenance. |
+
+`Test_Data/Macro_Example/README.txt` provides the additional whole-folder macro
+workflow described in Chapter 13. Existing surface-map and legacy project samples
+remain available. These are representative feature-family demonstrations, not an
+exhaustive validation of every model, optimizer, instrument dialect or statistical
+assumption. Raster review, plot mouse interactions, theming and protected project
+operations have manual steps. The large-data fixture demonstrates paging semantics,
+not larger-than-RAM performance. Developer regeneration/testing commands are in the
+catalog guide; they do not rebuild the executable.
 
 ### Output type summary
 

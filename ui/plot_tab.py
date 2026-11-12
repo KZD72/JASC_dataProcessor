@@ -44,6 +44,7 @@ from models.plot_settings import (
 from models.plot_types import PLOT_TYPES, plot_type_label
 from models.uncertainty import PercentileBounds
 from ui.uncertainty_controls import PercentileBoundsEditor
+from ui.plot_colors import PLOT_COLOR_PRESETS, PlotColorComboBox, PlotColorSelector
 from ui.plot_canvas import SCIENCEPLOTS_AVAILABLE, LocatedPoint, PlotCanvas, PlotLocator, PlotSeries
 from ui.plot_element_dialogs import (
     PlotAxisEditDialog,
@@ -62,11 +63,7 @@ _MARKER_LABELS: dict[str, str] = {
     "": "None", "o": "Circle", "s": "Square", "^": "Triangle",
     "D": "Diamond", "x": "Cross", ".": "Dot",
 }
-_COLOR_LABELS: dict[str, str] = {
-    "": "Auto", "tab:blue": "Blue", "tab:orange": "Orange",
-    "tab:green": "Green", "tab:red": "Red", "tab:purple": "Purple",
-    "black": "Black",
-}
+_COLOR_LABELS: dict[str, str] = {"": "Auto", **{value: label for label, value in PLOT_COLOR_PRESETS}}
 _PLOT_STYLE_PRESETS: list[tuple[str, str]] = [
     ("Matplotlib default", ""),
     ("Science", "science"),
@@ -161,6 +158,7 @@ class PlotTab(QWidget):
     plot_draft_replaced = Signal()
     options_visibility_changed = Signal(bool)
     dataset_created = Signal(str)
+    analysis_created = Signal(object, object, str, object)
     plot_created = Signal(str)
     state_changed = Signal()
     detach_requested = Signal()
@@ -426,6 +424,9 @@ class PlotTab(QWidget):
                 if isinstance(widget, QLineEdit) and value.get("kind") == "text":
                     widget.setText(str(value.get("value", "")))
                 elif isinstance(widget, QComboBox) and value.get("kind") == "combo":
+                    if isinstance(widget, PlotColorComboBox) and isinstance(value.get("data"), str):
+                        widget.set_color(value["data"])
+                        continue
                     index = widget.findData(value.get("data")) if value.get("data") is not None else -1
                     if index < 0:
                         index = widget.findText(str(value.get("text", "")))
@@ -715,11 +716,8 @@ class PlotTab(QWidget):
                             ("Plus","+"), ("Star","*"), ("Dot",".")]:
             self._marker_combo.addItem(label, data)
 
-        self._color_combo = QComboBox()
-        for label, data in [("Auto",""), ("Blue","tab:blue"), ("Orange","tab:orange"),
-                            ("Green","tab:green"), ("Red","tab:red"),
-                            ("Purple","tab:purple"), ("Black","black")]:
-            self._color_combo.addItem(label, data)
+        self._color_selector = PlotColorSelector()
+        self._color_combo = self._color_selector.combo
 
         self._series_label_edit = QLineEdit()
         self._colorbar_label_edit = QLineEdit()
@@ -849,10 +847,8 @@ class PlotTab(QWidget):
                             ("Star","*"), ("Dot",".")]:
             self._locator_marker_combo.addItem(label, data)
 
-        self._locator_color_combo = QComboBox()
-        for label, data in [("Red","tab:red"), ("Blue","tab:blue"), ("Orange","tab:orange"),
-                            ("Green","tab:green"), ("Purple","tab:purple"), ("Black","black")]:
-            self._locator_color_combo.addItem(label, data)
+        self._locator_color_selector = PlotColorSelector(default="tab:red", allow_auto=False)
+        self._locator_color_combo = self._locator_color_selector.combo
 
         self._locator_size_spin = QDoubleSpinBox()
         self._locator_size_spin.setRange(10.0, 500.0)
@@ -1077,7 +1073,7 @@ class PlotTab(QWidget):
         self._add_series_row(sf, "line_width", "Line width", self._line_width_spin)
         self._add_series_row(sf, "marker", "Marker", self._marker_combo)
         self._add_series_row(sf, "marker_size", "Marker size", self._marker_size_spin)
-        self._add_series_row(sf, "color", "Color", self._color_combo)
+        self._add_series_row(sf, "color", "Color", self._color_selector)
         self._add_series_row(sf, "bar_options", None, self._bar_options_panel)
         self._add_series_row(sf, "fill_options", None, self._fill_options_panel)
         self._add_series_row(sf, "histogram_options", None, self._histogram_options_panel)
@@ -1159,7 +1155,7 @@ class PlotTab(QWidget):
         lf.addRow("Y value", self._locator_y_edit)
         lf.addRow("Marker", self._locator_marker_combo)
         lf.addRow("Size", self._locator_size_spin)
-        lf.addRow("Color", self._locator_color_combo)
+        lf.addRow("Color", self._locator_color_selector)
         lb = QHBoxLayout()
         lb.addWidget(add_loc); lb.addWidget(rm_loc); lb.addWidget(clr_loc)
         lf.addRow(lb)
@@ -1536,7 +1532,10 @@ class PlotTab(QWidget):
         except (KeyError, ValueError) as exc:
             QMessageBox.warning(self, "Analyse 2D Map", str(exc))
             return
-        self._commit_surface_analysis(series, operation, output_name, frame)
+        parameters = ([dialog.coordinate()] if operation in {"horizontal", "vertical"} else
+                      list(dialog.line_profile()) if operation == "line" else
+                      list(dialog.bounds()) if operation == "roi" else [])
+        self._commit_surface_analysis(series, operation, output_name, frame, parameters)
 
     def _start_surface_cut_selection(self) -> None:
         """Arm the canvas so two map clicks define an arbitrary profile line."""
@@ -1594,7 +1593,7 @@ class PlotTab(QWidget):
             QMessageBox.warning(self, "Pick Map Cut Line", str(exc))
             self._plot_canvas.clear_surface_cut_overlay()
             return
-        self._commit_surface_analysis(series, "line", output_name, frame)
+        self._commit_surface_analysis(series, "line", output_name, frame, list(dialog.line_profile()))
 
     def _handle_surface_cut_cancelled(self) -> None:
         """Clear pending state when a canvas cut selection is cancelled."""
@@ -1607,10 +1606,12 @@ class PlotTab(QWidget):
         operation: str,
         output_name: str,
         frame: pd.DataFrame,
+        parameters: list | None = None,
     ) -> Dataset:
         """Store a map-analysis worksheet and persist its profile plot when applicable."""
         dataset = self._workspace.add_dataset(output_name, frame)
         self._annotate_surface_analysis_dataset(dataset, operation, series)
+        self.analysis_created.emit(dataset, asdict(series), operation, parameters or [])
         if operation in {"horizontal", "vertical", "line"}:
             self._save_surface_profile(dataset, operation, series)
         self.dataset_created.emit(dataset.name)
@@ -2937,6 +2938,9 @@ class PlotTab(QWidget):
     @staticmethod
     def _set_combo_data_or_add(combo: QComboBox, value: str, label: str) -> None:
         """Select item data, adding a readable entry for a custom value when needed."""
+        if isinstance(combo, PlotColorComboBox):
+            combo.set_color(value)
+            return
         index = combo.findData(value)
         if index < 0 and value:
             combo.addItem(f"{label} ({value})", value)

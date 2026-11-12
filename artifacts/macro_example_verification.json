@@ -1,0 +1,94 @@
+{
+  "verified_utc": "2026-11-11T10:34:04+00:00",
+  "status": "passed",
+  "example": "Test_Data/Macro_Example",
+  "macro": "process_spectra.py",
+  "input_count": 3,
+  "raw_rows_per_file": 407,
+  "processed_rows_per_file": 396,
+  "outputs_per_run": {
+    "worksheets": 18,
+    "plots": 4,
+    "csv_files": 15,
+    "png_files": 4
+  },
+  "test": {
+    "name": "tests.test_macro_example",
+    "count": 1,
+    "seconds": 4.143,
+    "status": "passed"
+  },
+  "source_cli": "passed",
+  "standalone_cli_without_python_in_path": "passed",
+  "seeded_regeneration": "byte-identical CSVs and equal truth metadata",
+  "macro_sha256": "22ecf85c43d17b996e4d80f113969a307115888ca820588c79cd90dccb42b6a3",
+  "input_sha256": {
+    "spectrum_01.csv": "50d9e96b0514e76a300a0c3ddfbd4c3437a3932a229e3bb16fa81bf67953a5a4",
+    "spectrum_02.csv": "3a15146b9b4dc0ce5fbb082dccca6452e6a900596115cedddc7cfbd3a15cffd3",
+    "spectrum_03.csv": "d164a7d4370dd2c29a3879afbbec199bcbb71e43780b17fe95e89dde7cdafa77"
+  },
+  "runs": [
+    {
+      "result_folder": "Test_Data/Macro_Example/results/jasc_script_run_20261111_112850_44edcf87",
+      "worksheets": 18,
+      "plots": 4,
+      "fit_results": {
+        "spectrum_01": {
+          "param_amplitude": 8.01370915705119,
+          "param_center": -0.7997152361187291,
+          "param_sigma": 0.6510359497656969,
+          "param_offset": -4.092214935902728e-05,
+          "r_squared": 0.9976278070990844,
+          "rmse": 0.1167652680783833
+        },
+        "spectrum_02": {
+          "param_amplitude": 9.997767329593284,
+          "param_center": 0.2000077698523279,
+          "param_sigma": 0.7983120254731068,
+          "param_offset": 0.0025233077055589,
+          "r_squared": 0.99790037091343,
+          "rmse": 0.1455761957067045
+        },
+        "spectrum_03": {
+          "param_amplitude": 6.493895387756065,
+          "param_center": 1.0006840311743328,
+          "param_sigma": 1.052797806951086,
+          "param_offset": -0.0012611553381251,
+          "r_squared": 0.9980745148011224,
+          "rmse": 0.097622783940695
+        }
+      }
+    },
+    {
+      "result_folder": "Test_Data/Macro_Example/results/jasc_script_run_20261111_113121_95d3b932",
+      "worksheets": 18,
+      "plots": 4,
+      "fit_results": {
+        "spectrum_01": {
+          "param_amplitude": 8.01370915705119,
+          "param_center": -0.7997152361187291,
+          "param_sigma": 0.6510359497656969,
+          "param_offset": -4.092214935902728e-05,
+          "r_squared": 0.9976278070990844,
+          "rmse": 0.1167652680783833
+        },
+        "spectrum_02": {
+          "param_amplitude": 9.997767329593284,
+          "param_center": 0.2000077698523279,
+          "param_sigma": 0.7983120254731068,
+          "param_offset": 0.0025233077055589,
+          "r_squared": 0.99790037091343,
+          "rmse": 0.1455761957067045
+        },
+        "spectrum_03": {
+          "param_amplitude": 6.493895387756065,
+          "param_center": 1.0006840311743328,
+          "param_sigma": 1.052797806951086,
+          "param_offset": -0.0012611553381251,
+          "r_squared": 0.9980745148011224,
+          "rmse": 0.097622783940695
+        }
+      }
+    }
+  ]
+}

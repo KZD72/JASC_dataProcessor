@@ -1,0 +1,19 @@
+{
+  "status": "passed",
+  "worksheets": [
+    "source",
+    "statistics_y",
+    "source_y_normal_curve",
+    "statistics_other",
+    "source_statistics_batch_summary",
+    "source_statistics_batch_wide_summary",
+    "interpolated_y",
+    "interpolated_other",
+    "source_interpolation_batch_summary"
+  ],
+  "plot_count": 1,
+  "script": "artifacts\\api_recording_preview\\expanded_recording.py",
+  "calls": 14,
+  "issues": [],
+  "cli_exit_code": 0
+}

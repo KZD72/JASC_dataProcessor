@@ -1,0 +1,20 @@
+{
+  "baseline": 2.0,
+  "map_amplitude": "5+X+Y",
+  "map_center": "240+3*X-2*Y",
+  "map_pixels": 6,
+  "map_sigma": 6.0,
+  "samples_per_pixel": 301,
+  "single_amplitudes": [
+    5.0,
+    3.0
+  ],
+  "single_centers": [
+    200.0,
+    300.0
+  ],
+  "single_sigmas": [
+    6.0,
+    10.0
+  ]
+}

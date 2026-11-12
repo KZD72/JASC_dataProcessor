@@ -25,6 +25,11 @@ Shift+wheel/middle-button pan, and synchronized image-map navigation through the
 comparison's X/Y options. These gestures preserve log/reversed axes and toolbar
 navigation history.
 
+The Series and Data Location colour controls now provide 20 swatched presets and
+a custom RGB/hex picker. Existing colour strings remain the project/API format;
+custom pending selections are restored across tab/project reopen without applying
+them implicitly. The direct canvas appearance editor shares picker/name conversion.
+
 At the user's 2026-11-10 priority, light/dark visibility issues are addressed with
 shared contrasted theme tokens, explicit checkbox/radio/toggle/focus states,
 state-aware navigation glyphs, readable swatches, and scoped comparison readouts.
@@ -36,6 +41,40 @@ Peak/Raman bound-column controls, correlated/systematic error models, and
 bootstrap/profile percentile intervals remain follow-ups; current errors/bands
 are explicitly local approximations. These user-prioritized changes precede the
 remaining general worker migrations.
+
+Curve Fit now exposes its reference Worksheet in the Source group and refreshes
+column/uncertainty mappings when it changes, while retaining explicit batch targets.
+Every successful single or batch fit stores a report table with full text, numeric
+parameters/errors, metrics and percentile provenance. The single-fit viewer can
+copy text, export the table or open its saved worksheet. Report generation/export
+uses the existing API recording and project-persistence paths.
+
+The first application macro release is implemented at the user's 2026-11-10
+priority. Record Smoothing, Curve Fit, and applied ordinary XY plot definitions
+on one reference sheet, then replay on CSV/DAT/TXT folder files, workspace sheets,
+or both. Import settings, typed source/result references, model settings, and plot
+styles persist in standalone versioned macro files. Review/edit/reorder supported
+steps, preview compatibility, run sequentially in the background with Cancel, and
+publish independent complete-source worksheets/plots plus a cumulative audit.
+Optional CSV export stages a new run directory. Existing sources are preserved;
+unrecorded data changes/dependencies and invalid uncertainty propagation block
+replay. This paragraph describes the narrower JSON batch recipe runner. Python
+API recording now covers broader analysis/worksheet operations, comparisons,
+figure exports and recomputed summaries. Its remaining adapters, repeat-block
+mappings, streaming, and embedded libraries are listed under Stage 9; general
+graph/analysis templates remain deferred.
+
+The user subsequently clarified that the intended macro is a readable file of
+API calls, analogous to generated methods in a scientific application. A public
+`jasc_api.Session` facade and chronological Python recorder now complement the
+recipe runner. `.py` recordings contain direct method calls, named sheet/fit/plot
+references, and ordered plot updates/exports; they run through a command-line
+launcher. Recording coverage includes calculus/formulas/FFT alongside the original
+smoothing/fitting, native plot definitions, and comparisons. Additional adapters,
+in-app script execution/editor integration, and complete shared GUI/API dispatch
+remain follow-ups. The `.jasc-macro.json` menu is explicitly labelled batch recipes.
+Active recording now has a mouse-transparent red window edge plus a persistent
+Recording (.py) status badge and Stop Recording button, with palette/resize support.
 
 Reviewed on 2026-09-24 against the current repository state, session changelog, and automated test suite.
 
@@ -58,7 +97,7 @@ Reviewed on 2026-09-24 against the current repository state, session changelog, 
 - Plotting includes equal-cell comparison layouts but lacks a general graph-page editor, shared legends, insets, annotation tools, many specialized graph families, and true 3D graphing. Reusable plot/analysis templates are deliberately deferred to the final roadmap stage.
 - Batch analysis exists but lacks semantic role binding, a uniform timestamped audit-log schema, true background execution for most operation families, and workspace-level undo for edits to non-visible sheets.
 - Fitting lacks global multi-dataset fitting, general dynamic/robust initial-guess search, surface fitting, and advanced model comparison; Fano components now have dedicated multistart initialization.
-- No PyInstaller specification or repeatable standalone Windows build exists yet.
+- A PyInstaller one-folder specification and repeatable Windows build now provide GUI/console executables with restricted script playback; installer, signing and fresh-machine release validation remain pending.
 - JASC Package Seals provide normal-security forgery deterrence, `.jascx` provides authenticated encryption for sensitive packages, and optional Ed25519 signatures provide independently trustable author provenance through imported public-key fingerprints. Certificate-authority integration, revocation lists, hardware-token key storage, and trusted timestamp authorities remain optional future institutional-security extensions.
 
 ## Competitive Reference Points
@@ -130,7 +169,7 @@ The benchmark products emphasize:
 ### Phase 5: Polish and Packaging
 - Refine UI menus, icons, layout, and inspector workflows. (in progress)
 - Perform error handling and edge-case testing. (in progress)
-- Write PyInstaller setup script to build the standalone `.exe`. (not started)
+- PyInstaller one-folder GUI/CLI build and opt-in standalone replay/security tests implemented; continue installer/signing/fresh-machine validation.
 
 ## Competitive Gap Matrix
 
@@ -544,6 +583,132 @@ Acceptance criteria:
 
 Purpose: build on Stage 1 audit records so existing workflows become traceable and recalculating without introducing a template system.
 
+#### User-prioritized application macro recording (2026-11-10)
+
+The user's clarified target is chronological Python API-call recording.
+`jasc_api.py` provides the public Session API and script launcher;
+`core/api_recording.py` emits readable `.py` files and detects gaps. The existing
+recorder now captures successful calls and live plot changes in execution order,
+with separate API-script view/save and batch-recipe actions. Tests execute generated
+scripts and compare numerical outputs, plot definitions, exported figures, and
+comparison identities. Complete operation coverage still requires individual
+adapters; GUI computations currently retain their established engine paths.
+
+Expanded adapters now cover worksheet edits/history/lifecycle; Excel and large-data
+imports/extraction; every existing Data Prep operation; statistics with companion
+tables, long/wide summaries and dynamic groups; interpolation; sequential/parallel
+formulas; baseline maps and single/batch/map spectral analysis; reviewed peak
+decisions; analysis lifecycle/table export; map data products; plot deletion; and
+ordinary project saves. Summary/report builders and single-spectrum publication
+are shared with GUI execution, so replay recomputes scientific values. Spectral
+background calls are captured only on validated publication. New regressions execute
+scripts against original and changed inputs, including changed row/group counts.
+Image-digitizer extraction, nested recipe execution, spectral-viewer presentation
+adapters and full command dispatch migration remain open;
+protected save credentials stay outside recordings.
+
+Restricted in-app and executable playback is implemented (2026-11-11).
+`core/script_language.py` validates the recording grammar; `script_runtime.py`
+dispatches explicit API commands using opaque references; `script_safety.py`
+limits file and renderer capabilities. `script_jobs.py` stages a detached workspace
+and runs a limited child process, with Windows job-object memory/process limits,
+cancellation, timeout, stale-workspace rejection and atomic result-folder publication.
+The GUI runner reviews exact source bytes and allowed input/output folders.
+`main.py --run-script`, `python -m jasc_api`, and frozen entry points share this
+interpreter; arbitrary Python programs are not accepted. `JASC.spec` and
+`build_windows.py` produce GUI/console executables, including Conda runtime DLLs.
+Rebuilding the PyInstaller executable package requires an explicit user request;
+ordinary development uses source/Python checks and leaves the existing bundle as-is.
+Tests cover hostile syntax/object escapes/embedded formulas, file scopes, Windows
+junctions, renderer style restrictions, actual child cancellation, GUI publication
+and a bundle running without Python on PATH. Continue fresh-VM validation, stronger
+OS isolation if general extensibility is introduced, installer and code signing.
+
+A runnable synthetic folder example now lives in `Test_Data/Macro_Example`: three
+seeded noisy Gaussian measurements, explicit missing/duplicate cleanup, background
+correction, LOWESS display smoothing, weighted fits of unsmoothed observations,
+parameter/statistics exports and synchronized comparison plots. Independent ground
+truth and an actual child-run regression verify scientific recovery and source
+preservation. Instructions cover GUI, source CLI and the standalone executable.
+
+`Test_Data/Feature_Examples` now supplies a catalog for fourteen application feature
+families, with small reproducible synthetic inputs, independent expected answers,
+GUI walkthroughs, and thirteen restricted replay macros. All registered plot
+subtypes have actual figure exports. Digitization uses analytic raster fixtures
+and manual review steps; protected saves, plot gestures and theming remain manual.
+The disk-backed fixture demonstrates paging, not larger-than-RAM capacity. Source
+regression checks execute every supplied replay and verify input regeneration and
+preservation. The original whole-folder macro remains a separate linked example.
+
+First release implemented: `models/macro.py`, `core/macro_recording.py`, and
+`core/macro_jobs.py` provide versioned declarative steps, source/result bindings,
+structural preflight and runtime numeric checks, per-source staging, and staged
+CSV export. `ui/macro_controller.py` and `ui/macro_dialog.py` provide the Macros
+menu, recording hooks in existing Smoothing/Curve Fit/import paths, collection of
+applied XY plot definitions on Stop, review/edit/remove/reorder, both input types,
+background execution, stale-source rejection, rollback, and save guards. Existing
+interactive numerical workflows keep their established execution paths. Replay
+retains independent fit seeds, uncertainty semantics, and new plot identities.
+Macro files remain separate from projects; generated results use normal project
+persistence. Cancellation keeps complete sources and discards the incomplete one.
+
+The design below guides remaining coverage. Configurable repeat-block bindings,
+embedded macro libraries and the remaining adapters are still future work. Python
+scripts already support native plot families, comparisons and figure exports;
+the older JSON recipe runner retains its narrower Smoothing/Curve Fit/XY scope.
+
+- Introduce validated, versioned operation commands and an allowlisted registry
+  that numerical workers and ordinary dialogs can both execute. Existing
+  `Operation:` metadata records only the latest description and cannot reconstruct
+  an exact prior sequence.
+- Record supported, successfully applied operations and their full settings;
+  previews, cancelled dialogs, and failed operations are not steps. Identify
+  unsupported actions explicitly instead of silently omitting a dependency.
+- Store logical source/column bindings and references to earlier step outputs,
+  independently of temporary sheet names or collision suffixes. Retain model
+  definitions, fit seeds/constraints, ranges, and uncertainty semantics. Require
+  explicit dependencies for external-sheet references.
+- Provide Record / Stop / Save Macro / Run Macro, an editable ordered step list,
+  and sample validation. The user confirmed both disk-folder files and workspace
+  datasheets as sources; allow either or their union through one target group.
+  Start folder support with existing delimited-text importers and retain their
+  format/locale rules. Import all selected eligible files into normal workspace
+  sheets by default; retaining a large group consumes normal dataset memory.
+- Represent an input-group setup, a repeat-for-each-datasheet block, and final
+  group actions. Loading occurs once for the group, per-sheet operations and plot
+  creation repeat, and combined overlays/comparisons/summary exports run once after
+  the individual results exist. Replaying must rebind source paths and logical
+  aliases rather than reimporting the recorded example for every target.
+- Record applied plot definitions/styles with symbolic data/column references.
+  Replay creates independent plot documents with new identities and rebinds any
+  final comparison layout to the generated plots, preserving existing panel limits.
+  Save generated plots without opening every tab; let the user inspect selected
+  results. Numerical work stays in workers; Workspace/Qt plot publication stays
+  on the GUI thread.
+- Preview source/sheet eligibility, resolved columns, required settings, and
+  skip/block reasons. Name matching is the default; positional mapping must be
+  explicit, and ambiguous role mapping must not silently choose a signal.
+  Structural preflight is followed by full per-step numeric validation at run time.
+- Process one source at a time off the GUI thread through existing job contracts.
+  Stage every step for that source, publish only a complete source result, retain
+  completed sources on Cancel, and discard the incomplete source. Keep inputs
+  unchanged by default; output to a separate location with explicit collision
+  handling and exclude output directories from recursive source discovery.
+- Emit a cumulative per-source/per-step audit with workflow version, settings,
+  bindings, status, error/warning, elapsed time, and output paths. Export results
+  incrementally; retain imported sheets and requested outputs by default, while
+  transient intermediates need not remain. A future low-memory option can stream
+  sources without retaining them; it must be an explicit alternative to load-all.
+- Never attach raw percentile bounds to transformed/smoothed data without a valid
+  propagation rule. Unsupported uncertainty propagation must be visible and block
+  any downstream fit that would otherwise use invalid error metadata.
+- First implement and verify a small complete macro such as load/select inputs ->
+  for each sheet: smoothing -> Curve Fit -> create plot -> collect summary/export.
+  Add formula, calculus, baseline, FFT, interpolation,
+  statistics, and other adapters as individually verified operations. Tests must
+  cover step dependencies, mapping/collision failures, numeric equivalence to
+  individual operations, cancellation, source preservation, and bounded loading.
+
 Tasks:
 - Add a full operation-history graph that records inputs, parameters, outputs, dependencies, status, and provenance without requiring a separate recipe workflow.
 - Add manual/automatic recalculation modes for formulas, transforms, fits, statistics, and plots.
@@ -619,6 +784,14 @@ Acceptance criteria:
 - Any template format is versioned, validates compatibility before applying changes, and can be removed without affecting normal saved projects.
 
 ## Near-Term Recommended Order
+
+The user's latest priority has broad Python API recording described in Stage 9,
+alongside the earlier Smoothing/Curve Fit batch recipe runner for folder/workspace
+targets. Complete the remaining image-digitizer, nested-run and viewer-presentation
+adapters before opening a general template family. Restricted in-app/executable
+playback is now implemented; general Python execution remains outside its scope.
+Use the existing job contracts and tests while adding this slice, then continue
+the broader priorities below. This does not open the deferred general template scope.
 
 1. Close the small remaining Stage 0 gate: document verification commands, add missing core/batch smoke coverage, configure linting, define manual checks, and resolve dependency drift.
 2. Harden the new spectrometer-import foundation with committed/anonymized vendor fixtures, additional locale controls and fixture-driven legacy encodings, stacked/long-form/multi-acquisition layouts, explicit coordinate/channel mapping, and lossless warnings for unrecognized records.

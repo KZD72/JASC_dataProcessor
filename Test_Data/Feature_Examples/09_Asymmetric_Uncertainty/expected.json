@@ -1,0 +1,13 @@
+{
+  "centre": "median",
+  "fit_parameter_tolerance": 0.15,
+  "intercept": 2.0,
+  "note": "Example measurement distribution has Gaussian tails but is not exactly JASC's interpolated quantile-normal likelihood. X endpoints are plotting examples; generated X values are exact.",
+  "origin": "measurement",
+  "probabilities": [
+    0.16,
+    0.84
+  ],
+  "rows": 121,
+  "slope": 1.7
+}

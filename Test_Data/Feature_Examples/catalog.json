@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "instructions": "README.txt",
+  "families": [
+    {"directory": "01_Import", "title": "Text and Excel import", "macro": "run_example.py", "features": ["delimiters", "headers", "metadata preamble", "encoding", "decimal formats", "Excel tabs"]},
+    {"directory": "02_Worksheet_Editing", "title": "Worksheet editing and metadata", "macro": "run_example.py", "features": ["new sheet", "paste", "fill range", "smart fill", "metadata", "undo/redo", "duplicate/rename/delete"]},
+    {"directory": "03_Data_Preparation", "title": "Data preparation", "macro": "run_example.py", "features": ["filter", "subset", "sort", "duplicates", "missing", "bin", "group", "join", "reshape"]},
+    {"directory": "04_Formulas", "title": "Formulas", "macro": "run_example.py", "features": ["safe numerical expressions", "cross-sheet", "selected rows"]},
+    {"directory": "05_Signal_Processing", "title": "Calculus and signals", "macro": "run_example.py", "features": ["derivative", "integral", "six smoothing methods", "FFT", "iFFT"]},
+    {"directory": "06_Interpolation", "title": "Interpolation", "macro": "run_example.py", "features": ["1D", "2D", "N-D", "generated queries", "manual queries", "outside policy"]},
+    {"directory": "07_Statistics", "title": "Statistics", "macro": "run_example.py", "features": ["single", "paired", "multi-column", "grouped", "PCA", "companion data"]},
+    {"directory": "08_Curve_Fitting", "title": "Curve fitting", "macro": "run_example.py", "features": ["linear", "Gaussian", "exponential", "custom expression", "bounds", "reports", "confidence bands"]},
+    {"directory": "09_Asymmetric_Uncertainty", "title": "Percentile uncertainty", "macro": "run_example.py", "features": ["endpoint columns", "probability levels", "asymmetric error bars", "median likelihood"]},
+    {"directory": "10_Spectral_Analysis", "title": "Baseline, peaks and Raman", "macro": "run_example.py", "features": ["baseline", "peak detection", "reviewed components", "composite fit", "Raman map", "analysis tables"]},
+    {"directory": "11_Plots_and_Maps", "title": "Plotting and maps", "macro": "run_example.py", "features": ["all registered plot subtypes", "dual Y", "map cuts", "ROI", "contours", "comparison", "synchronized axes", "pop-out and mouse navigation (manual)"]},
+    {"directory": "12_Image_Digitization", "title": "Image digitization", "macro": null, "features": ["XY calibration", "log scales", "manual points", "trace", "symbols", "colour probes", "resume extraction"]},
+    {"directory": "13_Projects_and_Export", "title": "Projects and export", "macro": "run_example.py", "features": ["project round-trip", "CSV/TSV", "PNG/SVG/PDF", "encryption and signatures (manual)"]},
+    {"directory": "14_Large_Data", "title": "Disk-backed data", "macro": "run_example.py", "features": ["read-only source", "paging", "explicit window extraction", "window statistics", "embedded source persistence"]}
+  ],
+  "related": [{"directory": "../Macro_Example", "instructions": "README.txt", "macro": "process_spectra.py", "title": "Recording and whole-folder processing", "features": ["recording feedback", "API call capture", "starting workspace", "folder replay", "JSON batch recipe scope"]}]
+}

@@ -1,0 +1,10 @@
+{
+  "status": "passed",
+  "executable": "artifacts/standalone/JASC/JASC-cli.exe",
+  "external_python_in_path": false,
+  "dataset_count": 3,
+  "plot_count": 2,
+  "result_folder": "C:\\Users\\julia\\Documents\\GitHub\\JASC_dataProcessor\\artifacts\\secure_playback_preview\\results\\jasc_script_run_20261111_110746_d2944e40",
+  "exit_code": 0,
+  "comparison": "recomputed numerical frames and canonical plot state match source interpreter"
+}

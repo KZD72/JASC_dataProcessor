@@ -1,0 +1,3 @@
+label;value
+café;1
+crème;2

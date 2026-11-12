@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 from collections.abc import Callable
 from copy import deepcopy
+from core.api_summaries import OperationSummaries
+from dataclasses import asdict
 import json
 import re
 import time
@@ -63,6 +65,7 @@ from core.spectral_jobs import SpectralSource
 from core.large_data import LargeDataset, TablePage, open_large_dataset
 from ui.large_data_view import LargeDataView
 from ui.background_jobs import BackgroundJobController, JobProgressWidget
+from ui.macro_controller import MacroController
 
 from core import project_io
 from core.batch_processing import (
@@ -211,6 +214,9 @@ class MainWindow(QMainWindow):
         """Create the main window, shared workspace, and primary UI regions."""
         super().__init__()
         self._workspace = Workspace()
+        self._macro_outputs_dirty = False
+        self._macro_import_options = None
+        self._macro_import_pattern = "keep"
         self._jobs = BackgroundJobController(self)
         self._jobs.progress.connect(self._update_import_progress)
         self._jobs.progress.connect(self._update_spectral_job_progress)
@@ -325,6 +331,7 @@ class MainWindow(QMainWindow):
         self._build_workspace_dock()
         self._build_inspector_dock()
         self._create_actions()
+        self._macros = MacroController(self)
         self._plot_tab_widget.documents_changed.connect(self._plot_documents_changed)
         self._refresh_plot_list()
         self._refresh_spectral_analysis_list()
@@ -792,6 +799,7 @@ class MainWindow(QMainWindow):
         dataset.sync_column_metadata_attrs()
 
         self._tabs.setCurrentWidget(self._data_tab_widget)
+        self._macros.api_new_sheet(dataset)
         self._workspace_dock.setVisible(True)
         self._set_workspace_section_visible(True)
         self._inspector_dock.setVisible(True)
@@ -965,6 +973,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Filter / Query",
             output_name=dialog.output_name(),
+            api_settings={"operation": "filter", "condition": asdict(condition)},
             result_frame=result_frame,
             source_datasets=[source_dataset],
             operation=operation.strip(),
@@ -1009,6 +1018,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Extract Subset",
             output_name=dialog.output_name(),
+            api_settings={"operation": "subset", "row_mode": dialog.row_mode(), "row_step": dialog.row_step(), "row_start": dialog.row_start(), "column_mode": dialog.column_mode(), "column_step": dialog.column_step(), "column_start": dialog.column_start()},
             result_frame=result_frame,
             source_datasets=[dataset],
             operation=(
@@ -1052,6 +1062,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Sort",
             output_name=dialog.output_name(),
+            api_settings={"operation": "sort", "columns": dialog.selected_columns(), "ascending": dialog.ascending()},
             result_frame=result_frame,
             source_datasets=[dataset],
             operation=(
@@ -1086,6 +1097,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Remove Duplicates",
             output_name=dialog.output_name(),
+            api_settings={"operation": "duplicates", "columns": dialog.columns(), "keep": dialog.keep_policy()},
             result_frame=result_frame,
             source_datasets=[dataset],
             operation=(
@@ -1123,6 +1135,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Missing Values",
             output_name=dialog.output_name(),
+            api_settings={"operation": "missing", "columns": dialog.selected_columns(), "strategy": dialog.strategy(), "fill_value": dialog.fill_value()},
             result_frame=result_frame,
             source_datasets=[dataset],
             operation=(
@@ -1157,6 +1170,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Bin / Average",
             output_name=dialog.output_name(),
+            api_settings={"operation": "bin", "bin_column": dialog.bin_column(), "value_columns": dialog.value_columns(), "bin_count": dialog.bin_count()},
             result_frame=result_frame,
             source_datasets=[dataset],
             operation=(
@@ -1191,6 +1205,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Group / Aggregate",
             output_name=dialog.output_name(),
+            api_settings={"operation": "group", "group_columns": dialog.group_columns(), "value_columns": dialog.value_columns(), "aggregations": dialog.aggregations()},
             result_frame=result_frame,
             source_datasets=[dataset],
             operation=(
@@ -1230,6 +1245,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Merge / Join",
             output_name=dialog.output_name(),
+            api_settings={"operation": "merge", "left_key": dialog.left_key(), "right_key": dialog.right_key(), "how": dialog.join_mode()},
             result_frame=result_frame,
             source_datasets=[left_dataset, right_dataset],
             operation=(
@@ -1264,6 +1280,7 @@ class MainWindow(QMainWindow):
         self._create_data_prep_result(
             title="Reshape",
             output_name=dialog.output_name(),
+            api_settings={"operation": "reshape", "mode": dialog.mode(), "id_columns": dialog.id_columns(), "value_columns": dialog.value_columns()},
             result_frame=result_frame,
             source_datasets=[dataset],
             operation=f"Reshape {dataset.name} using mode {dialog.mode()}",
@@ -1278,6 +1295,7 @@ class MainWindow(QMainWindow):
         source_datasets: list[Dataset],
         operation: str,
         status_message: str,
+        api_settings: dict[str, object] | None = None,
     ) -> Dataset | None:
         """Create a Data Prep result sheet, preserving metadata where possible."""
         if result_frame.empty:
@@ -1299,6 +1317,9 @@ class MainWindow(QMainWindow):
                     result_metadata[column] = metadata
         result_dataset.set_column_metadata(result_metadata)
         set_dataset_operation_comments(result_dataset, operation)
+        if api_settings is not None:
+            self._macros.api_result("prepare", source_datasets[0], api_settings, result_dataset,
+                                    {"other": source_datasets[1]} if len(source_datasets) > 1 else None)
         self._refresh_dataset_list(result_dataset.name)
         self._tabs.setCurrentWidget(self._data_tab_widget)
         self.statusBar().showMessage(status_message)
@@ -1926,15 +1947,18 @@ class MainWindow(QMainWindow):
             self._start_large_data_import(token, path, dialog.options())
 
     def _start_large_data_import(self, token: object, path: Path, options: ImportOptions) -> None:
+        started_recording = self._macros.api_recording
         self._run_text_import_job(
             token, lambda context: open_large_dataset(path, options, context),
-            lambda dataset: self._commit_large_data_import(token, dataset),
+            lambda dataset: self._commit_large_data_import(token, dataset, (started_recording, options)),
         )
 
-    def _commit_large_data_import(self, token: object, dataset: LargeDataset) -> None:
+    def _commit_large_data_import(self, token: object, dataset: LargeDataset, api_context=None) -> None:
         if not self._text_import_is_current(token):
             return
         self._workspace.add_large_dataset(dataset)
+        if api_context is not None and api_context[0] is self._macros.api_recording:
+            self._macros.api_large_import(dataset, api_context[1])
         self._finish_text_import(f"Opened large dataset {dataset.name}")
         self._refresh_large_dataset_list(dataset.name)
 
@@ -1979,7 +2003,9 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         self._large_data_view.set_source(None)
+        source = self._workspace.get_large_dataset(item.text())
         self._workspace.remove_large_dataset(item.text())
+        self._macros.api_large_delete(source)
         names = self._workspace.large_dataset_names()
         self._refresh_large_dataset_list(names[0] if names else None)
 
@@ -1999,6 +2025,7 @@ class MainWindow(QMainWindow):
                 "Source columns (1-based)": f"{page.column_start + 1}-{page.column_start + len(frame.columns)}",
                 "Scope": "Explicit display-window extraction; not the complete source",
             }
+            self._macros.api_large_extract(source, page, dataset)
         except Exception as exc:
             QMessageBox.critical(self, "Worksheet Extraction Failed", str(exc))
             return
@@ -2109,6 +2136,7 @@ class MainWindow(QMainWindow):
         if not self._text_import_is_current(token):
             return
         options = dialog.options()
+        self._macro_import_options = options
         if (options.delimiter != AUTO_DELIMITER or options.encoding != AUTO_ENCODING
                 or options.skip_rows is not None or options.data_kind != AUTO_DATA_KIND
                 or options.spectrometer != AUTO_SPECTROMETER):
@@ -2133,6 +2161,10 @@ class MainWindow(QMainWindow):
         if pattern_choice == "cancel":
             self._finish_text_import("Batch import cancelled")
             return
+        self._macro_import_options = options
+        if pattern_choice != "keep" and self._macros.recorder is not None:
+            self._macros.recorder.gap("Mixed-header normalization is not yet recorded. Use explicit import settings for macro inputs.")
+        self._macro_import_pattern = pattern_choice
         self._run_text_import_job(
             token, lambda context: prepare_text_files(context, paths, inspections, options, pattern_choice),
             lambda batch: self._commit_text_import(token, batch),
@@ -2176,6 +2208,8 @@ class MainWindow(QMainWindow):
                 self._workspace.remove_dataset(dataset.name)
             raise
         self._refresh_dataset_list(imported[-1].name)
+        self._macros.imported(imported[-1], self._macro_import_options,
+                              imported_datasets=imported, pattern_choice=self._macro_import_pattern)
         total_rows = sum(len(dataset.frame) for dataset in imported)
         self._finish_text_import(f"Imported {len(imported)} file(s) as datasets, {total_rows} total row(s)")
         if errors:
@@ -2345,6 +2379,7 @@ class MainWindow(QMainWindow):
                 }
             )
             self._apply_imported_column_hints(dataset)
+            self._macros.api_excel(dataset, sheet_name, dialog.has_header())
             imported.append(dataset)
 
         skipped.extend(f"{name}: {message}" for name, message in result.errors.items())
@@ -2706,6 +2741,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export Dataset", "Select a dataset before exporting.")
             return
 
+        self._export_dataset(dataset)
+
+    def _export_dataset(self, dataset: Dataset) -> None:
+        """Export an explicit worksheet, including report tables, through recorded I/O."""
+
         default_name = f"{dataset.name}.csv"
         file_name, selected_filter = QFileDialog.getSaveFileName(
             self,
@@ -2727,6 +2767,7 @@ class MainWindow(QMainWindow):
             return
 
         self.statusBar().showMessage(f"Exported {dataset.name} to {path}")
+        self._macros.api_export_data(dataset, path, delimiter)
 
     def _add_empty_column(self) -> None:
         """Prompt for and append an empty column to the selected dataset."""
@@ -2809,87 +2850,8 @@ class MainWindow(QMainWindow):
         dataset: Dataset,
         inspection: DelimitedFileInspection | None = None,
     ) -> None:
-        """Apply conservative numeric, X/Y, and spectroscopy-unit hints."""
-        if inspection is not None and inspection.format_name == "spectral_map_matrix":
-            columns = [str(column) for column in dataset.frame.columns]
-            if columns:
-                x_metadata = dataset.metadata_for_column(columns[0])
-                x_metadata.role = "x"
-                x_metadata.value_type = "numeric"
-                x_metadata.long_name = "Map X coordinate"
-            if len(columns) >= 2:
-                y_metadata = dataset.metadata_for_column(columns[1])
-                y_metadata.role = "y"
-                y_metadata.value_type = "numeric"
-                y_metadata.long_name = "Map Y coordinate"
-            if "Raman Shift" in columns:
-                shift_metadata = dataset.metadata_for_column("Raman Shift")
-                shift_metadata.value_type = "numeric"
-                shift_metadata.unit = "cm^-1"
-                shift_metadata.long_name = "Raman shift"
-            if "Intensity" in columns:
-                intensity_metadata = dataset.metadata_for_column("Intensity")
-                intensity_metadata.value_type = "numeric"
-                intensity_metadata.long_name = "Raman intensity"
-            dataset.prune_column_metadata()
-            return
-
-        x_terms = (
-            "wavenumber",
-            "wave number",
-            "wavelength",
-            "raman shift",
-            "frequency",
-            "time",
-        )
-        y_terms = (
-            "intensity",
-            "signal",
-            "count",
-            "absorbance",
-            "transmittance",
-            "dark subtracted",
-        )
-        numeric_columns: list[str] = []
-        assigned_x = False
-        assigned_y = False
-        for column in dataset.frame.columns:
-            column_name = str(column)
-            if not pd.api.types.is_numeric_dtype(dataset.frame[column].dtype):
-                continue
-            numeric_columns.append(column_name)
-            entry = dataset.metadata_for_column(column_name)
-            entry.value_type = "numeric"
-            normalized_name = column_name.casefold()
-            if not assigned_x and any(term in normalized_name for term in x_terms):
-                entry.role = "x"
-                assigned_x = True
-            elif not assigned_y and any(term in normalized_name for term in y_terms):
-                entry.role = "y"
-                assigned_y = True
-
-        if numeric_columns and not assigned_x:
-            dataset.metadata_for_column(numeric_columns[0]).role = "x"
-            assigned_x = True
-        if len(numeric_columns) >= 2 and not assigned_y:
-            y_column = next(
-                (column for column in numeric_columns if dataset.metadata_for_column(column).role != "x"),
-                numeric_columns[1],
-            )
-            dataset.metadata_for_column(y_column).role = "y"
-
-        metadata_fields = {
-            name.strip().casefold(): value.strip()
-            for name, value in dataset.worksheet_metadata.fields
-        }
-        if len(numeric_columns) >= 2:
-            x_unit = metadata_fields.get("axisunit[1]", "")
-            y_unit = metadata_fields.get("axisunit[0]", "")
-            if x_unit:
-                dataset.metadata_for_column(numeric_columns[0]).unit = x_unit
-            if y_unit:
-                dataset.metadata_for_column(numeric_columns[1]).unit = y_unit
-        dataset.prune_column_metadata()
+        from core.import_metadata import apply_imported_column_hints
+        apply_imported_column_hints(dataset, inspection)
 
     def _edit_column_metadata(self, focus_column: str | int | None = None) -> None:
         """Open the column metadata editor for the selected dataset."""
@@ -3448,6 +3410,7 @@ class MainWindow(QMainWindow):
                 f"{dataset.name}_formula_batch_summary",
                 pd.DataFrame(results),
             )
+            self._macros.api_collect_rows(summary_dataset, results)
             self._dataset_list.addItem(summary_dataset.name)
 
         self._resize_dataset_columns_to_contents()
@@ -3486,6 +3449,7 @@ class MainWindow(QMainWindow):
             f"({self._batch_column_binding_label(column_binding_mode)})"
         )
         worksheet_frames = self._formula_worksheet_frames(expression)
+        self._macros.api_before(dataset)
         if use_visible_model:
             result = self._dataset_model.apply_expression(
                 target_column=target_column,
@@ -3500,6 +3464,7 @@ class MainWindow(QMainWindow):
                     f"{self._batch_column_binding_label(column_binding_mode)})"
                 )
             set_column_operation_comment(dataset, result.target_column, operation_comment)
+            self._macros.api_formula(dataset, result.target_column, expression, row_positions)
             return result
 
         target_frame = evaluation_frame if evaluation_frame is not None else dataset.frame
@@ -3527,6 +3492,7 @@ class MainWindow(QMainWindow):
             operation_comment,
         )
         dataset.prune_column_metadata()
+        self._macros.api_formula(dataset, result.target_column, expression, row_positions)
         return result
 
     def _formula_worksheet_frames(self, expression: str) -> dict[str, pd.DataFrame]:
@@ -3695,40 +3661,24 @@ class MainWindow(QMainWindow):
         execution_mode: str = "",
         elapsed_seconds: float = 0.0,
     ) -> dict[str, object]:
-        """Return one formula batch summary row."""
-        source_sheet = dataset.name if dataset is not None else dataset_name
-        row: dict[str, object] = {
-            "source_sheet": source_sheet,
-            "requested_target_column": requested_target_column or result_target_column,
-            "target_column": result_target_column,
-            "output_action": output_action,
-            "target_existed_before": target_existed_before,
-            "column_binding": self._batch_column_binding_label(column_binding_mode),
-            "updated_rows": updated_rows,
-            "status": status,
-            "error": error,
-            "execution_mode": execution_mode,
-            "elapsed_seconds": round(float(elapsed_seconds), 6),
-            "row_count": len(dataset.frame) if dataset is not None else 0,
-            "finite_count": np.nan,
-            "missing_or_non_numeric": np.nan,
-            "minimum": np.nan,
-            "maximum": np.nan,
-            "mean": np.nan,
+        parameters = {
+            'result_target_column': result_target_column,
+            'updated_rows': updated_rows,
+            'status': status,
+            'error': error,
+            'dataset': dataset,
+            'dataset_name': dataset_name,
+            'requested_target_column': requested_target_column,
+            'output_action': output_action,
+            'target_existed_before': target_existed_before,
+            'column_binding_mode': column_binding_mode,
+            'execution_mode': execution_mode,
+            'elapsed_seconds': elapsed_seconds,
         }
-        if dataset is None or result_target_column not in dataset.frame.columns:
-            return row
-
-        values = pd.to_numeric(dataset.frame[result_target_column], errors="coerce")
-        values = values.replace([np.inf, -np.inf], np.nan)
-        finite_values = values.dropna()
-        row["finite_count"] = int(len(finite_values))
-        row["missing_or_non_numeric"] = int(len(values) - len(finite_values))
-        if not finite_values.empty:
-            row["minimum"] = float(finite_values.min())
-            row["maximum"] = float(finite_values.max())
-            row["mean"] = float(finite_values.mean())
-        return row
+        value = OperationSummaries()._formula_batch_summary_row(**parameters)
+        if hasattr(self, "_macros"):
+            self._macros.api_summary_row('_formula_batch_summary_row', parameters, value)
+        return value
 
     def _formula_batch_execution_decision(
         self,
@@ -3938,6 +3888,7 @@ class MainWindow(QMainWindow):
         if worker_result.values is None:
             raise ExpressionError("Worker did not return formula values.")
 
+        self._macros.api_before(dataset)
         values = coerce_expression_values_for_target(
             dataset.frame,
             worker_result.target_column,
@@ -3954,6 +3905,7 @@ class MainWindow(QMainWindow):
             ),
         )
         dataset.prune_column_metadata()
+        self._macros.api_formula(dataset, worker_result.target_column, expression, None)
         return ExpressionResult(
             target_column=worker_result.target_column,
             updated_rows=worker_result.updated_rows,
@@ -4077,6 +4029,7 @@ class MainWindow(QMainWindow):
         """Validate and apply smoothing jobs using existing batch conventions."""
         requested_x = dialog.x_column()
         requested_y_columns = dialog.y_columns()
+        self._macros.before(current_dataset, dialog.target_dataset_names(), requested_y_columns)
         binding_mode = dialog.column_binding_mode()
         multiple_y = len(requested_y_columns) > 1
         requests: list[dict[str, object]] = []
@@ -4203,6 +4156,7 @@ class MainWindow(QMainWindow):
             started = time.perf_counter()
             dataset = self._workspace.get_dataset(dataset_name)
             use_visible_model = dataset.name == current_dataset.name
+            self._macros.api_before(dataset)
             if use_visible_model:
                 self._dataset_model.capture_undo_state()
             try:
@@ -4225,20 +4179,21 @@ class MainWindow(QMainWindow):
                         parameters,
                     ),
                 )
+                self._macros.smoothed(dataset, str(row["x_column"]), str(row["y_column"]), dialog.method(), parameters, result.column_name)
                 if use_visible_model:
                     self._dataset_model.history_changed.emit()
                     if active_plot is None:
                         active_plot = (
                             str(row["x_column"]), str(row["y_column"]), result.column_name
                         )
-                results.append(self._smoothing_summary_row(
+                results.append(self._record_smoothing_summary_row(
                     row, dialog.method(), result.column_name, result.values_written,
                     "ok", "", time.perf_counter() - started,
                 ))
             except Exception as exc:
                 if use_visible_model:
                     self._dataset_model.discard_latest_undo_state()
-                results.append(self._smoothing_summary_row(
+                results.append(self._record_smoothing_summary_row(
                     row, dialog.method(), str(row["target_column"]), 0,
                     "failed", str(exc), time.perf_counter() - started,
                 ))
@@ -4248,7 +4203,7 @@ class MainWindow(QMainWindow):
             progress.setValue(completed)
         if canceled:
             for row in plan[completed:]:
-                results.append(self._smoothing_summary_row(
+                results.append(self._record_smoothing_summary_row(
                     row, dialog.method(), str(row["target_column"]), 0,
                     "canceled", "Canceled by user before processing.", 0.0,
                 ))
@@ -4260,6 +4215,7 @@ class MainWindow(QMainWindow):
             summary_dataset = self._workspace.add_dataset(
                 f"{current_dataset.name}_smoothing_batch_summary", pd.DataFrame(results)
             )
+            self._macros.api_collect_rows(summary_dataset, results)
             self._dataset_list.addItem(summary_dataset.name)
 
         self._dataset_model.set_dataset(current_dataset)
@@ -4322,6 +4278,13 @@ class MainWindow(QMainWindow):
         )
         set_column_operation_comment(dataset, result_column, operation_text)
         dataset.prune_column_metadata()
+
+    def _record_smoothing_summary_row(self, *args, **kwargs) -> dict[str, object]:
+        import inspect
+        value = self._smoothing_summary_row(*args, **kwargs)
+        parameters = dict(inspect.signature(self._smoothing_summary_row).bind(*args, **kwargs).arguments)
+        self._macros.api_summary_row("_smoothing_summary_row", parameters, value)
+        return value
 
     @staticmethod
     def _smoothing_summary_row(
@@ -4666,6 +4629,7 @@ class MainWindow(QMainWindow):
                 f"{current_dataset.name}_{operation_key}_batch_summary",
                 pd.DataFrame(results),
             )
+            self._macros.api_collect_rows(summary_dataset, results)
             self._dataset_list.addItem(summary_dataset.name)
 
         self._dataset_model.set_dataset(current_dataset)
@@ -4724,6 +4688,7 @@ class MainWindow(QMainWindow):
         column_binding_mode: str = BATCH_COLUMN_BINDING_NAME,
     ):
         """Apply a derivative/integral operation to one dataset."""
+        self._macros.api_before(dataset)
         if use_visible_model:
             self._dataset_model.capture_undo_state()
         try:
@@ -4765,6 +4730,7 @@ class MainWindow(QMainWindow):
             ),
         )
         dataset.prune_column_metadata()
+        self._macros.api_column_math(dataset, operation_key, x_column, y_column, method, result.column_name, initial_value)
         if use_visible_model:
             self._dataset_model.history_changed.emit()
         return result
@@ -4905,47 +4871,31 @@ class MainWindow(QMainWindow):
         target_existed_before: bool = False,
         elapsed_seconds: float = 0.0,
     ) -> dict[str, object]:
-        """Return one derivative/integral batch summary row."""
-        source_sheet = dataset.name if dataset is not None else dataset_name
-        row: dict[str, object] = {
-            "source_sheet": source_sheet,
-            "operation": operation_title,
-            "column_binding": self._batch_column_binding_label(column_binding_mode),
-            "requested_x_column": requested_x_column or x_column,
-            "requested_y_column": requested_y_column or y_column,
-            "x_column": x_column,
-            "y_column": y_column,
-            "method": method,
-            "method_label": method_label,
-            "initial_value": np.nan if initial_value is None else initial_value,
-            "requested_target_column": requested_target_column or result_column,
-            "target_column": result_column,
-            "output_action": output_action,
-            "target_existed_before": target_existed_before,
-            "values_written": values_written,
-            "status": status,
-            "error": error,
-            "elapsed_seconds": round(float(elapsed_seconds), 6),
-            "row_count": len(dataset.frame) if dataset is not None else 0,
-            "finite_count": np.nan,
-            "missing_or_non_numeric": np.nan,
-            "minimum": np.nan,
-            "maximum": np.nan,
-            "mean": np.nan,
+        parameters = {
+            'operation_title': operation_title,
+            'x_column': x_column,
+            'y_column': y_column,
+            'method': method,
+            'method_label': method_label,
+            'initial_value': initial_value,
+            'result_column': result_column,
+            'values_written': values_written,
+            'status': status,
+            'error': error,
+            'dataset': dataset,
+            'dataset_name': dataset_name,
+            'requested_x_column': requested_x_column,
+            'requested_y_column': requested_y_column,
+            'column_binding_mode': column_binding_mode,
+            'requested_target_column': requested_target_column,
+            'output_action': output_action,
+            'target_existed_before': target_existed_before,
+            'elapsed_seconds': elapsed_seconds,
         }
-        if dataset is None or result_column not in dataset.frame.columns:
-            return row
-
-        values = pd.to_numeric(dataset.frame[result_column], errors="coerce")
-        values = values.replace([np.inf, -np.inf], np.nan)
-        finite_values = values.dropna()
-        row["finite_count"] = int(len(finite_values))
-        row["missing_or_non_numeric"] = int(len(values) - len(finite_values))
-        if not finite_values.empty:
-            row["minimum"] = float(finite_values.min())
-            row["maximum"] = float(finite_values.max())
-            row["mean"] = float(finite_values.mean())
-        return row
+        value = OperationSummaries()._column_math_batch_summary_row(**parameters)
+        if hasattr(self, "_macros"):
+            self._macros.api_summary_row('_column_math_batch_summary_row', parameters, value)
+        return value
 
     @staticmethod
     def _column_math_batch_status_message(
@@ -5209,6 +5159,13 @@ class MainWindow(QMainWindow):
                         ),
                         (self._interpolation_prediction_column(value_column),),
                     )
+                    query_settings = ({"query_columns": query_columns} if dialog.query_mode() == "columns" else
+                                      {"ranges": dialog.generated_ranges(), "mesh": dialog.mode() == "2d"} if dialog.query_mode() == "generated" else
+                                      {"manual_points": dialog.manual_points_text()})
+                    self._macros.api_result("interpolate", source_dataset, {
+                        "coordinate_columns": coordinate_columns, "value_column": value_column,
+                        "method": dialog.method_key(), "fill_policy": dialog.fill_policy(),
+                        "smoothing": dialog.smoothing(), "epsilon": dialog.epsilon(), **query_settings}, result_dataset)
                     results.append(
                         self._interpolation_batch_summary_row(
                             source_dataset=source_dataset,
@@ -5417,48 +5374,28 @@ class MainWindow(QMainWindow):
         source_sheet: str = "",
         result_frame: pd.DataFrame | None = None,
     ) -> dict[str, object]:
-        """Return one interpolation batch summary row."""
-        resolved_value_column = value_column or requested_value_column or dialog.value_column()
-        resolved_coordinate_columns = coordinate_columns or dialog.coordinate_columns()
-        resolved_query_columns = query_columns or []
-        requested_coordinates = requested_coordinate_columns or resolved_coordinate_columns
-        requested_queries = requested_query_columns or resolved_query_columns
-        prediction_column = self._interpolation_prediction_column(resolved_value_column)
-        metrics = self._interpolation_result_metrics(
-            source_dataset=source_dataset,
-            result_frame=result_frame,
-            prediction_column=prediction_column,
-        )
-        row: dict[str, object] = {
-            "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
-            "operation": "Interpolation",
-            "mode": dialog.mode(),
-            "column_binding": self._batch_column_binding_label(column_binding_mode),
-            "requested_coordinate_columns": ", ".join(requested_coordinates),
-            "coordinate_columns": ", ".join(resolved_coordinate_columns),
-            "requested_value_column": requested_value_column or resolved_value_column,
-            "value_column": resolved_value_column,
-            "query_mode": dialog.query_mode(),
-            "requested_query_columns": (
-                ", ".join(requested_queries) if dialog.query_mode() == "columns" else ""
-            ),
-            "query_columns": (
-                ", ".join(resolved_query_columns) if dialog.query_mode() == "columns" else ""
-            ),
-            "method": dialog.method_key(),
-            "method_label": self._interpolation_method_label(dialog.mode(), dialog.method_key()),
-            "fill_policy": dialog.fill_policy(),
-            "smoothing": dialog.smoothing(),
-            "epsilon": np.nan if dialog.epsilon() is None else dialog.epsilon(),
-            "requested_result_sheet": requested_result_sheet,
-            "output_sheet": output_sheet,
-            "prediction_column": prediction_column,
-            "status": status,
-            "error": error,
-            "elapsed_seconds": round(float(elapsed_seconds), 6),
+        parameters = {
+            'dialog': dialog,
+            'requested_result_sheet': requested_result_sheet,
+            'output_sheet': output_sheet,
+            'status': status,
+            'error': error,
+            'elapsed_seconds': elapsed_seconds,
+            'coordinate_columns': coordinate_columns,
+            'value_column': value_column,
+            'query_columns': query_columns,
+            'requested_coordinate_columns': requested_coordinate_columns,
+            'requested_value_column': requested_value_column,
+            'requested_query_columns': requested_query_columns,
+            'column_binding_mode': column_binding_mode,
+            'source_dataset': source_dataset,
+            'source_sheet': source_sheet,
+            'result_frame': result_frame,
         }
-        row.update(metrics)
-        return row
+        value = OperationSummaries()._interpolation_batch_summary_row(**parameters)
+        if hasattr(self, "_macros"):
+            self._macros.api_summary_row('_interpolation_batch_summary_row', parameters, value)
+        return value
 
     @staticmethod
     def _interpolation_method_label(mode: str, method_key: str) -> str:
@@ -5505,10 +5442,12 @@ class MainWindow(QMainWindow):
         """Create a cumulative interpolation batch summary when needed."""
         if len(results) <= 1:
             return None
-        return self._workspace.add_dataset(
+        output = self._workspace.add_dataset(
             f"{current_dataset.name}_interpolation_batch_summary",
             pd.DataFrame(results),
         )
+        self._macros.api_collect_rows(output, results)
+        return output
 
     def _finish_interpolation_batch(
         self,
@@ -5699,6 +5638,7 @@ class MainWindow(QMainWindow):
                 )
                 if signal_column is None:
                     raise MathOperationError("Choose a signal column.")
+                self._macros.api_before(source_dataset)
                 result_frame = fft_dataset(
                     source_dataset.frame,
                     signal_column=signal_column,
@@ -5718,6 +5658,8 @@ class MainWindow(QMainWindow):
                         column_binding_mode=column_binding_mode,
                     ),
                 )
+                self._macros.api_transform(source_dataset, "fft", {"signal_column": signal_column,
+                                           "x_column": x_column, "window_method": dialog.window_method()}, result_dataset)
                 results.append(
                     self._fft_batch_summary_row(
                         source_dataset=source_dataset,
@@ -5905,6 +5847,7 @@ class MainWindow(QMainWindow):
                 )
                 if real_column is None:
                     raise MathOperationError("Choose a real spectrum column.")
+                self._macros.api_before(source_dataset)
                 result_frame = ifft_dataset(
                     source_dataset.frame,
                     real_column=real_column,
@@ -5922,6 +5865,8 @@ class MainWindow(QMainWindow):
                         column_binding_mode=column_binding_mode,
                     ),
                 )
+                self._macros.api_transform(source_dataset, "ifft", {"real_column": real_column,
+                                           "imaginary_column": imaginary_column}, result_dataset)
                 results.append(
                     self._ifft_batch_summary_row(
                         source_dataset=source_dataset,
@@ -6149,10 +6094,12 @@ class MainWindow(QMainWindow):
         """Create a cumulative FFT/iFFT batch summary when multiple result rows exist."""
         if len(results) <= 1:
             return None
-        return self._workspace.add_dataset(
+        output = self._workspace.add_dataset(
             f"{current_dataset.name}_{operation_key}_batch_summary",
             pd.DataFrame(results),
         )
+        self._macros.api_collect_rows(output, results)
+        return output
 
     def _finish_signal_batch(
         self,
@@ -6298,26 +6245,27 @@ class MainWindow(QMainWindow):
         source_sheet: str = "",
         result_frame: pd.DataFrame | None = None,
     ) -> dict[str, object]:
-        """Return one FFT batch summary row."""
-        metrics = self._fft_result_metrics(source_dataset, result_frame, signal_column, x_column)
-        row: dict[str, object] = {
-            "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
-            "operation": operation,
-            "column_binding": self._batch_column_binding_label(column_binding_mode),
-            "requested_signal_column": requested_signal_column or signal_column,
-            "signal_column": signal_column,
-            "requested_x_column": requested_x_column or "sample index",
-            "x_column": x_column or "sample index",
-            "window": window_method,
-            "window_label": WINDOW_METHODS.get(window_method, window_method),
-            "requested_result_sheet": requested_result_sheet,
-            "output_sheet": output_sheet,
-            "status": status,
-            "error": error,
-            "elapsed_seconds": round(float(elapsed_seconds), 6),
+        parameters = {
+            'operation': operation,
+            'signal_column': signal_column,
+            'x_column': x_column,
+            'window_method': window_method,
+            'requested_result_sheet': requested_result_sheet,
+            'output_sheet': output_sheet,
+            'status': status,
+            'error': error,
+            'elapsed_seconds': elapsed_seconds,
+            'requested_signal_column': requested_signal_column,
+            'requested_x_column': requested_x_column,
+            'column_binding_mode': column_binding_mode,
+            'source_dataset': source_dataset,
+            'source_sheet': source_sheet,
+            'result_frame': result_frame,
         }
-        row.update(metrics)
-        return row
+        value = OperationSummaries()._fft_batch_summary_row(**parameters)
+        if hasattr(self, "_macros"):
+            self._macros.api_summary_row('_fft_batch_summary_row', parameters, value)
+        return value
 
     @staticmethod
     def _fft_result_metrics(
@@ -6395,24 +6343,25 @@ class MainWindow(QMainWindow):
         source_sheet: str = "",
         result_frame: pd.DataFrame | None = None,
     ) -> dict[str, object]:
-        """Return one inverse FFT batch summary row."""
-        metrics = self._ifft_result_metrics(source_dataset, result_frame)
-        row: dict[str, object] = {
-            "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
-            "operation": "Inverse FFT",
-            "column_binding": self._batch_column_binding_label(column_binding_mode),
-            "requested_real_column": requested_real_column or real_column,
-            "real_column": real_column,
-            "requested_imaginary_column": requested_imaginary_column or "0",
-            "imaginary_column": imaginary_column or "0",
-            "requested_result_sheet": requested_result_sheet,
-            "output_sheet": output_sheet,
-            "status": status,
-            "error": error,
-            "elapsed_seconds": round(float(elapsed_seconds), 6),
+        parameters = {
+            'real_column': real_column,
+            'imaginary_column': imaginary_column,
+            'requested_result_sheet': requested_result_sheet,
+            'output_sheet': output_sheet,
+            'status': status,
+            'error': error,
+            'elapsed_seconds': elapsed_seconds,
+            'requested_real_column': requested_real_column,
+            'requested_imaginary_column': requested_imaginary_column,
+            'column_binding_mode': column_binding_mode,
+            'source_dataset': source_dataset,
+            'source_sheet': source_sheet,
+            'result_frame': result_frame,
         }
-        row.update(metrics)
-        return row
+        value = OperationSummaries()._ifft_batch_summary_row(**parameters)
+        if hasattr(self, "_macros"):
+            self._macros.api_summary_row('_ifft_batch_summary_row', parameters, value)
+        return value
 
     @staticmethod
     def _ifft_result_metrics(
@@ -6644,6 +6593,8 @@ class MainWindow(QMainWindow):
                             column_binding_mode=column_binding_mode,
                         ),
                     )
+                    self._macros.api_result("statistics", source_dataset, {"operation_key": operation_key,
+                                             "columns": multi_columns}, result_dataset)
                     summary_rows.extend(
                         self._statistics_batch_result_rows(
                             operation_key=operation_key,
@@ -6813,6 +6764,9 @@ class MainWindow(QMainWindow):
                             column_binding_mode=column_binding_mode,
                         ),
                     )
+                    self._macros.api_result("statistics", source_dataset, {"operation_key": operation_key,
+                                             "primary_column": primary_column, "secondary_column": secondary_column},
+                                             result_dataset, {"secondary": secondary_dataset} if secondary_dataset is not None else None)
                     summary_rows.extend(
                         self._statistics_batch_result_rows(
                             operation_key=operation_key,
@@ -6896,6 +6850,7 @@ class MainWindow(QMainWindow):
                 summary_dataset,
                 f"Statistics batch summary: operation={operation.label}",
             )
+            self._macros.api_collect_rows(summary_dataset, summary_rows)
         wide_summary_dataset = self._statistics_batch_wide_summary_dataset(
             primary_reference=primary_reference,
             summary_rows=summary_rows,
@@ -7161,48 +7116,29 @@ class MainWindow(QMainWindow):
         requested_columns: list[str] | None = None,
         columns: list[str] | None = None,
     ) -> list[dict[str, object]]:
-        """Return annotated cumulative statistics rows for one batch job."""
-        operation = STATISTIC_OPERATIONS[operation_key]
-        base: dict[str, object] = {
-            "source_sheet": source_sheet,
-            "secondary_sheet": secondary_sheet,
-            "operation_key": operation_key,
-            "operation_label": operation.label,
-            "operation_scope": operation_scope,
-            "column_binding": self._batch_column_binding_label(column_binding_mode),
-            "requested_primary_column": requested_primary_column,
-            "primary_column": primary_column,
-            "requested_secondary_column": requested_secondary_column,
-            "secondary_column": secondary_column,
-            "requested_columns": ", ".join(requested_columns or []),
-            "columns": ", ".join(columns or []),
-            "requested_result_sheet": requested_result_sheet,
-            "output_sheet": output_sheet,
-            "status": status,
-            "error": error,
-            "elapsed_seconds": round(float(elapsed_seconds), 6),
+        parameters = {
+            'operation_key': operation_key,
+            'operation_scope': operation_scope,
+            'column_binding_mode': column_binding_mode,
+            'source_sheet': source_sheet,
+            'secondary_sheet': secondary_sheet,
+            'requested_result_sheet': requested_result_sheet,
+            'output_sheet': output_sheet,
+            'status': status,
+            'error': error,
+            'elapsed_seconds': elapsed_seconds,
+            'result_frame': result_frame,
+            'requested_primary_column': requested_primary_column,
+            'primary_column': primary_column,
+            'requested_secondary_column': requested_secondary_column,
+            'secondary_column': secondary_column,
+            'requested_columns': requested_columns,
+            'columns': columns,
         }
-        if result_frame is None or result_frame.empty:
-            row = dict(base)
-            row["result_row"] = np.nan
-            return [row]
-
-        if operation_key in {"single_zscore", "single_cumulative"}:
-            row = dict(base)
-            row.update(self._statistics_rowwise_result_metrics(result_frame))
-            return [row]
-
-        rows: list[dict[str, object]] = []
-        for result_index, result_row in result_frame.reset_index(drop=True).iterrows():
-            row = dict(base)
-            row["result_row"] = int(result_index)
-            for column_name, value in result_row.items():
-                clean_name = str(column_name)
-                if clean_name in row:
-                    clean_name = f"result_{clean_name}"
-                row[clean_name] = value
-            rows.append(row)
-        return rows
+        value = OperationSummaries()._statistics_batch_result_rows(**parameters)
+        if hasattr(self, "_macros"):
+            self._macros.api_summary_row('_statistics_batch_result_rows', parameters, value)
+        return value
 
     @staticmethod
     def _statistics_rowwise_result_metrics(result_frame: pd.DataFrame) -> dict[str, object]:
@@ -7293,6 +7229,7 @@ class MainWindow(QMainWindow):
             value_wide,
         )
         set_dataset_operation_comments(dataset, "Statistics batch wide/pivot summary")
+        self._macros.api_collect_rows(dataset, summary_rows, wide=True)
         return dataset
 
     @staticmethod
@@ -7659,24 +7596,11 @@ class MainWindow(QMainWindow):
         return "scatter"
 
     def _statistics_normal_curve_dataset(self, dataset: Dataset, column: str) -> Dataset | None:
-        """Create a normal PDF overlay dataset for a histogram when possible."""
-        values = self._statistics_numeric_values(dataset, column)
-        if len(values) < 2:
-            return None
-        mean = float(values.mean())
-        std = float(values.std(ddof=1))
-        if not np.isfinite(std) or std <= 0:
-            return None
-        x_min = float(values.min())
-        x_max = float(values.max())
-        if x_min == x_max:
-            return None
-        x_values = np.linspace(x_min, x_max, 200)
-        density = np.exp(-0.5 * ((x_values - mean) / std) ** 2) / (std * np.sqrt(2 * np.pi))
-        return self._workspace.add_dataset(
-            f"{dataset.name}_{column}_normal_curve",
-            pd.DataFrame({"value": x_values, "normal_density": density}),
-        )
+        from core.api_statistics_plots import StatisticsPlotData
+        output = StatisticsPlotData(self._workspace)._statistics_normal_curve_dataset(dataset, column)
+        if output is not None:
+            self._macros.api_result("statistics_plot_data", dataset, {"kind": "normal", **{"column": column}}, output, None)
+        return output
 
     def _statistics_comparison_dataset(
         self,
@@ -7686,21 +7610,11 @@ class MainWindow(QMainWindow):
         secondary_column: str,
         result_name: str,
     ) -> Dataset:
-        """Create a two-column dataset suitable for box/violin comparisons."""
-        primary_values = self._statistics_numeric_values(primary_dataset, primary_column).reset_index(drop=True)
-        secondary_values = self._statistics_numeric_values(secondary_dataset, secondary_column).reset_index(drop=True)
-        row_count = max(len(primary_values), len(secondary_values))
-        primary_label = self._statistics_column_label(primary_dataset, primary_column)
-        secondary_label = self._statistics_column_label(secondary_dataset, secondary_column)
-        if primary_label == secondary_label:
-            secondary_label = f"{secondary_label} 2"
-        frame = pd.DataFrame(
-            {
-                primary_label: primary_values.reindex(range(row_count)),
-                secondary_label: secondary_values.reindex(range(row_count)),
-            }
-        )
-        return self._workspace.add_dataset(f"{result_name}_plot_data", frame)
+        from core.api_statistics_plots import StatisticsPlotData
+        output = StatisticsPlotData(self._workspace)._statistics_comparison_dataset(primary_dataset, primary_column, secondary_dataset, secondary_column, result_name)
+        if output is not None:
+            self._macros.api_result("statistics_plot_data", primary_dataset, {"kind": "comparison", **{"column": primary_column, "secondary_column": secondary_column, "result_name": result_name}}, output, {"secondary": secondary_dataset})
+        return output
 
     def _statistics_group_distribution_dataset(
         self,
@@ -7710,37 +7624,11 @@ class MainWindow(QMainWindow):
         group_column: str,
         result_name: str,
     ) -> Dataset:
-        """Create a wide dataset with one numeric column per group."""
-        values = self._statistics_numeric_series(value_dataset, value_column)
-        if group_column not in group_dataset.frame.columns:
-            raise ValueError(f"Column '{group_column}' is no longer available.")
-        groups = group_dataset.frame[group_column].reset_index(drop=True)
-        paired = pd.DataFrame(
-            {
-                "value": values.reset_index(drop=True),
-                "group": groups,
-            }
-        ).dropna(subset=["value", "group"])
-        paired["group"] = paired["group"].astype(str).str.strip()
-        paired = paired[paired["group"] != ""]
-        if paired.empty:
-            raise ValueError("No complete numeric/group rows are available for the grouped plot.")
-
-        grouped_values: dict[str, pd.Series] = {}
-        for group_name, group_frame in paired.groupby("group", sort=True):
-            column_name = self._unique_plot_data_column(str(group_name), grouped_values)
-            grouped_values[column_name] = group_frame["value"].astype(float).reset_index(drop=True)
-        if len(grouped_values) < 2:
-            raise ValueError("Grouped plots require at least two groups.")
-
-        row_count = max(len(values) for values in grouped_values.values())
-        frame = pd.DataFrame(
-            {
-                column_name: values.reindex(range(row_count))
-                for column_name, values in grouped_values.items()
-            }
-        )
-        return self._workspace.add_dataset(f"{result_name}_group_plot_data", frame)
+        from core.api_statistics_plots import StatisticsPlotData
+        output = StatisticsPlotData(self._workspace)._statistics_group_distribution_dataset(value_dataset, value_column, group_dataset, group_column, result_name)
+        if output is not None:
+            self._macros.api_result("statistics_plot_data", value_dataset, {"kind": "groups", **{"column": value_column, "secondary_column": group_column, "result_name": result_name}}, output, {"secondary": group_dataset})
+        return output
 
     @staticmethod
     def _unique_plot_data_column(base_name: str, columns: dict[str, pd.Series]) -> str:
@@ -7759,66 +7647,18 @@ class MainWindow(QMainWindow):
         columns: list[str],
         result_name: str,
     ) -> Dataset:
-        """Create X/Y/Z helper data for a Pearson correlation heatmap."""
-        numeric = pd.DataFrame(
-            {
-                column: self._statistics_numeric_series(dataset, column)
-                for column in columns
-            }
-        )
-        correlation = numeric.corr(method="pearson", min_periods=2)
-        rows: list[dict[str, object]] = []
-        has_off_diagonal_value = False
-        for row_index, row_column in enumerate(columns):
-            for column_index, column in enumerate(columns):
-                value = correlation.loc[row_column, column]
-                if pd.isna(value):
-                    continue
-                if row_index != column_index:
-                    has_off_diagonal_value = True
-                rows.append(
-                    {
-                        "column_index": float(column_index),
-                        "row_index": float(row_index),
-                        "pearson_r": float(value),
-                        "column": column,
-                        "row": row_column,
-                    }
-                )
-        if not rows or not has_off_diagonal_value:
-            raise ValueError("Correlation heatmap requires at least two aligned numeric values.")
-        return self._workspace.add_dataset(
-            f"{result_name}_correlation_heatmap",
-            pd.DataFrame(rows),
-        )
+        from core.api_statistics_plots import StatisticsPlotData
+        output = StatisticsPlotData(self._workspace)._statistics_correlation_heatmap_dataset(dataset, columns, result_name)
+        if output is not None:
+            self._macros.api_result("statistics_plot_data", dataset, {"kind": "correlation", **{"columns": columns, "result_name": result_name}}, output, None)
+        return output
 
     def _statistics_pca_variance_dataset(self, result_dataset: Dataset) -> Dataset:
-        """Create component/variance helper data from a PCA statistics result."""
-        required_columns = {"metric", "value"}
-        if not required_columns.issubset(result_dataset.frame.columns):
-            raise ValueError("PCA variance plot requires a statistics result with metric and value columns.")
-
-        rows: list[dict[str, float]] = []
-        for _index, row in result_dataset.frame.iterrows():
-            metric = str(row.get("metric", ""))
-            match = re.fullmatch(r"pc(\d+)_explained_variance_ratio", metric)
-            if match is None:
-                continue
-            value = pd.to_numeric(pd.Series([row.get("value")]), errors="coerce").iloc[0]
-            if pd.isna(value):
-                continue
-            rows.append(
-                {
-                    "component": float(match.group(1)),
-                    "explained_variance_ratio": float(value),
-                }
-            )
-        if not rows:
-            raise ValueError("This statistics result does not contain PCA explained-variance rows.")
-        return self._workspace.add_dataset(
-            f"{result_dataset.name}_pca_variance",
-            pd.DataFrame(rows),
-        )
+        from core.api_statistics_plots import StatisticsPlotData
+        output = StatisticsPlotData(self._workspace)._statistics_pca_variance_dataset(result_dataset)
+        if output is not None:
+            self._macros.api_result("statistics_plot_data", result_dataset, {"kind": "pca", **{}}, output, None)
+        return output
 
     def _statistics_bland_altman_dataset(
         self,
@@ -7828,23 +7668,11 @@ class MainWindow(QMainWindow):
         secondary_column: str,
         result_name: str,
     ) -> Dataset:
-        """Create paired mean/difference data for a Bland-Altman companion plot."""
-        paired = self._statistics_aligned_pair(
-            primary_dataset,
-            primary_column,
-            secondary_dataset,
-            secondary_column,
-            minimum_points=2,
-        )
-        mean_values = paired.mean(axis=1)
-        difference_values = paired["primary"] - paired["secondary"]
-        frame = pd.DataFrame(
-            {
-                "mean": mean_values.to_numpy(dtype=float),
-                "difference": difference_values.to_numpy(dtype=float),
-            }
-        )
-        return self._workspace.add_dataset(f"{result_name}_bland_altman", frame)
+        from core.api_statistics_plots import StatisticsPlotData
+        output = StatisticsPlotData(self._workspace)._statistics_bland_altman_dataset(primary_dataset, primary_column, secondary_dataset, secondary_column, result_name)
+        if output is not None:
+            self._macros.api_result("statistics_plot_data", primary_dataset, {"kind": "bland_altman", **{"column": primary_column, "secondary_column": secondary_column, "result_name": result_name}}, output, {"secondary": secondary_dataset})
+        return output
 
     def _statistics_regression_line_dataset(
         self,
@@ -7854,26 +7682,11 @@ class MainWindow(QMainWindow):
         secondary_column: str,
         result_dataset: Dataset,
     ) -> Dataset:
-        """Create an OLS regression line dataset from aligned numeric pairs."""
-        paired = self._statistics_aligned_pair(
-            primary_dataset,
-            primary_column,
-            secondary_dataset,
-            secondary_column,
-            minimum_points=2,
-        )
-        x_min = float(paired["primary"].min())
-        x_max = float(paired["primary"].max())
-        if x_min == x_max:
-            raise ValueError("Regression companion plot needs non-constant primary X values.")
-        slope, intercept = np.polyfit(
-            paired["primary"].to_numpy(dtype=float),
-            paired["secondary"].to_numpy(dtype=float),
-            1,
-        )
-        x_values = np.linspace(x_min, x_max, 200)
-        frame = pd.DataFrame({"x": x_values, "fit": slope * x_values + intercept})
-        return self._workspace.add_dataset(f"{result_dataset.name}_regression_line", frame)
+        from core.api_statistics_plots import StatisticsPlotData
+        output = StatisticsPlotData(self._workspace)._statistics_regression_line_dataset(primary_dataset, primary_column, secondary_dataset, secondary_column, result_dataset)
+        if output is not None:
+            self._macros.api_result("statistics_plot_data", primary_dataset, {"kind": "regression", **{"column": primary_column, "secondary_column": secondary_column}}, output, {"secondary": secondary_dataset, "result": result_dataset})
+        return output
 
     @staticmethod
     def _statistics_numeric_values(dataset: Dataset, column: str) -> pd.Series:
@@ -8048,151 +7861,13 @@ class MainWindow(QMainWindow):
             self._run_peak_analysis_batch_or_map(dataset, dialog, detail)
             return
 
-        spectral_analysis: SpectralAnalysisSession | None = None
-        if not baseline_only and composite_result is not None and peak_result is not None:
-            common = {"source_sheet": dataset.name, **preview_coordinates}
-            curve_frame = composite_result.fit_frame.rename(
-                columns={"baseline": "fit_baseline"}
-            ).copy()
-            preprocessing = pd.DataFrame({
-                "x": baseline_result.x,
-                "raw": baseline_result.raw,
-                "preprocessing_baseline": baseline_result.baseline,
-                "corrected": baseline_result.corrected,
-            })
-            curve_frame = preprocessing.merge(curve_frame, on="x", how="inner", sort=False)
-            for name, value in reversed(list(common.items())):
-                curve_frame.insert(0, name, value)
-            parameter_frame = composite_result.parameter_frame.copy()
-            for name, value in common.items():
-                parameter_frame[name] = value
-            peak_frame = dialog.reviewed_peak_frame()
-            for name, value in common.items():
-                if name not in peak_frame:
-                    peak_frame[name] = value
-            metrics = pd.DataFrame([
-                self._peak_fit_map_row(
-                    composite_result,
-                    source_name=dataset.name,
-                    coordinates=preview_coordinates,
-                    noise_estimate=peak_result.noise_estimate,
-                    detected_peak_count=len(peak_result.peaks),
-                    matched_peak_count=len(composite_result.components),
-                )
-            ])
-            spectral_analysis = self._workspace.add_spectral_analysis(
-                SpectralAnalysisSession(
-                    name=dialog.analysis_name(),
-                    source_dataset=dataset.name,
-                    analysis_kind="raman_pixel" if preview_coordinates else "spectrum",
-                    x_column=dialog.x_column(),
-                    y_column=dialog.y_column(),
-                    coordinate_columns=tuple(preview_coordinates),
-                    profile={"settings": dialog.analysis_profile(), "provenance": detail},
-                    metrics_frame=metrics,
-                    curves_frame=curve_frame,
-                    parameters_frame=parameter_frame,
-                    peaks_frame=peak_frame,
-                )
-            )
-
-        created_names: list[str] = []
-        selected_name: str | None = None
-        if dialog.create_signal_output():
-            y_column = dialog.y_column()
-            baseline_column = f"{y_column}_baseline"
-            corrected_column = f"{y_column}_corrected"
-            signal_frame = pd.DataFrame({
-                dialog.x_column(): baseline_result.x,
-                y_column: baseline_result.raw,
-                baseline_column: baseline_result.baseline,
-                corrected_column: baseline_result.corrected,
-            })
-            for coordinate_name, coordinate_value in reversed(list(preview_coordinates.items())):
-                signal_frame.insert(0, coordinate_name, coordinate_value)
-            signal_dataset = self._workspace.add_dataset(
-                dialog.result_sheet_name(), signal_frame, copy_frame=False
-            )
-            signal_dataset.worksheet_metadata.import_details.update(detail)
-            source_x_metadata = dataset.column_metadata.get(dialog.x_column())
-            source_y_metadata = dataset.column_metadata.get(y_column)
-            signal_dataset.column_metadata[dialog.x_column()] = ColumnMetadata(
-                role="x",
-                unit=source_x_metadata.unit if source_x_metadata else "",
-                long_name=source_x_metadata.long_name if source_x_metadata else "",
-                value_type="numeric",
-            )
-            for column_name, long_name in (
-                (y_column, source_y_metadata.long_name if source_y_metadata else "Raw signal"),
-                (baseline_column, "Estimated baseline"),
-                (corrected_column, "Baseline-corrected signal"),
-            ):
-                signal_dataset.column_metadata[column_name] = ColumnMetadata(
-                    role="y",
-                    unit=source_y_metadata.unit if source_y_metadata else "",
-                    long_name=long_name,
-                    value_type="numeric",
-                )
-            signal_dataset.sync_column_metadata_attrs()
-            set_dataset_operation_comments(
-                signal_dataset,
-                f"{operation_name}: source={dataset.name}; x={dialog.x_column()}; "
-                f"y={y_column}; baseline={baseline_result.parameters.method}",
-            )
-            selected_name = signal_dataset.name
-            created_names.append(signal_dataset.name)
-
-        if dialog.create_peak_output():
-            peak_frame = dialog.reviewed_peak_frame()
-            peak_dataset = self._workspace.add_dataset(
-                dialog.peak_sheet_name(), peak_frame, copy_frame=False
-            )
-            peak_dataset.worksheet_metadata.import_details.update(detail)
-            peak_dataset.worksheet_metadata.import_details["Reviewed peak count"] = str(
-                int(peak_frame["enabled"].sum()) if "enabled" in peak_frame else 0
-            )
-            for column_name in peak_frame.columns:
-                metadata = peak_dataset.metadata_for_column(str(column_name))
-                metadata.value_type = "text" if str(column_name) in {
-                    "source_sheet", "channel", "polarity", "detector", "manual_status"
-                } else "numeric"
-                if str(column_name) == "center":
-                    metadata.role = "x"
-                    source_x_metadata = dataset.column_metadata.get(dialog.x_column())
-                    metadata.unit = source_x_metadata.unit if source_x_metadata else ""
-                elif str(column_name) in {"raw_height", "corrected_height", "prominence", "area"}:
-                    metadata.role = "y"
-            peak_dataset.sync_column_metadata_attrs()
-            set_dataset_operation_comments(
-                peak_dataset,
-                f"Peak Detection: source={dataset.name}; x={dialog.x_column()}; "
-                f"y={dialog.y_column()}; reviewed candidates",
-            )
-            selected_name = peak_dataset.name
-            created_names.append(peak_dataset.name)
-
-        if dialog.create_fit_output() and composite_result is not None:
-            fit_dataset = self._workspace.add_dataset(
-                dialog.fit_sheet_name(), composite_result.fit_frame, copy_frame=False
-            )
-            fit_dataset.worksheet_metadata.import_details.update(detail)
-            set_dataset_operation_comments(
-                fit_dataset,
-                f"Composite Peak Fit: source={dataset.name}; x={dialog.x_column()}; "
-                f"y={dialog.y_column()}; components={len(composite_result.components)}",
-            )
-            parameter_dataset = self._workspace.add_dataset(
-                dialog.fit_parameter_sheet_name(),
-                composite_result.parameter_frame,
-                copy_frame=False,
-            )
-            parameter_dataset.worksheet_metadata.import_details.update(detail)
-            set_dataset_operation_comments(
-                parameter_dataset,
-                f"Composite Peak Fit parameters: source={dataset.name}",
-            )
-            selected_name = parameter_dataset.name
-            created_names.extend((fit_dataset.name, parameter_dataset.name))
+        from core.spectral_single import publish_spectrum
+        published = publish_spectrum(self._workspace, dataset, dialog, baseline_result, peak_result,
+                                     composite_result, baseline_only, preview_coordinates, detail, operation_name)
+        spectral_analysis = published.analysis
+        selected_name = published.selected_name
+        created_names = [sheet.name for sheet in published.sheets]
+        self._macros.api_spectrum(dataset, dialog, baseline_only, detail, published)
 
         self._refresh_dataset_list(selected_name)
         if spectral_analysis is not None:
@@ -8221,13 +7896,15 @@ class MainWindow(QMainWindow):
             parameters=deepcopy(dialog.baseline_parameters()), analysis_range=dialog.analysis_range(),
             output_name=dialog.result_sheet_name(), detail=deepcopy(detail),
         )
+        api_context = (self._macros.api_recording, source_dataset, request)
         self._start_spectral_job(
-            lambda context: prepare_baseline_map(context, request), self._commit_baseline_map,
+            lambda context: prepare_baseline_map(context, request),
+            lambda result: self._commit_baseline_map(result, api_context),
             datasets=[source_dataset], sources=sources, columns=columns,
             label="Baseline correction", error_title="Baseline Correction Map",
         )
 
-    def _commit_baseline_map(self, result: PreparedBaselineMap) -> None:
+    def _commit_baseline_map(self, result: PreparedBaselineMap, api_context=None) -> None:
         """Publish the prepared worksheet on the GUI thread, rolling back failed insertion."""
         workspace = self._workspace
         datasets_before = set(workspace.dataset_names())
@@ -8241,6 +7918,13 @@ class MainWindow(QMainWindow):
             for name in set(workspace.dataset_names()) - datasets_before:
                 workspace.remove_dataset(name)
             raise
+        if api_context is not None and api_context[0] is self._macros.api_recording:
+            _, source, request = api_context
+            self._macros.api_result("baseline_map", source, {
+                "x_column": request.x_column, "y_column": request.y_column,
+                "parameters": asdict(request.parameters), "analysis_range": request.analysis_range,
+                "detail": request.detail,
+            }, output)
         self._finish_spectral_job(
             f"Baseline map correction created {output.name}: "
             f"{result.successes} succeeded, {result.failures} failed"
@@ -8284,9 +7968,10 @@ class MainWindow(QMainWindow):
             fit_name=dialog.fit_sheet_name() if create_fit else None,
             parameter_name=dialog.fit_parameter_sheet_name() if create_fit else None,
         )
+        api_context = (self._macros.api_recording, datasets, request)
         self._start_spectral_job(
             lambda context: prepare_peak_fit(context, request),
-            lambda result: self._commit_peak_fit(result, scope),
+            lambda result: self._commit_peak_fit(result, scope, api_context),
             datasets=datasets, sources=sources, columns=columns,
             label="Peak fit", error_title="Peak Analysis Failed",
         )
@@ -8359,7 +8044,7 @@ class MainWindow(QMainWindow):
             self._finish_spectral_job(f"{label} could not start")
             raise
 
-    def _commit_peak_fit(self, result: PreparedPeakFit, scope: str) -> None:
+    def _commit_peak_fit(self, result: PreparedPeakFit, scope: str, api_context=None) -> None:
         """Publish the completed session and optional worksheets as one GUI transaction."""
         workspace = self._workspace
         datasets_before = set(workspace.dataset_names())
@@ -8379,6 +8064,10 @@ class MainWindow(QMainWindow):
             for name in set(workspace.spectral_analysis_names()) - analyses_before:
                 workspace.remove_spectral_analysis(name)
             raise
+        if api_context is not None:
+            started, sources, request = api_context
+            self._macros.api_spectral_batch(started, sources, request,
+                                            [workspace.get_dataset(name) for name in created], analysis)
         self._finish_spectral_job(
             f"Peak fit {scope}: {result.successes} succeeded, {result.failures} failed; "
             f"saved analysis '{analysis.name}'; "
@@ -8422,23 +8111,24 @@ class MainWindow(QMainWindow):
 
     def _run_curve_fit(self) -> None:
         """Run the curve-fitting workflow and plot/save fit outputs."""
-        dataset = self._current_dataset()
-        if dataset is None:
-            QMessageBox.information(self, "Curve Fit", "Select a dataset before fitting a curve.")
+        available = [candidate for candidate in self._workspace.list_datasets() if len(candidate.frame.columns) > 0]
+        if not available:
+            QMessageBox.information(self, "Curve Fit", "Import or create an editable worksheet before fitting a curve.")
             return
+        dataset = self._current_dataset()
+        if dataset is None or not len(dataset.frame.columns):
+            dataset = available[0]
 
         dialog = FitDialog(
             column_names=[str(column) for column in dataset.frame.columns],
             default_dataset_name=dataset.name,
             custom_models=self._workspace.list_custom_fit_models(),
             default_x_column=self._preferred_dataset_column(dataset, ("x",), fallback_index=0),
-            dataset_names=[
-                candidate.name
-                for candidate in self._workspace.list_datasets()
-                if len(candidate.frame.columns) > 0
-            ],
+            dataset_names=[candidate.name for candidate in available],
             current_dataset_name=dataset.name,
             parent=self,
+            dataset_columns={candidate.name: [str(column) for column in candidate.frame.columns] for candidate in available},
+            dataset_x_columns={candidate.name: self._preferred_dataset_column(candidate, ("x",), fallback_index=0) for candidate in available},
         )
         if dialog.exec() != FitDialog.Accepted:
             return
@@ -8453,7 +8143,7 @@ class MainWindow(QMainWindow):
             return
 
         self._run_curve_fit_batch(
-            current_dataset=dataset,
+            current_dataset=self._workspace.get_dataset(dialog.source_dataset_name()),
             dialog=dialog,
             initial_parameters=initial_parameters,
             lower_bounds=lower_bounds,
@@ -8476,6 +8166,7 @@ class MainWindow(QMainWindow):
         requested_x_column = dialog.x_column()
         requested_y_columns = dialog.y_columns()
         requested_x_weight_column = dialog.x_weight_column()
+        self._macros.before(current_dataset, target_dataset_names, requested_y_columns)
         requested_weight_columns = dialog.weight_columns()
         requested_x_bounds = getattr(dialog, "x_bounds", lambda: None)()
         requested_y_bounds = getattr(dialog, "y_bounds", lambda: None)()
@@ -8653,6 +8344,7 @@ class MainWindow(QMainWindow):
 
                     resolved_x_bounds = resolve_bounds(requested_x_bounds, "X")
                     resolved_y_bounds = resolve_bounds(requested_y_bounds, "Y")
+                    self._macros.api_before(source_dataset)
                     fit_result = fit_curve(
                         source_dataset.frame,
                         x_column=x_column,
@@ -8706,6 +8398,22 @@ class MainWindow(QMainWindow):
                         if fit_result.report.x_bounds or fit_result.report.y_bounds:
                             residual_dataset.worksheet_metadata.fields.append(("Percentile uncertainty", details))
 
+                    macro_inputs = {"x": x_column, "y": y_column, "x_weight": x_weight_column, "weight": weight_column}
+                    for axis, bounds in (("x", resolved_x_bounds), ("y", resolved_y_bounds)):
+                        if bounds:
+                            macro_inputs[axis+"_lower"] = bounds.lower_column
+                            macro_inputs[axis+"_upper"] = bounds.upper_column
+                    self._macros.fitted(source_dataset, macro_inputs, {
+                        "model_key": dialog.model_key(), "method": dialog.method(),
+                        "initial_parameters": list(initial_parameters), "lower_bounds": list(lower_bounds),
+                        "upper_bounds": list(upper_bounds), "fixed_parameters": list(fixed_parameters),
+                        "weight_mode": dialog.weight_mode(), "absolute_sigma": dialog.absolute_sigma(),
+                        "include_confidence_band": dialog.include_confidence_band(),
+                        "confidence_level": dialog.confidence_level(), "fit_points": dialog.fit_points(),
+                        "custom_models": [model.to_metadata() for model in custom_models],
+                        "x_bounds": resolved_x_bounds.to_state() if resolved_x_bounds else None,
+                        "y_bounds": resolved_y_bounds.to_state() if resolved_y_bounds else None,
+                    }, fit_dataset, residual_dataset, fit_result)
                     if first_fit_result is None:
                         first_fit_result = fit_result
                     if source_dataset.name == current_dataset.name and current_fit_dataset is None:
@@ -8732,17 +8440,7 @@ class MainWindow(QMainWindow):
                             )
                         )
                     fit_report_rows.append(
-                        {
-                            "source_sheet": source_dataset.name,
-                            "requested_y_column": requested_y_column,
-                            "y_column": y_column,
-                            "output_fit_sheet": fit_dataset.name,
-                            "model_name": fit_result.report.model_name,
-                            "method": fit_result.report.method,
-                            "r_squared": fit_result.report.r_squared,
-                            "rmse": fit_result.report.rmse,
-                            "report_text": fit_result.report.to_text(),
-                        }
+                        self._record_fit_report_row(source_dataset.name, requested_y_column, y_column, fit_dataset.name, fit_result)
                     )
 
                     results.append(
@@ -8824,6 +8522,7 @@ class MainWindow(QMainWindow):
                 f"{current_dataset.name}_fit_batch_summary",
                 pd.DataFrame(results),
             )
+            self._macros.api_collect_rows(summary_dataset, results)
         parameter_correlation_dataset = None
         if parameter_correlation_rows:
             correlation_name = (
@@ -8839,13 +8538,20 @@ class MainWindow(QMainWindow):
                 parameter_correlation_dataset,
                 "Fit parameter covariance/correlation pairs",
             )
+            self._macros.api_collect_rows(parameter_correlation_dataset, parameter_correlation_rows)
         report_export_dataset = None
-        if fit_report_rows and len(results) > 1:
+        if fit_report_rows:
+            report_name = (
+                f"{fit_datasets[0].name}_report"
+                if len(results) == 1 and fit_datasets
+                else f"{current_dataset.name}_fit_reports"
+            )
             report_export_dataset = self._workspace.add_dataset(
-                f"{current_dataset.name}_fit_reports",
+                report_name,
                 pd.DataFrame(fit_report_rows),
             )
             set_dataset_operation_comments(report_export_dataset, "Curve fit text report exports")
+            self._macros.api_collect_rows(report_export_dataset, fit_report_rows)
 
         success_count = sum(1 for row in results if row["status"] == "ok")
         failure_rows = [row for row in results if row["status"] != "ok"]
@@ -8895,7 +8601,17 @@ class MainWindow(QMainWindow):
             self._tabs.setCurrentWidget(self._plot_tab_widget)
 
         if len(results) == 1 and first_fit_result is not None:
-            FitReportDialog(first_fit_result.report.to_text(), self).exec()
+            report_dialog = FitReportDialog(
+                first_fit_result.report.to_text(), self,
+                report_sheet_name=report_export_dataset.name if report_export_dataset else "",
+            )
+            if report_export_dataset is not None:
+                report_dialog.export_requested.connect(lambda: self._export_dataset(report_export_dataset))
+                report_dialog.open_sheet_requested.connect(lambda: self._refresh_dataset_list(report_export_dataset.name))
+            try:
+                report_dialog.exec()
+            finally:
+                report_dialog.deleteLater()
 
         if failure_rows:
             detail = "\n".join(
@@ -9044,6 +8760,14 @@ class MainWindow(QMainWindow):
             )
         return comment
 
+    def _record_fit_report_row(self, source_sheet, requested_y_column, y_column, output_fit_sheet, result) -> dict:
+        from core.api_summary_api import fit_report_row
+        parameters = dict(source_sheet=source_sheet, requested_y_column=requested_y_column,
+                          y_column=y_column, output_fit_sheet=output_fit_sheet, result=result)
+        value = fit_report_row(**parameters)
+        self._macros.api_summary_row("fit_report", parameters, value)
+        return value
+
     def _fit_batch_summary_row(
         self,
         requested_x_column: str,
@@ -9067,72 +8791,32 @@ class MainWindow(QMainWindow):
         source_sheet: str = "",
         dialog: FitDialog | None = None,
     ) -> dict[str, object]:
-        """Return one curve-fit batch summary row."""
-        report = result.report if result is not None else None
-        method_key = report.method if report is not None else (dialog.method() if dialog is not None else "")
-        model_key = report.model_key if report is not None else (dialog.model_key() if dialog is not None else "")
-        row: dict[str, object] = {
-            "source_sheet": source_dataset.name if source_dataset is not None else source_sheet,
-            "operation": "Curve Fit",
-            "column_binding": self._batch_column_binding_label(column_binding_mode),
-            "requested_x_column": requested_x_column,
-            "x_column": x_column or "",
-            "requested_y_column": requested_y_column,
-            "y_column": y_column or "",
-            "requested_x_weight_column": requested_x_weight_column or "",
-            "x_weight_column": x_weight_column or "",
-            "requested_y_weight_column": requested_weight_column or "",
-            "y_weight_column": weight_column or "",
-            "weight_mode": report.weight_mode if report is not None else (dialog.weight_mode() if dialog else ""),
-            "absolute_sigma": report.absolute_sigma if report is not None else (dialog.absolute_sigma() if dialog else False),
-            "model_key": model_key,
-            "model_name": report.model_name if report is not None else model_key,
-            "method": method_key,
-            "method_label": FIT_METHODS.get(method_key, method_key),
-            "fit_points": dialog.fit_points() if dialog is not None else (len(result.fit_frame) if result is not None else 0),
-            "confidence_level": (
-                report.confidence_level
-                if report is not None
-                else (dialog.confidence_level() if dialog is not None and dialog.include_confidence_band() else 0.0)
-            ),
-            "requested_fit_sheet": requested_fit_sheet,
-            "output_fit_sheet": output_fit_sheet,
-            "requested_residual_sheet": requested_residual_sheet,
-            "output_residual_sheet": output_residual_sheet,
-            "status": status,
-            "error": error,
-            "elapsed_seconds": round(float(elapsed_seconds), 6),
-            "point_count": report.point_count if report is not None else 0,
-            "r_squared": report.r_squared if report is not None else np.nan,
-            "adjusted_r_squared": report.adjusted_r_squared if report is not None else np.nan,
-            "rmse": report.rmse if report is not None else np.nan,
-            "mae": report.mae if report is not None else np.nan,
-            "residual_mean": report.residual_mean if report is not None else np.nan,
-            "residual_std": report.residual_std if report is not None else np.nan,
-            "covariance_available": False,
-            "warnings": "",
+        parameters = {
+            'requested_x_column': requested_x_column,
+            'x_column': x_column,
+            'requested_y_column': requested_y_column,
+            'y_column': y_column,
+            'requested_x_weight_column': requested_x_weight_column,
+            'x_weight_column': x_weight_column,
+            'requested_weight_column': requested_weight_column,
+            'weight_column': weight_column,
+            'column_binding_mode': column_binding_mode,
+            'requested_fit_sheet': requested_fit_sheet,
+            'output_fit_sheet': output_fit_sheet,
+            'requested_residual_sheet': requested_residual_sheet,
+            'output_residual_sheet': output_residual_sheet,
+            'status': status,
+            'error': error,
+            'elapsed_seconds': elapsed_seconds,
+            'result': result,
+            'source_dataset': source_dataset,
+            'source_sheet': source_sheet,
+            'dialog': dialog,
         }
-        if report is None:
-            return row
-
-        covariance = np.asarray(report.covariance, dtype=float)
-        row["covariance_available"] = bool(covariance.size and np.isfinite(covariance).any())
-        row["warnings"] = "; ".join(report.warnings)
-        for name, value, standard_error, lower, upper, fixed in zip(
-            report.parameter_names,
-            report.parameters,
-            report.standard_errors,
-            report.lower_bounds,
-            report.upper_bounds,
-            report.fixed_parameters,
-        ):
-            key = self._fit_summary_key(name)
-            row[f"param_{key}"] = value
-            row[f"stderr_{key}"] = standard_error
-            row[f"lower_{key}"] = lower
-            row[f"upper_{key}"] = upper
-            row[f"fixed_{key}"] = fixed
-        return row
+        value = OperationSummaries()._fit_batch_summary_row(**parameters)
+        if hasattr(self, "_macros"):
+            self._macros.api_summary_row('_fit_batch_summary_row', parameters, value)
+        return value
 
     def _fit_parameter_correlation_rows(
         self,
@@ -9145,56 +8829,20 @@ class MainWindow(QMainWindow):
         column_binding_mode: str,
         output_fit_sheet: str,
     ) -> list[dict[str, object]]:
-        """Return long-format covariance/correlation rows for one fit report."""
-        report = result.report
-        parameter_names = list(report.parameter_names)
-        covariance = np.asarray(report.covariance, dtype=float)
-        if covariance.shape != (len(parameter_names), len(parameter_names)):
-            return []
-        if not np.isfinite(covariance).any():
-            return []
-
-        variances = np.diag(covariance)
-        rows: list[dict[str, object]] = []
-        for first_index, first_name in enumerate(parameter_names):
-            for second_index in range(first_index, len(parameter_names)):
-                second_name = parameter_names[second_index]
-                covariance_value = float(covariance[first_index, second_index])
-                first_variance = float(variances[first_index])
-                second_variance = float(variances[second_index])
-                correlation = np.nan
-                if (
-                    np.isfinite(covariance_value)
-                    and np.isfinite(first_variance)
-                    and np.isfinite(second_variance)
-                    and first_variance > 0
-                    and second_variance > 0
-                ):
-                    correlation = float(covariance_value / np.sqrt(first_variance * second_variance))
-
-                rows.append(
-                    {
-                        "source_sheet": source_dataset.name,
-                        "output_fit_sheet": output_fit_sheet,
-                        "model_key": report.model_key,
-                        "model_name": report.model_name,
-                        "method": report.method,
-                        "method_label": FIT_METHODS.get(report.method, report.method),
-                        "column_binding": self._batch_column_binding_label(column_binding_mode),
-                        "requested_x_column": requested_x_column,
-                        "x_column": x_column,
-                        "requested_y_column": requested_y_column,
-                        "y_column": y_column,
-                        "parameter_1": first_name,
-                        "parameter_2": second_name,
-                        "parameter_1_index": first_index,
-                        "parameter_2_index": second_index,
-                        "pair_type": "variance" if first_index == second_index else "cross",
-                        "covariance": covariance_value,
-                        "correlation": correlation,
-                    }
-                )
-        return rows
+        parameters = {
+            'source_dataset': source_dataset,
+            'result': result,
+            'requested_x_column': requested_x_column,
+            'x_column': x_column,
+            'requested_y_column': requested_y_column,
+            'y_column': y_column,
+            'column_binding_mode': column_binding_mode,
+            'output_fit_sheet': output_fit_sheet,
+        }
+        value = OperationSummaries()._fit_parameter_correlation_rows(**parameters)
+        if hasattr(self, "_macros"):
+            self._macros.api_summary_row('_fit_parameter_correlation_rows', parameters, value)
+        return value
 
     @staticmethod
     def _fit_summary_key(parameter_name: str) -> str:
@@ -10444,35 +10092,8 @@ class MainWindow(QMainWindow):
         coordinate_columns: list[str],
         value_column: str,
     ) -> None:
-        """Copy useful source metadata onto interpolation result columns."""
-        for column_name in coordinate_columns:
-            if column_name not in result_dataset.frame.columns:
-                continue
-            source_metadata = source_dataset.column_metadata.get(column_name)
-            if source_metadata is None:
-                continue
-            result_dataset.column_metadata[column_name] = ColumnMetadata(
-                role=source_metadata.role,
-                unit=source_metadata.unit,
-                long_name=source_metadata.long_name,
-                comment=source_metadata.comment,
-                value_type=source_metadata.value_type,
-                display_precision=source_metadata.display_precision,
-            )
-
-        prediction_column = f"{value_column}_interpolated"
-        if prediction_column not in result_dataset.frame.columns:
-            return
-        value_metadata = source_dataset.column_metadata.get(value_column, ColumnMetadata())
-        result_dataset.column_metadata[prediction_column] = ColumnMetadata(
-            role=value_metadata.role or ("y" if len(coordinate_columns) == 1 else "z"),
-            unit=value_metadata.unit,
-            long_name=f"Interpolated {value_metadata.long_name or value_column}",
-            comment=value_metadata.comment,
-            value_type=value_metadata.value_type,
-            display_precision=value_metadata.display_precision,
-        )
-        result_dataset.sync_column_metadata_attrs()
+        from core.import_metadata import apply_interpolation_metadata
+        apply_interpolation_metadata(source_dataset, result_dataset, coordinate_columns, value_column)
 
     def _selected_dataset_columns(self) -> list[int]:
         """Return sorted column indexes touched by the table selection."""
@@ -10515,17 +10136,20 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("JASC Data Processor")
         else:
             self.setWindowTitle(f"JASC Data Processor - {self._project_path.name}")
-        if self._plot_tab_widget.is_dirty():
+        if self._plot_tab_widget.is_dirty() or self._macro_outputs_dirty:
             self.setWindowTitle(self.windowTitle() + " *")
 
     def _confirm_project_plot_changes(self) -> bool:
         """One project-wide save decision; cancelling keeps documents and workers alive."""
-        if not self._plot_tab_widget.is_dirty():
+        if not self._macros.confirm_saved():
+            return False
+        if not (self._plot_tab_widget.is_dirty() or self._macro_outputs_dirty):
             return True
         prompt = QMessageBox(self)
-        prompt.setWindowTitle("Unsaved Plot Changes")
+        prompt.setWindowTitle("Unsaved Project Changes" if self._macro_outputs_dirty else "Unsaved Plot Changes")
         prompt.setText("Save changes to the project before closing or replacing it?")
-        prompt.setInformativeText("All plots, including closed tabs and pending editor fields, will be saved together.")
+        prompt.setInformativeText("Generated macro worksheets and all plots will be saved together." if self._macro_outputs_dirty
+                                  else "All plots, including closed tabs and pending editor fields, will be saved together.")
         prompt.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
         prompt.setDefaultButton(QMessageBox.Save)
         choice = prompt.exec()
@@ -10533,12 +10157,12 @@ class MainWindow(QMainWindow):
             return False
         if choice == QMessageBox.Save:
             self._save_project()
-            return not self._plot_tab_widget.is_dirty()
+            return not (self._plot_tab_widget.is_dirty() or self._macro_outputs_dirty)
         return choice == QMessageBox.Discard
 
     def _open_project(self) -> None:
         """Open a plain or encrypted JASC project, replacing the workspace."""
-        had_plot_changes = self._plot_tab_widget.is_dirty()
+        had_plot_changes = self._plot_tab_widget.is_dirty() or self._macro_outputs_dirty
         if not self._confirm_project_plot_changes():
             return
         if self._has_project_content() and not had_plot_changes:
@@ -10611,6 +10235,8 @@ class MainWindow(QMainWindow):
             dialog.reject()
         self._large_data_view.set_source(None)
         self._workspace = loaded_workspace
+        self._macros.workspace_replaced()
+        self._macro_outputs_dirty = False
         self._project_path = Path(file_name)
         self._project_password = password
         self._project_signing_identity = None
@@ -10677,7 +10303,9 @@ class MainWindow(QMainWindow):
                 password=password,
                 signing_identity=signing_identity,
             )
+            self._macros.api_project_saved(self._project_path, protected=password is not None or signing_identity is not None)
             self._plot_tab_widget.mark_saved()
+            self._macro_outputs_dirty = False
             self._project_password = password
             self._project_signing_identity = signing_identity
             if signing_identity is not None:
@@ -10745,7 +10373,9 @@ class MainWindow(QMainWindow):
 
         try:
             project_io.save_project(self._workspace, path, password=password)
+            self._macros.api_project_saved(path, protected=password is not None)
             self._plot_tab_widget.mark_saved()
+            self._macro_outputs_dirty = False
             self._project_path = path
             self._project_password = password
             self._project_signing_identity = None
@@ -10818,7 +10448,9 @@ class MainWindow(QMainWindow):
                 password=password,
                 signing_identity=signing_identity,
             )
+            self._macros.api_project_saved(path, protected=True)
             self._plot_tab_widget.mark_saved()
+            self._macro_outputs_dirty = False
         except Exception as exc:
             QMessageBox.critical(self, "Signed Save Failed", str(exc))
             return
@@ -11076,7 +10708,7 @@ class MainWindow(QMainWindow):
 
     def _close_project(self) -> None:
         """Clear the current project without closing the application."""
-        had_plot_changes = self._plot_tab_widget.is_dirty()
+        had_plot_changes = self._plot_tab_widget.is_dirty() or self._macro_outputs_dirty
         if not self._confirm_project_plot_changes():
             return
         if not self._has_project_content():
@@ -11100,6 +10732,8 @@ class MainWindow(QMainWindow):
         self._large_data_view.set_source(None)
         self._workspace = Workspace()
         self._project_path = None
+        self._macros.workspace_replaced()
+        self._macro_outputs_dirty = False
         self._project_password = None
         self._project_signing_identity = None
         self._project_signature_fingerprint = None
@@ -11276,7 +10910,9 @@ class MainWindow(QMainWindow):
         name = self._selected_spectral_analysis_name()
         if not name:
             return
+        source = self._workspace.get_spectral_analysis(name)
         duplicate = self._workspace.duplicate_spectral_analysis(name)
+        self._macros.api_duplicate_analysis(source, duplicate)
         self._refresh_spectral_analysis_list(duplicate.name)
         self._show_spectral_analysis(duplicate)
         self._update_dataset_summary()
@@ -11296,7 +10932,9 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
         current = self._spectral_analysis_viewer.analysis
+        source = self._workspace.get_spectral_analysis(name)
         self._workspace.remove_spectral_analysis(name)
+        self._macros.api_delete_analysis(source)
         if current is not None and current.name == name:
             self._hide_spectral_analysis_tab()
         self._refresh_spectral_analysis_list()
@@ -11345,6 +10983,7 @@ class MainWindow(QMainWindow):
                 output,
                 f"Exported from spectral analysis {analysis.name}; source={analysis.source_dataset}",
             )
+            self._macros.api_analysis_table(analysis, key, output)
             created.append(output.name)
         self._refresh_dataset_list(created[-1])
         self.statusBar().showMessage(
@@ -11617,6 +11256,7 @@ class MainWindow(QMainWindow):
         if ok and new_name and new_name != old_name:
             try:
                 final_name = self._workspace.rename_dataset(old_name, new_name)
+                self._macros.api_renamed_sheet(self._workspace.get_dataset(final_name), old_name)
                 self._plot_tab_widget.dataset_renamed(old_name, final_name)
                 self._refresh_plot_list()
                 self._refresh_dataset_list(final_name)
@@ -11628,6 +11268,7 @@ class MainWindow(QMainWindow):
         """Duplicate a named worksheet and open the independent copy."""
         try:
             duplicate = self._workspace.duplicate_dataset(name)
+            self._macros.api_duplicate_sheet(self._workspace.get_dataset(name), duplicate)
         except Exception as exc:
             QMessageBox.critical(self, "Duplicate Sheet Failed", str(exc))
             return
@@ -11663,7 +11304,9 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.Yes:
             try:
+                removed = self._workspace.get_dataset(name)
                 self._workspace.remove_dataset(name)
+                self._macros.api_deleted_sheet(removed)
                 self._plot_tab_widget.dataset_removed(name)
                 self._refresh_dataset_list()
                 self._refresh_plot_list()

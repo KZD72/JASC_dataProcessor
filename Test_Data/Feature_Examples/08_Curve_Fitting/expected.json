@@ -1,0 +1,16 @@
+{
+  "custom_expression": "a*x+b",
+  "decay_formula": "6*exp(-x/2)+0.4",
+  "gaussian_parameters": [
+    8,
+    5,
+    0.7,
+    0.5
+  ],
+  "linear_parameters": [
+    2.5,
+    1.2
+  ],
+  "logistic_formula": "5/(1+exp(-1.5*(x-5)))",
+  "no_measurement_noise": true
+}

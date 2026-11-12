@@ -1,0 +1,52 @@
+{
+  "heatmap_center": 1.0,
+  "heatmap_color_limits": [
+    0,
+    1
+  ],
+  "heatmap_formula": "exp(-x*x-y*y)",
+  "image_size_pixels": [
+    960,
+    600
+  ],
+  "linear_check": {
+    "suggested_y_tolerance": 0.2,
+    "x": 5,
+    "y": 13
+  },
+  "linear_formula": "2*x+3",
+  "linear_x_reference_pixels": [
+    [
+      115.2,
+      510
+    ],
+    [
+      864,
+      510
+    ]
+  ],
+  "linear_x_reference_values": [
+    0,
+    10
+  ],
+  "linear_y_reference_pixels": [
+    [
+      115.2,
+      510
+    ],
+    [
+      115.2,
+      60
+    ]
+  ],
+  "linear_y_reference_values": [
+    0,
+    25
+  ],
+  "log_check": {
+    "x": 10,
+    "y": 9.486832980505
+  },
+  "log_formula": "3*sqrt(x)",
+  "note": "Raster picking and colour interpolation have pixel/anti-aliasing uncertainty; reference files are ground truth, not extracted observations."
+}

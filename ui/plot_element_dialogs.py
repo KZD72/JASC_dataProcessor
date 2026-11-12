@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QColorDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -25,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.plot_settings import AxisSettings, LegendSettings
+from ui.plot_colors import choose_plot_color, qt_plot_color
 
 
 _LEGEND_LOCATIONS: tuple[tuple[str, str], ...] = (
@@ -61,13 +61,6 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     ("Star", "*"),
     ("Dot", "."),
 )
-_MATPLOTLIB_COLOURS: dict[str, str] = {
-    "tab:blue": "#1f77b4",
-    "tab:orange": "#ff7f0e",
-    "tab:green": "#2ca02c",
-    "tab:red": "#d62728",
-    "tab:purple": "#9467bd",
-}
 
 
 class SurfacePlotDetailsDialog(QDialog):
@@ -403,8 +396,7 @@ class PlotSeriesAppearanceDialog(QDialog):
 
     def _choose_colour(self) -> None:
         """Open the platform colour chooser and retain a Matplotlib-compatible hex value."""
-        initial = QColor(_MATPLOTLIB_COLOURS.get(self._colour, self._colour or "#1f77b4"))
-        colour = QColorDialog.getColor(initial, self, "Choose Series Colour")
+        colour = choose_plot_color(self._colour, self)
         if colour.isValid():
             self._colour = colour.name(QColor.HexRgb)
             self._update_colour_button()
@@ -420,7 +412,7 @@ class PlotSeriesAppearanceDialog(QDialog):
             self._colour_button.setText("Automatic (style cycle)")
             self._colour_button.setStyleSheet("")
             return
-        swatch = _MATPLOTLIB_COLOURS.get(self._colour, self._colour)
+        swatch = qt_plot_color(self._colour).name(QColor.HexRgb)
         from ui.theme import readable_text
         self._colour_button.setText(self._colour)
         self._colour_button.setStyleSheet(f"background-color: {swatch}; color: {readable_text(swatch)};")

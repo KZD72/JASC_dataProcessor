@@ -1,0 +1,26 @@
+{
+  "source_tests": {
+    "passed": 102,
+    "failed": 0,
+    "seconds": 54.398,
+    "log": "artifacts/plot_colors_suite.log"
+  },
+  "new_tests": 7,
+  "presets": 20,
+  "real_picker_accepted": "#13a2a7",
+  "preview": "artifacts/plot_colors_preview",
+  "pdf_pages": 72,
+  "pdf_content_pages": {
+    "20 preset colours with swatches": [
+      50
+    ],
+    "enter an HTML hex value": [
+      50
+    ],
+    "Data Location > Color": [
+      50
+    ]
+  },
+  "manual_sha256": "578b58edcc6ce8019fb1b0aa5feb4f0630deee4971119cc2fc8d169d8ba91455",
+  "exe_rebuilt": false
+}

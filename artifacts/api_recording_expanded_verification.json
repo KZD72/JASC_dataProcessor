@@ -1,0 +1,26 @@
+{
+  "verified_utc": "2026-11-10T17:18:46+00:00",
+  "status": "passed",
+  "test_command": "python -B -m unittest discover -s tests -v",
+  "test_count": 462,
+  "new_replay_tests": 17,
+  "suite_seconds": 202.982,
+  "suite_exit_code": 0,
+  "final_window_budget_check": "passed (0.779 s)",
+  "cli_example": {
+    "script": "artifacts/api_recording_preview/expanded_recording.py",
+    "starting_project": "artifacts/api_recording_preview/expanded_starting.jasc",
+    "output_project": "artifacts/api_recording_preview/expanded_replayed.jasc",
+    "exit_code": 0,
+    "worksheets": 9,
+    "plots": 1,
+    "recording_gaps": []
+  },
+  "remaining": [
+    "image-digitizer adapter",
+    "nested batch-recipe recording",
+    "internal spectral-viewer presentation adapter",
+    "in-app Python execution",
+    "full GUI/API command-dispatch migration"
+  ]
+}

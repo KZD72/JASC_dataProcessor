@@ -1,0 +1,14 @@
+{
+  "decimal_comma_x": [
+    0,
+    0.5,
+    1
+  ],
+  "intercept": 1,
+  "slope": 2,
+  "standard_rows": 6,
+  "workbook_tabs": [
+    "Measurements",
+    "Groups"
+  ]
+}

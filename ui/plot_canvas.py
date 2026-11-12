@@ -277,6 +277,7 @@ class PlotCanvas(QWidget):
     element_double_clicked = Signal(str, object)
     surface_cut_selected = Signal(float, float, float, float)
     surface_cut_cancelled = Signal()
+    figure_exported = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create the Matplotlib figure, toolbar, and empty plot placeholder."""
@@ -369,6 +370,7 @@ class PlotCanvas(QWidget):
         finally:
             self.figure.set_size_inches(*original_size, forward=False)
             self.canvas.draw_idle()
+        self.figure_exported.emit(file_name)
 
     def _export_figure_dimensions(self) -> tuple[float, float]:
         """Return total figure dimensions required by the selected export basis."""

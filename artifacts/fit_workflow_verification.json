@@ -1,0 +1,31 @@
+{
+  "source_tests": {
+    "passed": 78,
+    "failed": 0,
+    "seconds": 60.274,
+    "log": "artifacts/fit_workflow_suite.log"
+  },
+  "new_workflow_tests": 6,
+  "pdf_pages": 72,
+  "pdf_content_pages": {
+    "The Worksheet selector lists loaded editable sheets": [
+      43
+    ],
+    "Every successful fit now retains its report in the workspace": [
+      46
+    ],
+    "Open Report Sheet": [
+      46
+    ],
+    "Export Table...": [
+      46
+    ]
+  },
+  "catalog_pages": [
+    70,
+    71
+  ],
+  "manual_sha256": "744d197258aabb977dfab976680516aa8d2fbb24aecc34aac2a761d0c5bfd0b8",
+  "preview": "artifacts/fit_workflow_preview",
+  "exe_rebuilt": false
+}

@@ -1,0 +1,19 @@
+{
+  "category_fractions": [
+    0.1,
+    0.2,
+    0.3,
+    0.4
+  ],
+  "category_sum": 10,
+  "curve_rows": 101,
+  "horizontal_zero": "4-x*x",
+  "map_formula": "4-x*x-y*y",
+  "map_maximum": {
+    "x": 0,
+    "y": 0,
+    "z": 4
+  },
+  "map_rows": 441,
+  "vertical_zero": "4-y*y"
+}

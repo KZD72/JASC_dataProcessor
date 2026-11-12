@@ -12,6 +12,7 @@ from pandas.api.types import is_numeric_dtype
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 
 from core.operations import ExpressionResult, apply_column_expression
+from core.api_editing import record_edit
 from core.smart_fill import (
     SMART_FILL_MODE_AUTO,
     SMART_FILL_MODE_CATEGORY,
@@ -55,6 +56,8 @@ class DataFrameTableModel(QAbstractTableModel):
     history_warning = Signal(str)
     columns_renamed = Signal(dict)
     edit_rejected = Signal(str)
+    operation_started = Signal(object)
+    operation_finished = Signal(object, str, object, bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         """Create an empty model until a workspace dataset is attached."""
@@ -107,6 +110,7 @@ class DataFrameTableModel(QAbstractTableModel):
             self._undo_stack.pop()
             self.history_changed.emit()
 
+    @record_edit
     def undo(self) -> bool:
         """Restore the previous dataset state."""
         if self._dataset is None or not self._undo_stack:
@@ -120,6 +124,7 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return True
 
+    @record_edit
     def redo(self) -> bool:
         """Restore the next dataset state after an undo."""
         if self._dataset is None or not self._redo_stack:
@@ -162,6 +167,7 @@ class DataFrameTableModel(QAbstractTableModel):
             return self._format_display_value(value, metadata)
         return str(value)
 
+    @record_edit
     def setData(self, index: QModelIndex, value: Any, role: int = Qt.EditRole) -> bool:
         """Write a user edit back into the backing DataFrame."""
         if not index.isValid() or self._dataset is None or role != Qt.EditRole:
@@ -237,6 +243,7 @@ class DataFrameTableModel(QAbstractTableModel):
             return Qt.NoItemFlags
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable
 
+    @record_edit
     def delete_rows(self, rows: list[int]) -> int:
         """Delete row positions from the current dataset and return the count removed."""
         if self._dataset is None:
@@ -254,6 +261,7 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return len(valid_rows)
 
+    @record_edit
     def clear_cells(self, ranges: list[tuple[int, int, int, int]]) -> int:
         """Clear values inside compact ``(top, left, bottom, right)`` ranges.
 
@@ -328,6 +336,7 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return changed_cells
 
+    @record_edit
     def resize_sheet(self, row_count: int, column_count: int) -> tuple[int, int]:
         """Resize the worksheet to exact row and column counts in one undo step."""
         if self._dataset is None:
@@ -372,6 +381,7 @@ class DataFrameTableModel(QAbstractTableModel):
             self.history_changed.emit()
         return (row_count, column_count)
 
+    @record_edit
     def add_row(self) -> None:
         """Add an empty row to the end of the current dataset."""
         if self._dataset is None:
@@ -379,6 +389,7 @@ class DataFrameTableModel(QAbstractTableModel):
 
         self.insert_row(len(self._dataset.frame))
 
+    @record_edit
     def insert_row(self, position: int) -> int:
         """Insert an empty row before the requested row position and return its index."""
         if self._dataset is None:
@@ -398,6 +409,7 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return insert_position
 
+    @record_edit
     def paste_block(
         self,
         start_row: int,
@@ -485,6 +497,7 @@ class DataFrameTableModel(QAbstractTableModel):
             self.endResetModel()
             self.history_changed.emit()
 
+    @record_edit
     def insert_columns(
         self,
         position: int,
@@ -581,6 +594,7 @@ class DataFrameTableModel(QAbstractTableModel):
             self.endResetModel()
             self.history_changed.emit()
 
+    @record_edit
     def delete_columns(self, columns: list[int]) -> list[str]:
         """Delete column positions from the current dataset and return removed names."""
         if self._dataset is None:
@@ -603,6 +617,7 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return deleted_names
 
+    @record_edit
     def add_empty_column(self, column_name: str) -> str:
         """Add an empty column to the current dataset and return its final unique name."""
         if self._dataset is None:
@@ -610,6 +625,7 @@ class DataFrameTableModel(QAbstractTableModel):
 
         return self.insert_empty_column(len(self._dataset.frame.columns), column_name)
 
+    @record_edit
     def insert_empty_column(self, position: int, column_name: str) -> str:
         """Insert an empty column before the requested position and return its final name."""
         if self._dataset is None:
@@ -628,6 +644,7 @@ class DataFrameTableModel(QAbstractTableModel):
         self.history_changed.emit()
         return unique_name
 
+    @record_edit
     def fill_range(
         self,
         target_column: str,
@@ -703,6 +720,7 @@ class DataFrameTableModel(QAbstractTableModel):
             self.endResetModel()
             self.history_changed.emit()
 
+    @record_edit
     def smart_fill_selection(
         self,
         start_row: int,
@@ -853,6 +871,7 @@ class DataFrameTableModel(QAbstractTableModel):
             self.endResetModel()
             self.history_changed.emit()
 
+    @record_edit
     def set_column_metadata(self, metadata: dict[str, ColumnMetadata]) -> None:
         """Replace metadata for the current dataset with undo/redo support."""
         if self._dataset is None:
@@ -864,6 +883,7 @@ class DataFrameTableModel(QAbstractTableModel):
             self.headerDataChanged.emit(Qt.Horizontal, 0, self.columnCount() - 1)
         self.history_changed.emit()
 
+    @record_edit
     def apply_column_metadata(
         self,
         column_names: list[str],
