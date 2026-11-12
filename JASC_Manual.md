@@ -1850,7 +1850,24 @@ Automated bundle tests remove Python from `PATH`, set unusable Python environmen
 paths, exercise both executable entry points, perform a fit/figure export and
 verify that injected Python does not create a marker file. This is distinct from
 validation on a fresh Windows VM, which remains a release check. Installer,
-code-signing and cross-platform distributions remain separate packaging work.
+code-signing and native self-contained Linux distributions remain separate packaging work.
+
+The Python-based Linux release is a self-extracting `JASC-Linux-0.1.0.sh` installer.
+Run `sh JASC-Linux-0.1.0.sh` on Linux. It verifies the included application and
+examples, creates an isolated environment, downloads Python dependencies, and runs
+an offscreen GUI check. Successful installation creates `JASC` and `JASC-cli`
+launchers in `~/.local/opt/JASC-0.1.0`. No root access or system-Python changes are
+needed. `--install-dir PATH` chooses a new directory; existing directories are
+never overwritten. After launch, normal macro CLI arguments are supported.
+
+Linux prerequisites are Python 3.10-3.12 with venv/pip, internet, and the desktop
+libraries required by Qt (including X11/xcb/OpenGL/font libraries where applicable).
+The Python range preserves the application's NumPy-below-2 requirement and its
+available binary wheels. This is a source/dependency installer, not a frozen
+Linux executable or a guarantee for every distribution, CPU or libc. Use
+`JASC_PYTHON=/path/to/python3.12 sh JASC-Linux-0.1.0.sh` to select an interpreter.
+`--verify` checks the package without installation; `--extract-only PATH` extracts
+sources without downloading dependencies. `LINUX_INSTALL.txt` includes details.
 
 During development, regenerate the PyInstaller executable package only when the
 user explicitly requests a build or rebuild. Ordinary implementation, fixes,

@@ -1,0 +1,8 @@
+test_both_entry_points_reject_code_injection_without_a_marker_file (tests.test_standalone_scripts.StandaloneScriptTests.test_both_entry_points_reject_code_injection_without_a_marker_file) ... ok
+test_both_entry_points_replay_data_and_export_a_real_figure (tests.test_standalone_scripts.StandaloneScriptTests.test_both_entry_points_replay_data_and_export_a_real_figure) ... ok
+test_gui_bundle_constructs_and_closes_without_external_python (tests.test_standalone_scripts.StandaloneScriptTests.test_gui_bundle_constructs_and_closes_without_external_python) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 9.512s
+
+OK

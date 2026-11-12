@@ -1,0 +1,81 @@
+JASC PYTHON-BASED LINUX INSTALLER
+================================
+
+RUN THE RELEASE
+---------------
+sh JASC-Linux-0.1.0.sh
+
+Default location: ~/.local/opt/JASC-0.1.0
+Launch the GUI: ~/.local/opt/JASC-0.1.0/JASC
+Run a macro: ~/.local/opt/JASC-0.1.0/JASC-cli --run-script recording.py --input-dir measurements --output-dir results
+
+An alternative new directory can be selected:
+sh JASC-Linux-0.1.0.sh --install-dir "$HOME/Applications/JASC-0.1.0"
+
+To select a Python interpreter explicitly:
+JASC_PYTHON=/path/to/python3.12 sh JASC-Linux-0.1.0.sh
+
+REQUIREMENTS AND COMPATIBILITY
+-------------------------------
+- Linux with Python 3.10, 3.11 or 3.12, including venv/ensurepip support.
+- Internet access to download packages from your configured Python package index.
+- Native binary wheels for your CPU/libc and Qt desktop libraries on the host.
+- A desktop session for interactive use; the installer smoke check is offscreen.
+
+The NumPy <2 application constraint is retained. Python 3.13+ pip installations
+are rejected instead of attempting an unsupported NumPy source build. The builder
+and --verify/--extract-only modes can run with newer Python because they do not
+install or import the scientific dependencies.
+
+This .sh is NOT a frozen Linux binary. Its payload is application source plus
+manual/examples; dependencies are resolved for the target during installation.
+The script does not install OS packages, use sudo, modify system Python, add PATH
+entries, or write desktop-menu files. Launchers live inside the selected folder.
+Existing install directories are refused; choose a different version/location.
+
+No package can guarantee all Linux distributions and architectures. Very old
+glibc systems, musl/Alpine systems, uncommon CPUs, or systems without compatible
+wheels/Qt libraries may not be supported. Pip uses binary wheels only so missing
+platform support fails clearly rather than compiling large libraries implicitly.
+Qt's platform libraries are documented at:
+https://doc.qt.io/qt-6/linux-requirements.html
+For X11, common missing components include libxcb-cursor, libxkbcommon-x11,
+libGL/OpenGL and Fontconfig; install the equivalents for your distribution.
+
+WHAT INSTALLATION DOES
+-----------------------
+1. Check the embedded archive SHA-256 and its member manifest before extraction.
+2. Verify Linux/Python prerequisites and require a fresh install directory.
+3. Extract only the packaged application, documentation and curated examples.
+4. Create venv/ and install requirements.txt there without system-wide changes.
+5. Run main.py --self-test; create JASC/JASC-cli only after it succeeds.
+6. Retain install.log and installed_requirements.txt for diagnostics.
+
+Launchers preserve quoted arguments, ignore PYTHONHOME/PYTHONPATH, and use the
+installed environment. Keep the installation at its original path; virtual
+environments are not relocatable. Make a new installation to change locations.
+
+Trouble: read install.log. Failed installations are retained for inspection and
+have no successful launcher. Resolve Python/desktop/library/network issues and
+retry in a NEW directory. No unreviewed recursive cleanup is performed.
+The embedded checksum detects corruption; it is not an author signature.
+
+OFFLINE INSPECTION
+------------------
+sh JASC-Linux-0.1.0.sh --verify
+sh JASC-Linux-0.1.0.sh --extract-only ./JASC-sources
+sh JASC-Linux-0.1.0.sh --help
+
+Verify/extract do not download dependencies or require Linux desktop libraries.
+The extracted app includes examples under Test_Data. Developer regression test
+commands in the guides require a full repository checkout; tests are not shipped.
+
+BUILD AND VERIFY FROM A CHECKOUT
+--------------------------------
+python -B build_linux.py
+python -B -m unittest tests.test_linux_package
+
+Build output: artifacts/releases/JASC-Linux-0.1.0.sh plus its .sha256 file.
+The builder works on Windows because it packages source rather than Linux ELF
+binaries. A self-contained binary build would require a native Linux build host.
+Only rebuild release artifacts when the user requests a release/build.

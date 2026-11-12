@@ -104,6 +104,18 @@ separate Python installation. Both support `--run-script` with the same argument
 Run the opt-in bundle tests with `JASC_TEST_BUNDLE` set to that folder. A fresh
 Windows VM/installer/signing audit remains a distribution follow-up.
 
+For the Python-based Linux release, run `python build_linux.py` to create
+`artifacts/releases/JASC-Linux-0.1.0.sh`. On the target machine use
+`sh JASC-Linux-0.1.0.sh`: it verifies and extracts the included application,
+creates a private virtual environment, downloads dependencies and checks the GUI
+before creating `JASC` and `JASC-cli` launchers in `~/.local/opt/JASC-0.1.0`.
+This installer needs Python 3.10-3.12 with venv/pip, internet and compatible Qt
+desktop libraries. It does not require root or change the system Python.
+Use `--install-dir PATH` for a different new directory, `--verify` for checksum
+verification only, or `--extract-only PATH` for offline source extraction.
+See [LINUX_INSTALL.txt](LINUX_INSTALL.txt) for requirements and troubleshooting;
+Linux installation is not a guarantee of support on every distribution/CPU.
+
 For the earlier batch-recipe workflow, choose **Macros > Record Macro**, import a representative file or
 use the selected sheet, apply **Smoothing** and **Curve Fit** to one Y column,
 and create/style ordinary XY plots. Choose **Stop Recording**, then **Review /
